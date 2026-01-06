@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+langchain-core
+langchain-google-genai
+langgraph
+pandas
+numpy
+chardet
+requests
+beautifulsoup4
+lxml
+matplotlib
