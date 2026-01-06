@@ -11,6 +11,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logging.getLogger().setLevel(logging.INFO)
 
 app = FastAPI(
     title="WFP Data Tools API",
