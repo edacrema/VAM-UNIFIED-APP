@@ -1,10 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
 from app.services.mfi_validator.router import router as mfi_validator_router
 from app.services.price_validator.router import router as price_validator_router
 from app.services.market_monitor.router import router as market_monitor_router
 from app.services.mfi_drafter.router import router as mfi_drafter_router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 app = FastAPI(
     title="WFP Data Tools API",

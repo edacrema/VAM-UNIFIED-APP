@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from typing import Optional
 import logging
+import traceback
 
 from .graph import run_report_generation, AVAILABLE_MODULES
 from .schemas import (
@@ -107,12 +108,16 @@ async def generate_market_monitor_async(
         "status": "pending",
         "current_node": None,
         "progress_pct": 0,
-        "warnings": []
+        "warnings": [],
+        "error": None,
+        "traceback": None,
     }
     
     async def run_in_background():
         try:
             _report_status[run_id]["status"] = "running"
+            _report_status[run_id]["error"] = None
+            _report_status[run_id]["traceback"] = None
             
             admin1_list = input_data.admin1_list or [
                 f"{input_data.country} North", 
@@ -139,9 +144,14 @@ async def generate_market_monitor_async(
             }
             
         except Exception as e:
+            tb_str = traceback.format_exc()
+            logger.exception(f"Report generation failed for {run_id}: {e}")
+            current_node = _report_status.get(run_id, {}).get("current_node")
             _report_status[run_id] = {
                 "status": "failed",
+                "current_node": current_node,
                 "error": str(e),
+                "traceback": tb_str,
                 "progress_pct": 0,
                 "warnings": []
             }
@@ -166,7 +176,9 @@ async def get_report_status(run_id: str):
         status=status.get("status", "unknown"),
         current_node=status.get("current_node"),
         progress_pct=status.get("progress_pct", 0),
-        warnings=status.get("warnings", [])
+        warnings=status.get("warnings", []),
+        error=status.get("error"),
+        traceback=status.get("traceback"),
     )
 
 

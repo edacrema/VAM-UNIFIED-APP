@@ -151,3 +151,5 @@ class ReportStatusOutput(BaseModel):
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = []
+    error: Optional[str] = None
+    traceback: Optional[str] = None
