@@ -834,10 +834,15 @@ Return JSON: {{"HIGHLIGHTS": "The complete formatted text block"}}"""
     
     sections = state.get("report_draft_sections", {})
     sections["HIGHLIGHTS"] = highlights
+
+    correction_attempts = state.get("correction_attempts", 0)
+    if state.get("skeptic_flags"):
+        correction_attempts += 1
     
     return {
         "report_draft_sections": sections,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "correction_attempts": correction_attempts,
         "current_node": "highlights_drafter"
     }
 
