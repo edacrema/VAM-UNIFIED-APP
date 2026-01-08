@@ -1,7 +1,7 @@
 """
 Market Monitor - Router
 =======================
-Endpoint FastAPI per il servizio Market Monitor.
+FastAPI endpoints for the Market Monitor service.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -15,6 +15,14 @@ from .schemas import (
     GenerateReportOutput,
     ReportStatusOutput
 )
+from app.shared.async_runs import (
+    create_run,
+    get_run,
+    set_run_completed,
+    set_run_failed,
+    update_run,
+    update_run_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,32 +35,32 @@ _report_status: dict = {}
 @router.post("/generate", response_model=GenerateReportOutput)
 async def generate_market_monitor(input_data: GenerateReportInput):
     """
-    Genera un Market Monitor Report completo.
-    
-    Il processo include:
-    1. Data Agent: Recupera/genera dati di prezzo (mock o API)
-    2. Graph Designer: Crea visualizzazioni
-    3. News Retrieval: Recupera notizie contestuali
-    4. Event Mapper: Estrae eventi chiave
-    5. Trend Analyst: Analizza trend di mercato
-    6. Module Orchestrator: Esegue moduli opzionali (es. exchange rate)
-    7. Highlights Drafter: Genera sezione highlights
-    8. Narrative Drafter: Genera sezioni narrative
-    9. Red Team: Quality assurance con possibile loop di correzione
-    
+    Generates a full Market Monitor report.
+
+    The process includes:
+    1. Data Agent: Retrieves/generates price data (mock or API)
+    2. Graph Designer: Creates visualizations
+    3. News Retrieval: Retrieves contextual news
+    4. Event Mapper: Extracts key events
+    5. Trend Analyst: Analyzes market trends
+    6. Module Orchestrator: Runs optional modules (e.g., exchange rate)
+    7. Highlights Drafter: Drafts the highlights section
+    8. Narrative Drafter: Drafts narrative sections
+    9. Red Team: Quality assurance with possible correction loop
+
     Returns:
-        GenerateReportOutput con tutte le sezioni del report
+        GenerateReportOutput with all report sections
     """
     try:
         logger.info(f"Starting report generation for {input_data.country} - {input_data.time_period}")
         
-        # Se admin1_list vuota, usa default
+        # If admin1_list is empty, use default
         admin1_list = input_data.admin1_list
         if not admin1_list:
             admin1_list = [f"{input_data.country} North", f"{input_data.country} South", 
                           f"{input_data.country} Central"]
         
-        # Esegui generazione
+        # Run generation
         result = run_report_generation(
             country=input_data.country,
             time_period=input_data.time_period,
@@ -64,7 +72,7 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             use_mock_data=input_data.use_mock_data
         )
         
-        # Costruisci output
+        # Build output
         output = GenerateReportOutput(
             run_id=result.get("run_id", "unknown"),
             country=input_data.country,
@@ -95,35 +103,45 @@ async def generate_market_monitor_async(
     background_tasks: BackgroundTasks
 ):
     """
-    Avvia generazione report in background.
-    Utile per report che richiedono molto tempo.
-    
+    Starts report generation in the background.
+    Useful for reports that take a long time.
+
     Returns:
-        run_id per polling dello status
+        run_id for polling status
     """
     import uuid
     run_id = f"run_{uuid.uuid4().hex[:8]}"
-    
-    _report_status[run_id] = {
-        "status": "pending",
-        "current_node": None,
-        "progress_pct": 0,
-        "warnings": [],
-        "error": None,
-        "traceback": None,
+
+    create_run(run_id)
+
+    progress_map = {
+        "data_agent": 10,
+        "graph_designer": 20,
+        "news_retrieval": 30,
+        "event_mapper": 40,
+        "trend_analyst": 55,
+        "module_orchestrator": 65,
+        "highlights_drafter": 75,
+        "narrative_drafter": 85,
+        "red_team": 95,
     }
     
-    async def run_in_background():
+    def run_in_background():
         try:
-            _report_status[run_id]["status"] = "running"
-            _report_status[run_id]["error"] = None
-            _report_status[run_id]["traceback"] = None
+            update_run(run_id, status="running", error=None, traceback=None)
             
             admin1_list = input_data.admin1_list or [
                 f"{input_data.country} North", 
                 f"{input_data.country} South"
             ]
             
+            def on_step(node_name: str, _state: dict):
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
+
             result = run_report_generation(
                 country=input_data.country,
                 time_period=input_data.time_period,
@@ -132,29 +150,19 @@ async def generate_market_monitor_async(
                 currency_code=input_data.currency_code,
                 enabled_modules=input_data.enabled_modules,
                 previous_report_text=input_data.previous_report_text,
-                use_mock_data=input_data.use_mock_data
+                use_mock_data=input_data.use_mock_data,
+                on_step=on_step
             )
-            
-            _report_status[run_id] = {
-                "status": "completed",
-                "current_node": "END",
-                "progress_pct": 100,
-                "result": result,
-                "warnings": result.get("warnings", [])
-            }
+
+            update_run(run_id, warnings=result.get("warnings", []))
+            set_run_completed(run_id, result=result)
             
         except Exception as e:
             tb_str = traceback.format_exc()
             logger.exception(f"Report generation failed for {run_id}: {e}")
-            current_node = _report_status.get(run_id, {}).get("current_node")
-            _report_status[run_id] = {
-                "status": "failed",
-                "current_node": current_node,
-                "error": str(e),
-                "traceback": tb_str,
-                "progress_pct": 0,
-                "warnings": []
-            }
+
+            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
     
     background_tasks.add_task(run_in_background)
     
@@ -164,41 +172,39 @@ async def generate_market_monitor_async(
 @router.get("/status/{run_id}", response_model=ReportStatusOutput)
 async def get_report_status(run_id: str):
     """
-    Controlla lo status di un report in generazione.
+    Checks the status of an in-progress report.
     """
-    if run_id not in _report_status:
+    run = get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
-    
-    status = _report_status[run_id]
-    
+
     return ReportStatusOutput(
         run_id=run_id,
-        status=status.get("status", "unknown"),
-        current_node=status.get("current_node"),
-        progress_pct=status.get("progress_pct", 0),
-        warnings=status.get("warnings", []),
-        error=status.get("error"),
-        traceback=status.get("traceback"),
+        status=run.status,
+        current_node=run.current_node,
+        progress_pct=run.progress_pct,
+        warnings=run.warnings,
+        error=run.error,
+        traceback=run.traceback,
     )
 
 
 @router.get("/result/{run_id}", response_model=GenerateReportOutput)
 async def get_report_result(run_id: str):
     """
-    Recupera il risultato di un report completato.
+    Retrieves the result of a completed report.
     """
-    if run_id not in _report_status:
+    run = get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
-    
-    status = _report_status[run_id]
-    
-    if status.get("status") != "completed":
+
+    if run.status != "completed":
         raise HTTPException(
             status_code=400, 
-            detail=f"Report not completed. Current status: {status.get('status')}"
+            detail=f"Report not completed. Current status: {run.status}"
         )
-    
-    result = status.get("result", {})
+
+    result = run.result or {}
     
     return GenerateReportOutput(
         run_id=run_id,
@@ -210,7 +216,7 @@ async def get_report_result(run_id: str):
         trend_analysis=result.get("trend_analysis"),
         events=result.get("events", []),
         module_sections=result.get("module_sections", {}),
-        warnings=result.get("warnings", []),
+        warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
         success=True
     )
@@ -219,14 +225,14 @@ async def get_report_result(run_id: str):
 @router.get("/info")
 def get_service_info():
     """
-    Restituisce metadata del servizio per il frontend.
+    Returns service metadata for the frontend.
     """
     return {
         "id": "market-monitor",
         "name": "Market Monitor Generator",
-        "description": "Genera Market Monitor Reports completi con analisi prezzi, "
-                       "trend di mercato, visualizzazioni e sezioni narrative. "
-                       "Include moduli opzionali come analisi tasso di cambio.",
+        "description": "Generates full Market Monitor reports with price analysis, "
+                       "market trend analysis, visualizations, and narrative sections. "
+                       "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
         "inputs": [
             {
@@ -234,21 +240,21 @@ def get_service_info():
                 "type": "string",
                 "required": True,
                 "label": "Country",
-                "description": "Nome del paese (es. 'Sudan', 'Yemen', 'Myanmar')"
+                "description": "Country name (e.g., 'Sudan', 'Yemen', 'Myanmar')"
             },
             {
                 "name": "time_period",
                 "type": "string",
                 "required": True,
                 "label": "Time Period",
-                "description": "Periodo in formato YYYY-MM (es. '2025-01')"
+                "description": "Period in YYYY-MM format (e.g., '2025-01')"
             },
             {
                 "name": "commodity_list",
                 "type": "array",
                 "required": False,
                 "label": "Commodities",
-                "description": "Lista delle commodity da analizzare",
+                "description": "List of commodities to analyze",
                 "default": ["Sorghum", "Wheat flour", "Cooking oil", "Sugar"]
             },
             {
@@ -256,14 +262,14 @@ def get_service_info():
                 "type": "array",
                 "required": False,
                 "label": "Regions (Admin1)",
-                "description": "Lista delle regioni da includere"
+                "description": "List of regions to include"
             },
             {
                 "name": "currency_code",
                 "type": "string",
                 "required": False,
                 "label": "Currency Code",
-                "description": "Codice valuta ISO 4217 (es. 'SDG', 'YER')",
+                "description": "ISO 4217 currency code (e.g., 'SDG', 'YER')",
                 "default": "USD"
             },
             {
@@ -271,7 +277,7 @@ def get_service_info():
                 "type": "array",
                 "required": False,
                 "label": "Optional Modules",
-                "description": "Moduli opzionali da abilitare",
+                "description": "Optional modules to enable",
                 "default": ["exchange_rate"],
                 "options": list(AVAILABLE_MODULES.keys())
             },
@@ -280,37 +286,37 @@ def get_service_info():
                 "type": "boolean",
                 "required": False,
                 "label": "Use Mock Data",
-                "description": "Se True, usa dati simulati invece di API reali",
+                "description": "If True, use simulated data instead of real APIs",
                 "default": True
             }
         ],
         "outputs": {
-            "run_id": "Identificativo univoco della generazione",
-            "report_sections": "Sezioni del report (HIGHLIGHTS, MARKET_OVERVIEW, etc.)",
-            "visualizations": "Grafici in formato Base64",
-            "data_statistics": "Statistiche calcolate (MoM, YoY)",
-            "trend_analysis": "Analisi del trend di mercato",
-            "events": "Eventi estratti dalle notizie",
-            "module_sections": "Sezioni generate dai moduli opzionali",
-            "llm_calls": "Numero di chiamate LLM effettuate",
-            "success": "True se la generazione è completata con successo"
+            "run_id": "Unique generation identifier",
+            "report_sections": "Report sections (HIGHLIGHTS, MARKET_OVERVIEW, etc.)",
+            "visualizations": "Charts in Base64 format",
+            "data_statistics": "Computed statistics (MoM, YoY)",
+            "trend_analysis": "Market trend analysis",
+            "events": "Events extracted from news",
+            "module_sections": "Sections generated by optional modules",
+            "llm_calls": "Number of LLM calls performed",
+            "success": "True if generation completed successfully"
         },
         "workflow_nodes": [
-            {"id": "data_agent", "name": "Data Agent", "description": "Recupera e processa dati di prezzo"},
-            {"id": "graph_designer", "name": "Graph Designer", "description": "Genera visualizzazioni"},
-            {"id": "news_retrieval", "name": "News Retrieval", "description": "Recupera notizie contestuali"},
-            {"id": "event_mapper", "name": "Event Mapper", "description": "Estrae eventi chiave"},
-            {"id": "trend_analyst", "name": "Trend Analyst", "description": "Analizza trend di mercato"},
-            {"id": "module_orchestrator", "name": "Module Orchestrator", "description": "Esegue moduli opzionali"},
-            {"id": "highlights_drafter", "name": "Highlights Drafter", "description": "Genera sezione highlights"},
-            {"id": "narrative_drafter", "name": "Narrative Drafter", "description": "Genera sezioni narrative"},
-            {"id": "red_team", "name": "Red Team QA", "description": "Quality assurance e fact-checking"}
+            {"id": "data_agent", "name": "Data Agent", "description": "Retrieves and processes price data"},
+            {"id": "graph_designer", "name": "Graph Designer", "description": "Generates visualizations"},
+            {"id": "news_retrieval", "name": "News Retrieval", "description": "Retrieves contextual news"},
+            {"id": "event_mapper", "name": "Event Mapper", "description": "Extracts key events"},
+            {"id": "trend_analyst", "name": "Trend Analyst", "description": "Analyzes market trends"},
+            {"id": "module_orchestrator", "name": "Module Orchestrator", "description": "Runs optional modules"},
+            {"id": "highlights_drafter", "name": "Highlights Drafter", "description": "Drafts highlights section"},
+            {"id": "narrative_drafter", "name": "Narrative Drafter", "description": "Drafts narrative sections"},
+            {"id": "red_team", "name": "Red Team QA", "description": "Quality assurance and fact-checking"}
         ],
         "available_modules": [
             {
                 "id": "exchange_rate",
                 "name": "Exchange Rate Analysis",
-                "description": "Analisi tasso di cambio con dati Trading Economics"
+                "description": "Exchange rate analysis using Trading Economics data"
             }
         ]
     }
@@ -325,7 +331,7 @@ def health_check():
 @router.get("/countries")
 def get_supported_countries():
     """
-    Restituisce la lista dei paesi supportati con relative valute.
+    Returns the list of supported countries with their currencies.
     """
     from .graph import CURRENCY_SYMBOLS
     
@@ -356,7 +362,7 @@ def get_supported_countries():
 @router.get("/commodities")
 def get_default_commodities():
     """
-    Restituisce la lista delle commodity standard WFP.
+    Returns the list of standard WFP commodities.
     """
     commodities = [
         {"name": "Sorghum", "category": "Cereals"},

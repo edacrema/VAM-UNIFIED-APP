@@ -333,6 +333,9 @@ class ExchangeRateModule(ReportModule):
         
         prompt = f"""You are a WFP economic analyst writing the Exchange Rate Analysis section.
 
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+
 CONTEXT:
 - Country: {state.get('country', 'Unknown')}
 - Currency: {exchange_data.get('currency_code', 'LCU')}
@@ -630,6 +633,9 @@ def node_event_mapper(state: MarketReportState) -> dict:
     
     prompt = f"""Extract key market events from these documents for {state['country']}.
 
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+
 DOCUMENTS:
 {context}
 
@@ -687,6 +693,9 @@ def node_trend_analyst(state: MarketReportState) -> dict:
     events = state.get("events", [])
     
     prompt = f"""Analyze the market trend for {state['country']} based on these statistics and events.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 
 STATISTICS:
 {json.dumps(stats, indent=2)}
@@ -808,6 +817,9 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     
     prompt = f"""Draft the HIGHLIGHTS section for {state['country']} Market Monitor ({state['time_period']}).
 
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+
 DATA (with formatted MoM/YoY):
 {json.dumps(formatted_stats, indent=2)}
 
@@ -861,6 +873,9 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
     module_sections = state.get("module_sections", {})
     
     prompt = f"""Draft narrative sections for {state['country']} Market Monitor ({state['time_period']}).
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 
 TREND ANALYSIS:
 {json.dumps(trend, indent=2)}
@@ -923,6 +938,9 @@ def node_red_team(state: MarketReportState) -> dict:
     draft_text = "\n\n".join([f"== {k} ==\n{v}" for k, v in sections.items()])
     
     prompt = f"""Fact-check this Market Monitor draft against the source data.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 
 GROUND TRUTH DATA:
 {json.dumps(stats, indent=2)}

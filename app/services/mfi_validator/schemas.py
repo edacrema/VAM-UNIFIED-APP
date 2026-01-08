@@ -6,7 +6,7 @@ Classi e modelli per la validazione dataset MFI.
 from __future__ import annotations
 
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 
@@ -78,78 +78,130 @@ class LayerResult:
 
 @dataclass
 class MFITemplate:
-    """Template per validazione MFI, caricato dinamicamente."""
+    """
+    Template for RAW MFI dataset validation.
+    
+    Can be loaded from:
+    - CSV file (columns inferred from header)
+    - JSON file (full configuration)
+    - DataFrame (columns inferred)
+    
+    Note: Only RAW MFI datasets are supported.
+    """
     name: str
     columns: List[str]
     column_types: Dict[str, str] = field(default_factory=dict)
     required_columns: List[str] = field(default_factory=list)
-    valid_dimensions: Dict[int, str] = field(default_factory=dict)
-    valid_levels: Dict[int, str] = field(default_factory=dict)
-    value_ranges: Dict[str, dict] = field(default_factory=dict)
-    file_type: str = "UNKNOWN"
+    file_type: str = "RAW"
 
     @classmethod
-    def from_csv(cls, file_path: str, template_name: str = "MFI Template") -> MFITemplate:
+    def from_csv(cls, file_path: str, template_name: str = "RAW MFI Template") -> MFITemplate:
+        """
+        Create template from a CSV file header.
+        
+        Args:
+            file_path: Path to the CSV file
+            template_name: Name for the template
+            
+        Returns:
+            MFITemplate with columns from CSV header
+        """
         import pandas as pd
         df = pd.read_csv(file_path, nrows=0)
         columns = df.columns.tolist()
-        cols_upper = {c.upper() for c in columns}
-
-        if 'SVY_MOD' in cols_upper or 'SURVEY_TYPE' in cols_upper:
-            file_type = "RAW"
-        elif 'MFIOUTPUTID' in cols_upper or 'TRADERSSAMPLESIZE' in cols_upper:
-            file_type = "PROCESSED"
-        else:
-            file_type = "UNKNOWN"
 
         return cls(
             name=template_name,
             columns=columns,
             required_columns=columns,
-            file_type=file_type
+            file_type="RAW"
         )
 
     @classmethod
     def from_json(cls, file_path: str) -> MFITemplate:
+        """
+        Create template from a JSON configuration file.
+        
+        Expected JSON structure:
+        {
+            "name": "Template Name",
+            "columns": ["COL1", "COL2", ...],
+            "column_types": {"COL1": "string", "COL2": "int", ...},
+            "required_columns": ["COL1", "COL2", ...]
+        }
+        
+        Args:
+            file_path: Path to the JSON file
+            
+        Returns:
+            MFITemplate with configuration from JSON
+        """
         import json
         with open(file_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
 
-        valid_dims = {int(k): v for k, v in config.get('valid_dimensions', {}).items()}
-        valid_lvls = {int(k): v for k, v in config.get('valid_levels', {}).items()}
-
         return cls(
-            name=config.get('name', 'MFI Template'),
+            name=config.get('name', 'RAW MFI Template'),
             columns=config.get('columns', []),
             column_types=config.get('column_types', {}),
             required_columns=config.get('required_columns', config.get('columns', [])),
-            valid_dimensions=valid_dims,
-            valid_levels=valid_lvls,
-            value_ranges=config.get('value_ranges', {}),
-            file_type=config.get('file_type', 'UNKNOWN')
+            file_type="RAW"
         )
 
     @classmethod
-    def from_dataframe(cls, df, template_name: str = "MFI Template") -> MFITemplate:
+    def from_dataframe(cls, df, template_name: str = "RAW MFI Template") -> MFITemplate:
+        """
+        Create template from a pandas DataFrame.
+        
+        Args:
+            df: pandas DataFrame
+            template_name: Name for the template
+            
+        Returns:
+            MFITemplate with columns from DataFrame
+        """
         columns = df.columns.tolist()
-        cols_upper = {c.upper() for c in columns}
-
-        if 'SVY_MOD' in cols_upper:
-            file_type = "RAW"
-        elif 'MFIOUTPUTID' in cols_upper:
-            file_type = "PROCESSED"
-        else:
-            file_type = "UNKNOWN"
 
         return cls(
             name=template_name,
             columns=columns,
             required_columns=columns,
-            file_type=file_type
+            file_type="RAW"
+        )
+    
+    @classmethod
+    def default_raw_template(cls) -> MFITemplate:
+        """
+        Create the default RAW MFI template with standard indicators.
+        
+        Returns:
+            MFITemplate with RAW_FILE_INDICATORS as required columns
+        """
+        # Import here to avoid circular dependency
+        raw_indicators = [
+            'SVY_MOD', 'SURVEY_TYPE', 'RESPONSEID', 'SUBMISSIONDATE',
+            '_UUID', 'ENUMERATOR', 'ENUMERATORID', 'TRADER_NAME',
+            'INTERVIEW_DATE', 'DEVICEID', '_SUBMISSION_TIME'
+        ]
+        
+        return cls(
+            name="Default RAW MFI Template",
+            columns=raw_indicators,
+            required_columns=raw_indicators,
+            file_type="RAW"
         )
 
     def to_dict(self) -> dict:
+        """Convert template to dictionary for serialization."""
         return asdict(self)
+    
+    def __repr__(self) -> str:
+        return "MFITemplate(name='{}', columns={}, required={}, type='{}')".format(
+            self.name,
+            len(self.columns),
+            len(self.required_columns),
+            self.file_type
+        )
 
 
 # ============================================================================
@@ -157,12 +209,12 @@ class MFITemplate:
 # ============================================================================
 
 class ValidateFileInput(BaseModel):
-    """Input per l'endpoint di validazione."""
+    """Input for the validation endpoint."""
     survey_type: str = "full mfi"
 
 
 class ValidateFileOutput(BaseModel):
-    """Output dell'endpoint di validazione."""
+    """Output of the validation endpoint."""
     file_name: str
     country: Optional[str] = None
     survey_period: Optional[str] = None
@@ -171,3 +223,14 @@ class ValidateFileOutput(BaseModel):
     layer_results: List[Dict[str, Any]]
     final_report: str
     success: bool
+
+
+class ValidateFileStatusOutput(BaseModel):
+    """Status of an in-progress validation."""
+    run_id: str
+    status: Literal["pending", "running", "completed", "failed"]
+    current_node: Optional[str] = None
+    progress_pct: int = 0
+    warnings: List[str] = []
+    error: Optional[str] = None
+    traceback: Optional[str] = None

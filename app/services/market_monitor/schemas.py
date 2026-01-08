@@ -99,37 +99,37 @@ class DataStatistics:
 # ============================================================================
 
 class GenerateReportInput(BaseModel):
-    """Input per generazione report."""
-    country: str = Field(..., description="Nome del paese (es. 'Sudan', 'Yemen')")
-    time_period: str = Field(..., description="Periodo in formato YYYY-MM (es. '2025-01')")
+    """Input for generating a report."""
+    country: str = Field(..., description="Country name (e.g., 'Sudan', 'Yemen')")
+    time_period: str = Field(..., description="Period in YYYY-MM format (e.g., '2025-01')")
     commodity_list: List[str] = Field(
         default=["Sorghum", "Wheat flour", "Cooking oil", "Sugar"],
-        description="Lista delle commodity da analizzare"
+        description="List of commodities to analyze"
     )
     admin1_list: List[str] = Field(
         default=[],
-        description="Lista delle regioni Admin1 da includere"
+        description="List of Admin1 regions to include"
     )
     currency_code: str = Field(
         default="USD",
-        description="Codice valuta ISO 4217 (es. 'SDG', 'YER')"
+        description="ISO 4217 currency code (e.g., 'SDG', 'YER')"
     )
     enabled_modules: List[str] = Field(
         default=["exchange_rate"],
-        description="Moduli opzionali da abilitare"
+        description="Optional modules to enable"
     )
     previous_report_text: str = Field(
         default="",
-        description="Testo del report precedente per contesto"
+        description="Previous report text for context"
     )
     use_mock_data: bool = Field(
         default=True,
-        description="Se True, usa dati mock invece di API reali"
+        description="If True, use mock data instead of real APIs"
     )
 
 
 class GenerateReportOutput(BaseModel):
-    """Output della generazione report."""
+    """Output of the report generation."""
     run_id: str
     country: str
     time_period: str
@@ -145,7 +145,7 @@ class GenerateReportOutput(BaseModel):
 
 
 class ReportStatusOutput(BaseModel):
-    """Status di un report in generazione."""
+    """Status of an in-progress report."""
     run_id: str
     status: Literal["pending", "running", "completed", "failed"]
     current_node: Optional[str] = None

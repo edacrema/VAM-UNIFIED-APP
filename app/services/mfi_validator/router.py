@@ -1,17 +1,30 @@
 """
 MFI Validator - Router
 ======================
-Endpoint FastAPI per il servizio di validazione MFI.
+FastAPI endpoints for the RAW MFI validation service.
+
+Note: This service only supports RAW MFI datasets.
+PROCESSED datasets are no longer supported.
 """
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from typing import Optional
 import tempfile
 import os
 import logging
+import traceback
 
-from .graph import run_troubleshooting
-from .schemas import ValidateFileOutput
+from .graph import run_troubleshooting, RAW_FILE_INDICATORS
+from .schemas import ValidateFileOutput, ValidateFileStatusOutput
+
+from app.shared.async_runs import (
+    create_run,
+    get_run,
+    set_run_completed,
+    set_run_failed,
+    update_run,
+    update_run_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,52 +33,61 @@ router = APIRouter()
 
 @router.post("/validate-file", response_model=ValidateFileOutput)
 async def validate_mfi_file(
-    file: UploadFile = File(..., description="Dataset MFI in formato CSV"),
-    survey_type: str = Form("full mfi", description="Tipo di survey: 'full mfi' o 'reduced mfi'"),
-    template: Optional[UploadFile] = File(None, description="Template opzionale (.csv o .json)")
+    file: UploadFile = File(..., description="RAW MFI dataset in CSV format"),
+    survey_type: str = Form("full mfi", description="Survey type: 'full mfi' or 'reduced mfi'"),
+    template: Optional[UploadFile] = File(None, description="Optional template (.csv or .json)")
 ):
     """
-    Valida un dataset MFI CSV.
+    Validates a RAW MFI CSV dataset.
     
-    Esegue 5 layer di validazione:
-    - Layer 0: File Validation (encoding, formato)
-    - Layer 1: Structural Parsing (delimiter, righe corrotte)
-    - Layer 2: Schema Validation (colonne richieste)
-    - Layer 3: Business Rules (regole specifiche MFI)
-    - Layer 5: Report Generation (diagnosi LLM)
+    The file must be a RAW MFI dataset containing the following required columns:
+    SVY_MOD, SURVEY_TYPE, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR,
+    ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME
+    
+    Runs 5 validation layers:
+    - Layer 0: File Validation (encoding, format, RAW indicators)
+    - Layer 1: Structural Parsing (delimiter, broken rows)
+    - Layer 2: Schema Validation (required columns, duplicates)
+    - Layer 3: Business Rules (RAW MFI-specific rules)
+    - Layer 5: Report Generation (diagnostic report)
+    
+    Args:
+        file: RAW MFI dataset in CSV format
+        survey_type: 'full mfi' (requires 1 market + 5 trader surveys) or 'reduced mfi'
+        template: Optional custom template for additional column validation
     
     Returns:
-        ValidateFileOutput con risultati di ogni layer e report finale
+        ValidateFileOutput with results for each layer and final report
     """
     
-    # Validazione input
+    # Input validation
     if not file.filename:
-        raise HTTPException(status_code=400, detail="Nome file mancante")
+        raise HTTPException(status_code=400, detail="Missing filename")
     
     if not file.filename.lower().endswith('.csv'):
         raise HTTPException(
             status_code=400, 
-            detail=f"Il file deve essere CSV. Ricevuto: {file.filename}"
+            detail="File must be CSV. Received: {}".format(file.filename)
         )
     
     if survey_type.lower() not in ["full mfi", "reduced mfi"]:
         raise HTTPException(
             status_code=400,
-            detail=f"survey_type deve essere 'full mfi' o 'reduced mfi'. Ricevuto: {survey_type}"
+            detail="survey_type must be 'full mfi' or 'reduced mfi'. Received: {}".format(survey_type)
         )
     
-    # Salva file temporaneo
+    # Save temporary file
     tmp_path = None
     template_path = None
     
     try:
-        # Salva file principale
+        # Save main file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
         
-        # Salva template se fornito
+        # Save template if provided
         if template:
             suffix = ".json" if template.filename.lower().endswith(".json") else ".csv"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_t:
@@ -73,8 +95,8 @@ async def validate_mfi_file(
                 tmp_t.write(template_content)
                 template_path = tmp_t.name
         
-        # Esegui validazione
-        logger.info(f"Starting validation for: {file.filename}")
+        # Run validation
+        logger.info("Starting RAW MFI validation for: {}".format(file.filename))
         
         result = run_troubleshooting(
             file_path=tmp_path,
@@ -82,61 +104,241 @@ async def validate_mfi_file(
             survey_type=survey_type
         )
         
-        # Calcola success
+        # Calculate success
         layer_results = result.get("layer_results", [])
         success = all(lr.get("passed", False) for lr in layer_results)
         
-        # Costruisci output
+        # Build output
         output = ValidateFileOutput(
             file_name=file.filename,
             country=result.get("country"),
             survey_period=result.get("survey_period"),
-            detected_file_type=result.get("detected_file_type"),
+            detected_file_type=result.get("detected_file_type", "RAW"),
             llm_calls=result.get("llm_calls", 0),
             layer_results=layer_results,
             final_report=result.get("final_report", ""),
             success=success
         )
         
-        logger.info(f"Validation completed for {file.filename}: success={success}")
+        logger.info("Validation completed for {}: success={}".format(file.filename, success))
         
         return output
         
     except Exception as e:
-        logger.error(f"Validation error for {file.filename}: {e}")
+        logger.error("Validation error for {}: {}".format(file.filename, e))
         raise HTTPException(status_code=500, detail=str(e))
     
     finally:
-        # Cleanup file temporanei
+        # Cleanup temporary files
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
         if template_path and os.path.exists(template_path):
             os.unlink(template_path)
 
 
+@router.post("/validate-file-async")
+async def validate_mfi_file_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="RAW MFI dataset in CSV format"),
+    survey_type: str = Form("full mfi", description="Survey type: 'full mfi' or 'reduced mfi'"),
+    template: Optional[UploadFile] = File(None, description="Optional template (.csv or .json)")
+):
+    """
+    Validates a RAW MFI CSV dataset asynchronously.
+    
+    Same validation as /validate-file but runs in background.
+    Use /status/{run_id} to check progress and /result/{run_id} to get results.
+    
+    Returns:
+        run_id: Unique identifier to track the validation progress
+        status: Initial status ('pending')
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    if not file.filename.lower().endswith('.csv'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be CSV. Received: {}".format(file.filename)
+        )
+
+    if survey_type.lower() not in ["full mfi", "reduced mfi"]:
+        raise HTTPException(
+            status_code=400,
+            detail="survey_type must be 'full mfi' or 'reduced mfi'. Received: {}".format(survey_type)
+        )
+
+    import uuid
+
+    run_id = "mfi_val_{}".format(uuid.uuid4().hex[:8])
+    create_run(run_id)
+
+    original_filename = file.filename
+
+    # Save file(s) now, run graph in background later
+    tmp_path = None
+    template_path = None
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    if template:
+        suffix = ".json" if template.filename.lower().endswith(".json") else ".csv"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_t:
+            template_content = await template.read()
+            tmp_t.write(template_content)
+            template_path = tmp_t.name
+
+    progress_map = {
+        "layer0": 10,
+        "layer1": 30,
+        "layer2": 60,
+        "layer3": 80,
+        "report": 95,
+    }
+
+    def run_in_background():
+        try:
+            update_run(run_id, status="running", error=None, traceback=None)
+            logger.info("Starting async RAW MFI validation for: {} (run_id={})".format(
+                original_filename, run_id
+            ))
+
+            def on_step(node_name: str, _state: dict):
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
+
+            result = run_troubleshooting(
+                file_path=tmp_path,
+                template=template_path,
+                survey_type=survey_type,
+                on_step=on_step,
+            )
+
+            layer_results = result.get("layer_results", [])
+            success = all(lr.get("passed", False) for lr in layer_results)
+
+            output = {
+                "file_name": original_filename,
+                "country": result.get("country"),
+                "survey_period": result.get("survey_period"),
+                "detected_file_type": result.get("detected_file_type", "RAW"),
+                "llm_calls": result.get("llm_calls", 0),
+                "layer_results": layer_results,
+                "final_report": result.get("final_report", ""),
+                "success": success,
+            }
+
+            set_run_completed(run_id, result=output)
+            logger.info("Async validation completed for {} (run_id={}): success={}".format(
+                original_filename, run_id, success
+            ))
+
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
+            logger.error("Async validation failed for {} (run_id={}): {}".format(
+                original_filename, run_id, e
+            ))
+
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            if template_path and os.path.exists(template_path):
+                os.unlink(template_path)
+
+    background_tasks.add_task(run_in_background)
+    return {"run_id": run_id, "status": "pending"}
+
+
+@router.get("/status/{run_id}", response_model=ValidateFileStatusOutput)
+async def get_validate_status(run_id: str):
+    """
+    Get the status of an async validation run.
+    
+    Args:
+        run_id: The run ID returned by /validate-file-async
+        
+    Returns:
+        ValidateFileStatusOutput with current status, progress, and any errors
+    """
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run ID not found: {}".format(run_id))
+
+    return ValidateFileStatusOutput(
+        run_id=run_id,
+        status=run.status,
+        current_node=run.current_node,
+        progress_pct=run.progress_pct,
+        warnings=run.warnings,
+        error=run.error,
+        traceback=run.traceback,
+    )
+
+
+@router.get("/result/{run_id}", response_model=ValidateFileOutput)
+async def get_validate_result(run_id: str):
+    """
+    Get the result of a completed async validation run.
+    
+    Args:
+        run_id: The run ID returned by /validate-file-async
+        
+    Returns:
+        ValidateFileOutput with full validation results
+        
+    Raises:
+        HTTPException 400 if validation is not yet completed
+        HTTPException 404 if run_id not found
+    """
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run ID not found: {}".format(run_id))
+
+    if run.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Validation not completed. Current status: {}".format(run.status)
+        )
+
+    result = run.result or {}
+    return ValidateFileOutput(**result)
+
+
 @router.get("/info")
 def get_service_info():
     """
-    Restituisce metadata del servizio per il frontend.
+    Returns metadata for the frontend.
     
-    Il frontend può usare queste informazioni per costruire
-    dinamicamente il form di input.
+    The frontend can use this information to dynamically build the input form.
     """
     return {
         "id": "mfi-validator",
-        "name": "MFI Dataset Validator",
-        "description": "Valida dataset MFI (CSV) contro template WFP con 5 layer di controllo. "
-                       "Rileva errori strutturali, schema non conforme, regole business violate "
-                       "e genera un report diagnostico dettagliato.",
-        "version": "1.0.0",
+        "name": "RAW MFI Dataset Validator",
+        "description": "Validates RAW MFI datasets (CSV) against WFP standards with 5 validation layers. "
+                       "Checks file format, structure, schema conformance, and RAW-specific business rules. "
+                       "Generates a detailed diagnostic report. "
+                       "Note: Only RAW MFI datasets are supported (not PROCESSED).",
+        "version": "2.0.0",
+        "supported_file_types": ["RAW"],
+        "required_columns": sorted(list(RAW_FILE_INDICATORS)),
         "inputs": [
             {
                 "name": "file",
                 "type": "file",
                 "required": True,
                 "accept": ".csv",
-                "label": "Dataset MFI",
-                "description": "File CSV contenente i dati MFI da validare"
+                "label": "RAW MFI Dataset",
+                "description": "CSV file containing RAW MFI data. Must include all required columns: "
+                               "SVY_MOD, SURVEY_TYPE, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR, "
+                               "ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME"
             },
             {
                 "name": "survey_type",
@@ -147,34 +349,59 @@ def get_service_info():
                     {"value": "reduced mfi", "label": "Reduced MFI"}
                 ],
                 "default": "full mfi",
-                "label": "Tipo Survey",
-                "description": "Tipo di survey MFI (influenza le regole di validazione)"
+                "label": "Survey Type",
+                "description": "Full MFI requires 1 market survey + 5 trader surveys per market. "
+                               "Reduced MFI has relaxed survey completeness requirements."
             },
             {
                 "name": "template",
                 "type": "file",
                 "required": False,
                 "accept": ".csv,.json",
-                "label": "Template (opzionale)",
-                "description": "Template personalizzato per la validazione delle colonne"
+                "label": "Template (optional)",
+                "description": "Custom template for additional column validation beyond RAW indicators"
             }
         ],
         "outputs": {
-            "file_name": "Nome del file validato",
-            "country": "Paese rilevato dal dataset",
-            "survey_period": "Periodo della survey",
-            "detected_file_type": "Tipo file (RAW/PROCESSED)",
-            "llm_calls": "Numero di chiamate LLM effettuate",
-            "layer_results": "Risultati dettagliati per ogni layer",
-            "final_report": "Report diagnostico generato da LLM",
-            "success": "True se tutti i layer sono passati"
+            "file_name": "Validated file name",
+            "country": "Country detected from ADM0NAME column",
+            "survey_period": "Survey date range (from INTERVIEW_DATE)",
+            "detected_file_type": "Always 'RAW' (PROCESSED not supported)",
+            "llm_calls": "Number of LLM calls performed",
+            "layer_results": "Detailed results for each validation layer",
+            "final_report": "Diagnostic report generated by the LLM",
+            "success": "True if all layers passed without errors"
         },
         "layers": [
-            {"id": 0, "name": "File Validation", "description": "Verifica encoding, formato, estensione"},
-            {"id": 1, "name": "Structural Parsing", "description": "Rileva delimiter, righe corrotte, over-quoted"},
-            {"id": 2, "name": "Schema Validation", "description": "Verifica colonne richieste, duplicati"},
-            {"id": 3, "name": "Business Rules", "description": "Regole specifiche MFI (dimensioni, livelli, range)"},
-            {"id": 5, "name": "Report Generation", "description": "Genera report diagnostico con LLM"}
+            {
+                "id": 0,
+                "name": "File Validation",
+                "description": "Checks file extension (.csv), encoding detection, binary file detection, "
+                               "and validates presence of all required RAW file indicators"
+            },
+            {
+                "id": 1,
+                "name": "Structural Parsing",
+                "description": "Detects delimiter, identifies broken rows with incorrect column counts, "
+                               "and detects over-quoted rows"
+            },
+            {
+                "id": 2,
+                "name": "Schema Validation",
+                "description": "Validates columns against template, checks for duplicates, "
+                               "identifies missing required columns, fuzzy matches typos"
+            },
+            {
+                "id": 3,
+                "name": "Business Rules (RAW)",
+                "description": "RAW-specific checks: survey completeness, ResponseID/UUID uniqueness, "
+                               "date validation, coordinates, enumerator data, trader names"
+            },
+            {
+                "id": 5,
+                "name": "Report Generation",
+                "description": "Generates a comprehensive diagnostic report using LLM analysis"
+            }
         ]
     }
 
@@ -182,4 +409,4 @@ def get_service_info():
 @router.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "mfi-validator"}
+    return {"status": "healthy", "service": "mfi-validator", "file_type": "RAW"}

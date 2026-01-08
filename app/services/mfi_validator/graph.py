@@ -18,7 +18,7 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Dict, Any, Optional, Callable
 from collections import Counter
 import operator
 
@@ -32,6 +32,8 @@ from app.shared.llm import get_model
 from .schemas import ValidationError, LayerResult, MFITemplate, Severity, FileType
 
 logger = logging.getLogger(__name__)
+
+OnStepCallback = Callable[[str, Dict[str, Any]], None]
 
 
 # ============================================================================
@@ -54,15 +56,9 @@ DEFAULT_VALID_LEVELS = {
     5: "Trader Mean"
 }
 
-PROCESSED_FILE_INDICATORS = {
-    'MFIOUTPUTID', 'TRADERSSAMPLESIZE', 'LEVELID', 'LEVELNAME',
-    'DIMENSIONID', 'DIMENSIONNAME', 'VARIABLEID', 'OUTPUTVALUE'
-}
 
 RAW_FILE_INDICATORS = {
-    'SVY_MOD', 'SURVEY_TYPE', 'RESPONSEID', 'SUBMISSIONDATE',
-    '_UUID', 'ENUMERATOR', 'ENUMERATORID', 'TRADER_NAME',
-    'INTERVIEW_DATE', 'DEVICEID', '_SUBMISSION_TIME'
+    'SVYMOD', 'MARKETID'
 }
 
 
@@ -71,26 +67,9 @@ RAW_FILE_INDICATORS = {
 # ============================================================================
 
 PROMPTS = {
-    "fuzzy_column_match": {
-        "system": """You are a data validation expert for WFP MFI datasets.
-Your task is to determine if a submitted column name matches any expected column name, 
-even if there are typos, case differences, or slight variations.
-
-Respond ONLY with valid JSON in this format:
-{
-    "is_match": true/false,
-    "matched_to": "expected_column_name or null",
-    "confidence": 0.0-1.0,
-    "reason": "brief explanation"
-}""",
-        "user": """Submitted column: "{submitted_column}"
-Expected columns: {expected_columns}
-
-Does the submitted column match any expected column?"""
-    },
     
     "diagnosis_report": {
-        "system": """You are a WFP data quality analyst producing a formal technical report for an MFI dataset validation.
+    "system": """You are a WFP data quality analyst producing a technical validation report for an MFI dataset.
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
@@ -103,15 +82,16 @@ STYLE AND OUTPUT RULES (MANDATORY):
 
 REPORT STRUCTURE (MANDATORY):
 1) Title
-2) Dataset Metadata
-3) Executive Summary
-4) Critical Issues (Blocking)
-5) Non-Blocking Findings / Warnings
-6) Recommended Actions (prioritized, step-by-step)
-7) Final Checklist
+2) Dataset Metadata (file name, country, survey period, file type, survey type)
+3) Critical Issues
+   - For each critical issue: describe the problem, specify where it is located (layer, row numbers if available), and provide a concrete suggestion to fix it
+4) Warnings (minor issues that do not block validation but should be reviewed)
+
+If there are no critical issues, state that the dataset passed validation.
+If there are no warnings, omit that section.
 
 Use only the validation results provided. Do not invent issues not supported by the validation results.""",
-        "user": """Generate a formal technical validation report for this MFI dataset.
+    "user": """Generate a technical validation report for this MFI dataset.
 
 File: {file_name}
 Country: {country}
@@ -209,6 +189,13 @@ def layer0_file_validation(state: MFIState) -> dict:
     """
     Layer 0: Validazione file base.
     Nodo deterministico, no LLM.
+    
+    Checks:
+    - F0.0: File exists
+    - F0.1: Extension is .csv
+    - F0.2: File is not binary (Excel, PDF)
+    - F0.4: Encoding detection
+    - F0.5: RAW file indicators (all required columns present)
     """
     errors = []
     warnings = []
@@ -221,16 +208,16 @@ def layer0_file_validation(state: MFIState) -> dict:
         errors.append(ValidationError(
             code="F0.1",
             severity=Severity.CRITICAL,
-            message=f"File non è CSV. Estensione: {file_path.suffix}",
-            suggestion="Salvare il file come CSV (non Excel)"
+            message="File is not CSV. Extension: {}".format(file_path.suffix),
+            suggestion="Save the file as CSV (not Excel)"
         ))
     
-    # F0.2: File exists
+    # F0.0: File exists
     if not file_path.exists():
         errors.append(ValidationError(
             code="F0.0",
             severity=Severity.CRITICAL,
-            message="File non trovato"
+            message="File not found"
         ))
         result = LayerResult(
             layer_id=0,
@@ -246,7 +233,7 @@ def layer0_file_validation(state: MFIState) -> dict:
             "current_layer": 0
         }
     
-    # F0.3: Binary file detection
+    # F0.2: Binary file detection
     try:
         with open(file_path, 'rb') as f:
             header = f.read(8)
@@ -256,24 +243,24 @@ def layer0_file_validation(state: MFIState) -> dict:
             errors.append(ValidationError(
                 code="F0.2",
                 severity=Severity.CRITICAL,
-                message="File è Excel (.xlsx), non CSV",
-                suggestion="Aprire in Excel → Salva con nome → CSV UTF-8"
+                message="File is Excel (.xlsx), not CSV",
+                suggestion="Open in Excel → Save As → CSV UTF-8"
             ))
         elif header[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':  # XLS
             errors.append(ValidationError(
                 code="F0.2",
                 severity=Severity.CRITICAL,
-                message="File è Excel (.xls), non CSV",
-                suggestion="Aprire in Excel → Salva con nome → CSV UTF-8"
+                message="File is Excel (.xls), not CSV",
+                suggestion="Open in Excel → Save As → CSV UTF-8"
             ))
         elif header[:4] == b'%PDF':
             errors.append(ValidationError(
                 code="F0.2",
                 severity=Severity.CRITICAL,
-                message="File è PDF, non CSV"
+                message="File is PDF, not CSV"
             ))
     except Exception as e:
-        logger.warning(f"Binary detection failed: {e}")
+        logger.warning("Binary detection failed: {}".format(e))
     
     # F0.4: Encoding detection
     detected_encoding = None
@@ -299,9 +286,60 @@ def layer0_file_validation(state: MFIState) -> dict:
         warnings.append(ValidationError(
             code="F0.4",
             severity=Severity.WARNING,
-            message=f"Impossibile rilevare encoding: {e}"
+            message="Unable to detect encoding: {}".format(e)
         ))
         detected_encoding = 'utf-8'
+    
+    # F0.5: RAW file indicators validation (all columns required)
+    # Only proceed if no critical errors so far (file exists and is readable)
+    has_critical_so_far = any(e.severity == Severity.CRITICAL for e in errors)
+    
+    if not has_critical_so_far:
+        try:
+            with open(file_path, 'r', encoding=detected_encoding or 'utf-8', errors='replace') as f:
+                first_line = f.readline().strip()
+            
+            # Parse header - try common delimiters to find the best one
+            header_cols = []
+            for delim in [',', ';', '\t', '|']:
+                cols = [c.strip().strip('"').strip("'").upper() for c in first_line.split(delim)]
+                if len(cols) > len(header_cols):
+                    header_cols = cols
+            
+            file_columns_upper = set(header_cols)
+            
+            # Check for ALL required RAW indicators
+            missing_indicators = RAW_FILE_INDICATORS - file_columns_upper
+            found_indicators = RAW_FILE_INDICATORS & file_columns_upper
+            
+            metadata['raw_indicators_found'] = sorted(list(found_indicators))
+            metadata['raw_indicators_missing'] = sorted(list(missing_indicators))
+            metadata['raw_indicators_required'] = sorted(list(RAW_FILE_INDICATORS))
+            
+            if missing_indicators:
+                errors.append(ValidationError(
+                    code="F0.5",
+                    severity=Severity.CRITICAL,
+                    message="File is not a valid RAW MFI dataset. Missing {} of {} required columns.".format(
+                        len(missing_indicators), len(RAW_FILE_INDICATORS)
+                    ),
+                    details={
+                        'missing_columns': sorted(list(missing_indicators)),
+                        'found_columns': sorted(list(found_indicators)),
+                        'required_columns': sorted(list(RAW_FILE_INDICATORS))
+                    },
+                    suggestion="Ensure the file is a RAW MFI dataset containing ALL required columns: {}".format(
+                        ", ".join(sorted(RAW_FILE_INDICATORS))
+                    )
+                ))
+        
+        except Exception as e:
+            errors.append(ValidationError(
+                code="F0.5",
+                severity=Severity.CRITICAL,
+                message="Unable to validate RAW file indicators: {}".format(e),
+                suggestion="Ensure the file is a valid CSV with a proper header row"
+            ))
     
     has_critical = any(e.severity == Severity.CRITICAL for e in errors)
     
@@ -366,8 +404,10 @@ def layer1_structural_parsing(state: MFIState) -> dict:
     Rileva righe corrotte PRIMA di Pandas.
     
     Check implementati:
+    - S1.0: File reading
     - S1.1: Delimiter detection
     - S1.4: Broken rows (numero colonne errato)
+    - S1.5: CSV parsing errors
     - S1.6: Over-quoted rows (dati compressi nella prima colonna)
     """
     errors = []
@@ -377,6 +417,7 @@ def layer1_structural_parsing(state: MFIState) -> dict:
     file_path = state["file_path"]
     encoding = state["encoding"] or 'utf-8'
     
+    # S1.0: Read file
     try:
         with open(file_path, 'r', encoding=encoding, errors='replace') as f:
             content = f.read()
@@ -384,7 +425,7 @@ def layer1_structural_parsing(state: MFIState) -> dict:
         errors.append(ValidationError(
             code="S1.0",
             severity=Severity.CRITICAL,
-            message=f"Impossibile leggere il file: {e}"
+            message="Unable to read file: {}".format(e)
         ))
         result = LayerResult(
             layer_id=1,
@@ -409,15 +450,15 @@ def layer1_structural_parsing(state: MFIState) -> dict:
         warnings.append(ValidationError(
             code="S1.1",
             severity=Severity.WARNING,
-            message="Delimitatore ';' rilevato (tipico tastiera francese)",
-            suggestion="Usare ',' come separatore standard"
+            message="Detected ';' delimiter (common with French locale settings)",
+            suggestion="Use ',' as the standard delimiter"
         ))
     
-    # S1.4: Broken rows detection
+    # S1.4: Broken rows detection (no limit)
     broken_rows = []
     broken_row_numbers = []
     
-    # S1.6: Over-quoted rows detection
+    # S1.6: Over-quoted rows detection (no limit)
     overquoted_rows = []
     overquoted_row_numbers = []
     
@@ -432,18 +473,17 @@ def layer1_structural_parsing(state: MFIState) -> dict:
         for i, row in enumerate(reader, start=2):
             row_len = len(row)
             
-            # S1.4: Check numero colonne errato
+            # S1.4: Check numero colonne errato (no limit - collect all)
             if row_len != expected_cols:
                 broken_row_numbers.append(i)
-                if len(broken_rows) < 20:
-                    broken_rows.append({
-                        'row_number': i,
-                        'expected': expected_cols,
-                        'actual': row_len,
-                        'preview': str(row[:3])[:100]
-                    })
+                broken_rows.append({
+                    'row_number': i,
+                    'expected': expected_cols,
+                    'actual': row_len,
+                    'preview': str(row[:3])[:100]
+                })
             
-            # S1.6: Check over-quoted (solo se numero colonne è corretto)
+            # S1.6: Check over-quoted (solo se numero colonne è corretto, no limit)
             elif row_len == expected_cols and row:
                 first_col = row[0]
                 # Prima colonna contiene virgole e sembra una riga CSV intera
@@ -453,19 +493,18 @@ def layer1_structural_parsing(state: MFIState) -> dict:
                     # Se >80% delle altre colonne sono vuote, è over-quoted
                     if empty_count > (expected_cols - 1) * 0.8:
                         overquoted_row_numbers.append(i)
-                        if len(overquoted_rows) < 20:
-                            overquoted_rows.append({
-                                'row_number': i,
-                                'first_col_length': len(first_col),
-                                'empty_cols': empty_count,
-                                'preview': first_col[:80]
-                            })
+                        overquoted_rows.append({
+                            'row_number': i,
+                            'first_col_length': len(first_col),
+                            'empty_cols': empty_count,
+                            'preview': first_col[:80]
+                        })
                     
     except Exception as e:
         errors.append(ValidationError(
             code="S1.5",
             severity=Severity.ERROR,
-            message=f"Errore parsing CSV: {e}"
+            message="CSV parsing error: {}".format(e)
         ))
     
     # Genera errore S1.4 se ci sono broken rows
@@ -474,14 +513,14 @@ def layer1_structural_parsing(state: MFIState) -> dict:
         errors.append(ValidationError(
             code="S1.4",
             severity=Severity.CRITICAL,
-            message=f"Rilevate {total_broken} righe con numero colonne errato",
+            message="Detected {} rows with an incorrect number of columns".format(total_broken),
             details={
                 'total_broken_rows': total_broken,
                 'broken_row_numbers': broken_row_numbers,
                 'broken_rows_details': broken_rows
             },
-            suggestion="Aprire in editor testo, cercare ritorni a capo dentro celle con virgolette",
-            affected_rows=broken_row_numbers[:50]
+            suggestion="Open in a text editor and check for line breaks inside quoted cells",
+            affected_rows=broken_row_numbers
         ))
     
     # Genera errore S1.6 se ci sono over-quoted rows
@@ -490,17 +529,19 @@ def layer1_structural_parsing(state: MFIState) -> dict:
         errors.append(ValidationError(
             code="S1.6",
             severity=Severity.CRITICAL,
-            message=f"Rilevate {total_overquoted} righe con dati compressi nella prima colonna (over-quoted)",
+            message="Detected {} rows with data compressed into the first column (over-quoted)".format(total_overquoted),
             details={
                 'total_overquoted_rows': total_overquoted,
                 'overquoted_row_numbers': overquoted_row_numbers,
                 'overquoted_rows_details': overquoted_rows
             },
-            suggestion="Righe quotate erroneamente durante export. Rimuovere le virgolette esterne.",
-            affected_rows=overquoted_row_numbers[:50]
+            suggestion="Rows were incorrectly quoted during export. Remove the outer quotes.",
+            affected_rows=overquoted_row_numbers
         ))
     
     metadata['total_lines'] = content.count('\n') + 1
+    metadata['broken_rows_count'] = len(broken_row_numbers)
+    metadata['overquoted_rows_count'] = len(overquoted_row_numbers)
     
     has_critical = any(e.severity == Severity.CRITICAL for e in errors)
     
@@ -528,27 +569,31 @@ def layer1_structural_parsing(state: MFIState) -> dict:
 
 def layer2_schema_validation(state: MFIState) -> dict:
     """
-    Layer 2: Validazione schema con template.
-    Usa LLM solo per fuzzy matching se necessario.
+    Layer 2: Validazione schema e caricamento DataFrame.
+    
+    Checks:
+    - SC2.0: CSV loading into DataFrame
+    - SC2.3: Duplicate columns detection
+    
+    Note: RAW file indicators (required columns) are already validated in Layer 0.
+    This layer focuses on loading the data and detecting structural schema issues.
     """
     errors = []
     warnings = []
     metadata = {}
-    llm_calls = 0
     
     file_path = state["file_path"]
     encoding = state["encoding"] or 'utf-8'
     delimiter = state["delimiter"] or ','
-    template_dict = state["template"]
     
-    # Load DataFrame
+    # SC2.0: Load DataFrame
     try:
         df = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding, on_bad_lines='warn')
     except Exception as e:
         errors.append(ValidationError(
             code="SC2.0",
             severity=Severity.CRITICAL,
-            message=f"Impossibile caricare CSV: {e}"
+            message="Unable to load CSV: {}".format(e)
         ))
         result = LayerResult(
             layer_id=2,
@@ -567,27 +612,6 @@ def layer2_schema_validation(state: MFIState) -> dict:
     
     df_columns = df.columns.tolist()
     df_cols_lower = [c.lower().strip() for c in df_columns]
-    df_set = set(df_cols_lower)
-    
-    # Get template columns
-    if template_dict:
-        template_columns = template_dict.get('columns', [])
-        required_columns = template_dict.get('required_columns', template_columns)
-        metadata['template_name'] = template_dict.get('name', 'Unknown')
-    else:
-        # Infer from file type
-        cols_upper = {c.upper() for c in df_columns}
-        if cols_upper & PROCESSED_FILE_INDICATORS:
-            template_columns = list(PROCESSED_FILE_INDICATORS)
-        else:
-            template_columns = list(RAW_FILE_INDICATORS)
-        required_columns = []
-        metadata['template_name'] = 'Inferred (no template provided)'
-    
-    template_lower = [c.lower() for c in template_columns]
-    required_lower = [c.lower() for c in required_columns]
-    template_set = set(template_lower)
-    required_set = set(required_lower)
     
     # SC2.3: Duplicate columns (CRITICAL)
     col_counter = Counter(df_cols_lower)
@@ -597,89 +621,61 @@ def layer2_schema_validation(state: MFIState) -> dict:
         errors.append(ValidationError(
             code="SC2.3",
             severity=Severity.CRITICAL,
-            message=f"Colonne duplicate: {list(duplicates.keys())}",
+            message="Duplicate columns: {}".format(list(duplicates.keys())),
             details={'duplicates': duplicates},
-            suggestion="Rimuovere colonne duplicate"
+            suggestion="Remove duplicate columns"
         ))
     
-    # SC2.1: Missing required columns
-    missing_required = required_set - df_set
-    if missing_required:
-        errors.append(ValidationError(
-            code="SC2.1",
-            severity=Severity.ERROR,
-            message=f"Colonne obbligatorie mancanti: {list(missing_required)}",
-            details={'missing': list(missing_required)}
-        ))
-    
-    # SC2.2: Extra columns
-    extra = df_set - template_set
-    if extra and template_set:
-        warnings.append(ValidationError(
-            code="SC2.2",
-            severity=Severity.INFO,
-            message=f"Colonne extra non nel template: {list(extra)[:10]}",
-            details={'extra': list(extra)}
-        ))
-    
-    # SC2.5: Fuzzy matching with LLM (only if extra + missing)
-    if extra and missing_required and len(extra) <= 5:
-        model = get_model()
-        fuzzy_matches = {}
-        
-        for extra_col in list(extra)[:5]:
-            try:
-                response = model.invoke([
-                    SystemMessage(content=PROMPTS["fuzzy_column_match"]["system"]),
-                    HumanMessage(content=PROMPTS["fuzzy_column_match"]["user"].format(
-                        submitted_column=extra_col,
-                        expected_columns=", ".join(list(missing_required)[:20])
-                    ))
-                ])
-                llm_calls += 1
-                
-                result_text = response.content.strip()
-                if result_text.startswith('```'):
-                    result_text = re.sub(r'^```json?\s*', '', result_text)
-                    result_text = re.sub(r'\s*```$', '', result_text)
-                
-                match_result = json.loads(result_text)
-                
-                if match_result.get('is_match') and match_result.get('confidence', 0) > 0.7:
-                    fuzzy_matches[extra_col] = match_result
-            except Exception as e:
-                logger.warning(f"Fuzzy match failed: {e}")
-        
-        if fuzzy_matches:
-            metadata['fuzzy_matches'] = fuzzy_matches
-            warnings.append(ValidationError(
-                code="SC2.5",
-                severity=Severity.INFO,
-                message=f"Possibili match: {list(fuzzy_matches.keys())}",
-                details={'matches': fuzzy_matches}
-            ))
-    
+    # Metadata
     metadata['total_columns'] = len(df_columns)
-    metadata['template_columns'] = len(template_columns)
-    metadata['match_percentage'] = 100 * len(df_set & template_set) / len(template_set) if template_set else 0
+    metadata['total_rows'] = len(df)
+    metadata['file_type'] = 'RAW'
+    metadata['columns'] = df_columns
     
     has_critical = any(e.severity == Severity.CRITICAL for e in errors)
     
     # Serialize DataFrame for next layers
     df_json = df.to_json(orient='split', date_format='iso')
     
-    # Extract metadata
-    cols_map = {c.upper(): c for c in df_columns}
+    # Helper function to find column with multiple name variants
+    def get_column(*variants):
+        """Return the first matching column name from variants."""
+        cols_map = {c.upper(): c for c in df_columns}
+        for variant in variants:
+            if variant in cols_map:
+                return cols_map[variant]
+        return None
+    
+    # Extract metadata from RAW file columns
     country = None
     survey_period = None
     
-    adm0_col = cols_map.get('ADM0NAME')
-    start_col = cols_map.get('STARTDATE')
-    
+    # Try to extract country from ADM0NAME or ADM0CODE column
+    adm0_col = get_column('ADM0NAME', 'ADM0_NAME', 'ADM0CODE', 'ADM0_CODE')
     if adm0_col and len(df) > 0:
         country = str(df[adm0_col].iloc[0])
-    if start_col and len(df) > 0:
-        survey_period = str(df[start_col].iloc[0])
+    
+    # Try to extract survey period from date columns (RAW file specific)
+    # Using actual column names found in MFI files
+    date_col = get_column(
+        'SVYDATE', 'SVY_DATE',                    # Primary: Survey date
+        'SVYSTARTTIME', 'SVY_START_TIME',         # Alternative: Survey start time
+        '_SUBMISSION_TIME', 'SUBMISSION_TIME',     # Alternative: Submission time
+        'INTERVIEW_DATE', 'INTERVIEWDATE',         # Legacy names
+        'SUBMISSIONDATE', 'STARTDATE'              # Legacy names
+    )
+    
+    if date_col and len(df) > 0:
+        try:
+            dates = pd.to_datetime(df[date_col], errors='coerce')
+            valid_dates = dates.dropna()
+            if len(valid_dates) > 0:
+                min_date = valid_dates.min().strftime('%Y-%m-%d')
+                max_date = valid_dates.max().strftime('%Y-%m-%d')
+                survey_period = "{} to {}".format(min_date, max_date)
+                metadata['date_column_used'] = date_col
+        except Exception:
+            survey_period = str(df[date_col].iloc[0])
     
     result = LayerResult(
         layer_id=2,
@@ -695,7 +691,7 @@ def layer2_schema_validation(state: MFIState) -> dict:
         "layer_results": [result.to_dict()],
         "can_continue": not has_critical,
         "current_layer": 2,
-        "llm_calls": state["llm_calls"] + llm_calls,
+        "llm_calls": state["llm_calls"],
         "dataframe_json": df_json,
         "country": country,
         "survey_period": survey_period
@@ -707,40 +703,18 @@ def layer2_schema_validation(state: MFIState) -> dict:
 # ============================================================================
 
 def detect_file_type(df: pd.DataFrame) -> FileType:
-    """Rileva se il file è RAW o PROCESSED."""
-    cols_upper = {c.upper() for c in df.columns}
-    
-    processed_score = len(cols_upper & PROCESSED_FILE_INDICATORS)
-    raw_score = len(cols_upper & RAW_FILE_INDICATORS)
-    
-    # Additional heuristics
-    if 'LEVELID' in cols_upper:
-        try:
-            level_col = [c for c in df.columns if c.upper() == 'LEVELID'][0]
-            if set(df[level_col].dropna().unique()).issubset({1, 2, 3, 4, 5}):
-                processed_score += 3
-        except:
-            pass
-    
-    if 'TRADERSSAMPLESIZE' in cols_upper:
-        try:
-            sample_col = [c for c in df.columns if c.upper() == 'TRADERSSAMPLESIZE'][0]
-            if df[sample_col].dropna().mean() > 1:
-                processed_score += 2
-        except:
-            pass
-    
-    if processed_score > raw_score:
-        return FileType.PROCESSED
-    elif raw_score > processed_score:
-        return FileType.RAW
-    else:
-        return FileType.UNKNOWN
+    """File type is always RAW (PROCESSED no longer supported)."""
+    return FileType.RAW
 
 
 def layer3_business_rules(state: MFIState) -> dict:
     """
-    Layer 3: Business rules con logica adattiva Raw/Processed.
+    Layer 3: Business rules for RAW MFI datasets.
+    
+    Checks:
+    - BR3.1: Survey completeness (for full MFI: 1 market survey + 5 trader surveys per market)
+    - BR3.2: Response ID uniqueness
+    - BR3.7: UUID uniqueness
     """
     errors = []
     warnings = []
@@ -748,192 +722,164 @@ def layer3_business_rules(state: MFIState) -> dict:
     
     # Load DataFrame from state
     df = pd.read_json(io.StringIO(state["dataframe_json"]), orient='split')
-    template_dict = state["template"]
     survey_type = state["survey_type"]
     
-    # Detect file type
-    file_type = detect_file_type(df)
+    # File type is always RAW (PROCESSED no longer supported)
+    file_type = FileType.RAW
     metadata['detected_file_type'] = file_type.value
     
     cols_map = {c.upper(): c for c in df.columns}
     
-    # Get validation values from template
-    if template_dict:
-        valid_dimensions = {int(k): v for k, v in template_dict.get('valid_dimensions', {}).items()} or DEFAULT_VALID_DIMENSIONS
-        valid_levels = {int(k): v for k, v in template_dict.get('valid_levels', {}).items()} or DEFAULT_VALID_LEVELS
-        value_ranges = template_dict.get('value_ranges', {})
-    else:
-        valid_dimensions = DEFAULT_VALID_DIMENSIONS
-        valid_levels = DEFAULT_VALID_LEVELS
-        value_ranges = {}
+    # Helper function to find column with multiple name variants
+    def get_column(*variants):
+        """Return the first matching column name from variants."""
+        for variant in variants:
+            if variant in cols_map:
+                return cols_map[variant]
+        return None
     
-    # === ADAPTIVE LOGIC ===
-    if file_type == FileType.RAW and survey_type.lower() == "full mfi":
-        # Raw file validation: check survey completeness
-        svy_col = cols_map.get('SVY_MOD') or cols_map.get('SURVEY_TYPE')
-        market_col = cols_map.get('MARKETID')
+    # === RAW FILE SPECIFIC CHECKS ===
+    
+    # BR3.1: Survey completeness (only for "full mfi")
+    if survey_type.lower() == "full mfi":
+        # Support multiple column name variants
+        svy_col = get_column('SVYMOD', 'SVY_MOD', 'SURVEYTYPE', 'SURVEY_TYPE')
+        market_col = get_column('MARKETID', 'MARKET_ID')
         
         if svy_col and market_col:
             try:
+                # Detect SvyMod format (numeric vs string)
+                svy_values = df[svy_col].dropna().unique()
+                svy_format = 'unknown'
+                
+                # Check if values are numeric (1, 2) or string ("Trader", "Market")
+                has_numeric = any(v in [1, 2, 1.0, 2.0, '1', '2'] for v in svy_values)
+                has_string = any(str(v).lower() in ['trader', 'market'] for v in svy_values)
+                
+                if has_numeric:
+                    svy_format = 'numeric'
+                elif has_string:
+                    svy_format = 'string'
+                
+                metadata['svymod_format'] = svy_format
+                metadata['svymod_values_found'] = [str(v) for v in svy_values[:10]]
+                
+                # Group by market and count survey types
                 survey_counts = df.groupby(market_col)[svy_col].value_counts().unstack(fill_value=0)
                 
                 incomplete = []
                 for market_id in survey_counts.index:
-                    trader_count = survey_counts.loc[market_id].get(1, 0)
-                    market_count = survey_counts.loc[market_id].get(2, 0)
+                    # Support both numeric (1, 2) and string ("Trader", "Market") values
+                    # Trader surveys: 1, "1", 1.0, "Trader", "trader"
+                    # Market surveys: 2, "2", 2.0, "Market", "market"
+                    
+                    trader_count = 0
+                    market_count = 0
+                    
+                    for val in survey_counts.columns:
+                        count = survey_counts.loc[market_id, val]
+                        val_str = str(val).lower().strip()
+                        
+                        # Check if this is a trader survey value
+                        if val in [1, 1.0] or val_str in ['1', '1.0', 'trader']:
+                            trader_count += count
+                        # Check if this is a market survey value
+                        elif val in [2, 2.0] or val_str in ['2', '2.0', 'market']:
+                            market_count += count
                     
                     if market_count < 1 or trader_count < 5:
                         incomplete.append({
-                            'market_id': int(market_id),
+                            'market_id': int(market_id) if pd.notna(market_id) and isinstance(market_id, (int, float)) else str(market_id),
                             'trader_surveys': int(trader_count),
                             'market_surveys': int(market_count)
                         })
                 
+                metadata['total_markets'] = len(survey_counts.index)
+                metadata['complete_markets'] = len(survey_counts.index) - len(incomplete)
+                metadata['incomplete_markets'] = len(incomplete)
+                metadata['survey_column_used'] = svy_col
+                
                 if incomplete:
+                    # Determine the correct values to show in suggestion based on format
+                    if svy_format == 'string':
+                        trader_val = "'Trader'"
+                        market_val = "'Market'"
+                    else:
+                        trader_val = "1"
+                        market_val = "2"
+                    
                     errors.append(ValidationError(
-                        code="BR3.1_RAW",
+                        code="BR3.1",
                         severity=Severity.ERROR,
-                        message=f"{len(incomplete)} mercati non hanno survey complete (1 market + 5 trader)",
-                        details={'incomplete_markets': incomplete[:10]}
+                        message="{} of {} markets do not have complete surveys (required: 1 market + 5 trader surveys)".format(
+                            len(incomplete), len(survey_counts.index)
+                        ),
+                        details={'incomplete_markets': incomplete[:20]},
+                        suggestion="Ensure each market has at least 1 market survey ({}={}) and 5 trader surveys ({}={})".format(
+                            svy_col, market_val, svy_col, trader_val
+                        )
                     ))
             except Exception as e:
-                logger.warning(f"Raw survey check failed: {e}")
+                logger.warning("Survey completeness check failed: {}".format(e))
+        else:
+            missing_cols = []
+            if not svy_col:
+                missing_cols.append("SVYMOD/SVY_MOD/SURVEYTYPE")
+            if not market_col:
+                missing_cols.append("MARKETID")
+            warnings.append(ValidationError(
+                code="BR3.1",
+                severity=Severity.WARNING,
+                message="Unable to check survey completeness: missing {} column(s)".format(", ".join(missing_cols))
+            ))
     
-    elif file_type == FileType.PROCESSED:
-        # Processed file validation
-        sample_col = cols_map.get('TRADERSSAMPLESIZE')
-        
-        if sample_col:
-            try:
-                low_sample = df[df[sample_col] < 5]
-                if len(low_sample) > 0:
-                    warnings.append(ValidationError(
-                        code="BR3.7",
-                        severity=Severity.WARNING,
-                        message=f"{len(low_sample)} record con TradersSampleSize < 5",
-                        details={'min_sample': int(df[sample_col].min())}
-                    ))
-            except Exception as e:
-                logger.warning(f"Sample size check failed: {e}")
-        
-        # Dimension coverage check
-        dim_col = cols_map.get('DIMENSIONID')
-        market_col = cols_map.get('MARKETID')
-        
-        if dim_col and market_col:
-            try:
-                market_dims = df.groupby(market_col)[dim_col].apply(lambda x: set(x.unique()))
-                expected_dims = set(valid_dimensions.keys())
-                
-                incomplete = []
-                for mkt, dims in market_dims.items():
-                    missing = expected_dims - dims
-                    if missing:
-                        incomplete.append({
-                            'market_id': int(mkt),
-                            'missing_dimensions': [valid_dimensions.get(d, str(d)) for d in missing]
-                        })
-                
-                if incomplete:
-                    warnings.append(ValidationError(
-                        code="BR3.8",
-                        severity=Severity.WARNING,
-                        message=f"{len(incomplete)} mercati senza tutte le 4 dimensioni",
-                        details={'incomplete': incomplete[:10]}
-                    ))
-            except Exception as e:
-                logger.warning(f"Dimension coverage check failed: {e}")
-    
-    # === COMMON CHECKS ===
-    
-    # BR3.2: Dimension validation
-    dim_col = cols_map.get('DIMENSIONID')
-    if dim_col:
+    # BR3.2: Response ID uniqueness
+    response_col = get_column('INSTANCEID', 'INSTANCE_ID', '_ID', 'RESPONSEID', 'RESPONSE_ID')
+    if response_col:
         try:
-            invalid_dims = df[~df[dim_col].isin(valid_dimensions.keys())][dim_col].unique()
-            if len(invalid_dims) > 0:
+            duplicates = df[df.duplicated(subset=[response_col], keep=False)]
+            if len(duplicates) > 0:
+                duplicate_ids = duplicates[response_col].unique().tolist()
                 errors.append(ValidationError(
                     code="BR3.2",
                     severity=Severity.ERROR,
-                    message=f"DimensionID non validi: {list(invalid_dims)}"
+                    message="{} duplicate {} values found".format(len(duplicate_ids), response_col),
+                    details={'duplicate_response_ids': duplicate_ids[:20]},
+                    suggestion="Each {} must be unique. Remove or fix duplicate entries.".format(response_col)
                 ))
-        except:
-            pass
+            metadata['unique_responses'] = df[response_col].nunique()
+            metadata['response_column_used'] = response_col
+        except Exception as e:
+            logger.warning("ResponseID uniqueness check failed: {}".format(e))
     
-    # BR3.3: Level validation
-    level_col = cols_map.get('LEVELID')
-    if level_col:
+    # BR3.7: UUID uniqueness
+    uuid_col = get_column('_UUID', 'UUID', 'INSTANCEID', 'INSTANCE_ID')
+    if uuid_col:
         try:
-            invalid_levels = df[~df[level_col].isin(valid_levels.keys())][level_col].unique()
-            if len(invalid_levels) > 0:
+            duplicates = df[df.duplicated(subset=[uuid_col], keep=False)]
+            if len(duplicates) > 0:
+                duplicate_uuids = duplicates[uuid_col].unique().tolist()
                 errors.append(ValidationError(
-                    code="BR3.3",
+                    code="BR3.7",
                     severity=Severity.ERROR,
-                    message=f"LevelID non validi: {list(invalid_levels)}"
+                    message="{} duplicate {} values found".format(len(duplicate_uuids), uuid_col),
+                    details={'duplicate_uuids': duplicate_uuids[:20]},
+                    suggestion="Each {} must be unique. This may indicate duplicate submissions.".format(uuid_col)
                 ))
-        except:
-            pass
+            metadata['uuid_column_used'] = uuid_col
+        except Exception as e:
+            logger.warning("UUID uniqueness check failed: {}".format(e))
     
-    # BR3.4: Value range
-    output_col = cols_map.get('OUTPUTVALUE')
-    if output_col:
-        output_range = value_ranges.get('OutputValue', {'min': 0, 'max': 10})
-        try:
-            out_of_range = df[
-                (df[output_col] < output_range.get('min', 0)) |
-                (df[output_col] > output_range.get('max', 10))
-            ]
-            if len(out_of_range) > 0:
-                warnings.append(ValidationError(
-                    code="BR3.4",
-                    severity=Severity.WARNING,
-                    message=f"{len(out_of_range)} valori OutputValue fuori range"
-                ))
-        except:
-            pass
-    
-    # BR3.5: Coordinates
-    lat_col = cols_map.get('MARKETLATITUDE')
-    lon_col = cols_map.get('MARKETLONGITUDE')
-    if lat_col and lon_col:
-        try:
-            invalid_coords = df[
-                (df[lat_col].abs() > 90) |
-                (df[lon_col].abs() > 180) |
-                ((df[lat_col] == 0) & (df[lon_col] == 0))
-            ]
-            if len(invalid_coords) > 0:
-                warnings.append(ValidationError(
-                    code="BR3.5",
-                    severity=Severity.WARNING,
-                    message=f"Coordinate non valide per {len(invalid_coords)} record"
-                ))
-        except:
-            pass
-    
-    # BR3.6: Date validation
-    start_col = cols_map.get('STARTDATE')
-    end_col = cols_map.get('ENDDATE')
-    if start_col and end_col:
-        try:
-            start_dates = pd.to_datetime(df[start_col], errors='coerce')
-            end_dates = pd.to_datetime(df[end_col], errors='coerce')
-            invalid_range = df[start_dates > end_dates]
-            if len(invalid_range) > 0:
-                errors.append(ValidationError(
-                    code="BR3.6",
-                    severity=Severity.ERROR,
-                    message=f"StartDate > EndDate per {len(invalid_range)} record"
-                ))
-        except:
-            pass
-    
+    # === METADATA SUMMARY ===
     metadata['total_rows'] = len(df)
-    metadata['unique_markets'] = df[cols_map.get('MARKETID')].nunique() if cols_map.get('MARKETID') else 0
+    
+    market_col = get_column('MARKETID', 'MARKET_ID')
+    if market_col:
+        metadata['unique_markets'] = df[market_col].nunique()
     
     result = LayerResult(
         layer_id=3,
-        layer_name="Business Rules",
+        layer_name="Business Rules (RAW)",
         passed=len(errors) == 0,
         can_continue=True,
         errors=errors,
@@ -962,37 +908,35 @@ def layer5_generate_report(state: MFIState) -> dict:
     # Format validation results
     validation_summary = []
     for layer_result in state["layer_results"]:
-        layer_summary = f"\n### Layer {layer_result['layer_id']}: {layer_result['layer_name']}\n"
-        layer_summary += f"Passed: {layer_result['passed']}\n"
+        layer_summary = "\n### Layer {}: {}\n".format(layer_result['layer_id'], layer_result['layer_name'])
+        layer_summary += "Passed: {}\n".format(layer_result['passed'])
         
         if layer_result['errors']:
             layer_summary += "Errors:\n"
             for err in layer_result['errors']:
-                layer_summary += f"  - [{err['code']}] {err['severity']}: {err['message']}\n"
+                layer_summary += "  - [{}] {}: {}\n".format(err['code'], err['severity'], err['message'])
                 
                 # Aggiungi i details se presenti
                 if err.get('details'):
                     if err['code'] == 'S1.4' and 'broken_row_numbers' in err['details']:
                         row_nums = err['details']['broken_row_numbers']
                         total = err['details'].get('total_broken_rows', len(row_nums))
-                        layer_summary += f"    Total broken rows: {total}\n"
-                        layer_summary += f"    Row numbers: {row_nums}\n"
+                        layer_summary += "    Total broken rows: {}\n".format(total)
+                        layer_summary += "    Row numbers: {}\n".format(row_nums)
                         
                         details_list = err['details'].get('broken_rows_details', [])
                         if details_list:
                             layer_summary += "    Details (first rows):\n"
                             for rd in details_list[:5]:
-                                layer_summary += f"      - Row {rd['row_number']}: {rd['actual']} cols (expected {rd['expected']})\n"
-                    else:
-                        layer_summary += f"    Details: {json.dumps(err['details'], default=str)[:500]}\n"
-        
+                                layer_summary += "      - Row {}: {} cols (expected {})".format(rd['row_number'], rd['actual'], rd['expected'])
+                    
         if layer_result['warnings']:
             layer_summary += "Warnings:\n"
             for warn in layer_result['warnings']:
-                layer_summary += f"  - [{warn['code']}] {warn['severity']}: {warn['message']}\n"
+                layer_summary += "  - [{}] {}: {}\n".format(warn['code'], warn['severity'], warn['message'])
         
         if layer_result.get('metadata'):
-            layer_summary += f"Metadata: {json.dumps(layer_result['metadata'], indent=2, default=str)}\n"
+            layer_summary += "Metadata: {}\n".format(json.dumps(layer_result['metadata'], indent=2, default=str))
         
         validation_summary.append(layer_summary)
     
@@ -1011,8 +955,8 @@ def layer5_generate_report(state: MFIState) -> dict:
         
         final_report = response.content
     except Exception as e:
-        logger.error(f"Report generation failed: {e}")
-        final_report = f"Errore generazione report: {e}\n\nRisultati raw:\n{json.dumps(state['layer_results'], indent=2)}"
+        logger.error("Report generation failed: {}".format(e))
+        final_report = "Error generating report: {}\n\nRaw results:\n{}".format(e, json.dumps(state['layer_results'], indent=2))
     
     return {
         "final_report": final_report,
@@ -1036,21 +980,29 @@ def route_after_layer(state: MFIState) -> Literal["continue", "report"]:
 # GRAPH BUILDER
 # ============================================================================
 
-def build_graph():
+def build_graph(on_step: Optional[OnStepCallback] = None):
     """
     Costruisce il grafo LangGraph per MFI troubleshooting.
     
     Struttura:
         L0 → [route] → L1 → [route] → L2 → [route] → L3 → report → END
     """
+    def wrap_node(node_name: str, fn):
+        def wrapped(state: MFIState):
+            if on_step is not None:
+                on_step(node_name, dict(state))
+            return fn(state)
+
+        return wrapped
+
     graph = StateGraph(MFIState)
     
     # Add nodes
-    graph.add_node("layer0", layer0_file_validation)
-    graph.add_node("layer1", layer1_structural_parsing)
-    graph.add_node("layer2", layer2_schema_validation)
-    graph.add_node("layer3", layer3_business_rules)
-    graph.add_node("report", layer5_generate_report)
+    graph.add_node("layer0", wrap_node("layer0", layer0_file_validation))
+    graph.add_node("layer1", wrap_node("layer1", layer1_structural_parsing))
+    graph.add_node("layer2", wrap_node("layer2", layer2_schema_validation))
+    graph.add_node("layer3", wrap_node("layer3", layer3_business_rules))
+    graph.add_node("report", wrap_node("report", layer5_generate_report))
     
     # Set entry point
     graph.set_entry_point("layer0")
@@ -1090,7 +1042,8 @@ def build_graph():
 def run_troubleshooting(
     file_path: str,
     template: str | None = None,
-    survey_type: str = "full mfi"
+    survey_type: str = "full mfi",
+    on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
     Entry point per validazione MFI.
@@ -1104,5 +1057,5 @@ def run_troubleshooting(
         Stato finale con report
     """
     initial_state = create_initial_state(file_path, template, survey_type)
-    agent = build_graph()
+    agent = build_graph(on_step=on_step)
     return agent.invoke(initial_state)

@@ -6,7 +6,7 @@ Classi e modelli per la validazione dataset Price Data WFP.
 from __future__ import annotations
 
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 
@@ -122,12 +122,12 @@ class ProductClassification:
 # ============================================================================
 
 class ValidateFileInput(BaseModel):
-    """Input per l'endpoint di validazione."""
-    pass  # Solo file upload, nessun parametro extra richiesto
+    """Input for the validation endpoint."""
+    pass  # Only file upload, no extra parameters required
 
 
 class ValidateFileOutput(BaseModel):
-    """Output dell'endpoint di validazione."""
+    """Output of the validation endpoint."""
     file_name: str
     file_type: Optional[str] = None
     country: Optional[str] = None
@@ -139,3 +139,14 @@ class ValidateFileOutput(BaseModel):
     product_classifications: List[Dict[str, Any]] = []
     final_report: str
     success: bool
+
+
+class ValidateFileStatusOutput(BaseModel):
+    """Status of an in-progress validation."""
+    run_id: str
+    status: Literal["pending", "running", "completed", "failed"]
+    current_node: Optional[str] = None
+    progress_pct: int = 0
+    warnings: List[str] = []
+    error: Optional[str] = None
+    traceback: Optional[str] = None

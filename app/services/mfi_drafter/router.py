@@ -1,7 +1,7 @@
 """
 MFI Drafter - Router
 ====================
-Endpoint FastAPI per il servizio MFI Report Generator.
+FastAPI endpoints for the MFI Report Generator service.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -18,6 +18,15 @@ from .schemas import (
     get_risk_level
 )
 
+from app.shared.async_runs import (
+    create_run,
+    get_run,
+    set_run_completed,
+    set_run_failed,
+    update_run,
+    update_run_progress,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -29,19 +38,19 @@ _report_status: dict = {}
 @router.post("/generate", response_model=GenerateMFIReportOutput)
 async def generate_mfi_report(input_data: GenerateMFIReportInput):
     """
-    Genera un MFI Report completo.
-    
-    Il processo include:
-    1. MFI Data Agent: Recupera/genera dati MFI per mercati
-    2. Context Retrieval: Recupera notizie contestuali
-    3. Context Extractor: Estrae contesto con LLM
-    4. Graph Designer: Genera visualizzazioni (radar, heatmap, etc.)
-    5. Dimension Drafter: Genera findings per ogni dimensione
-    6. Executive Summary Drafter: Genera executive summary
-    7. Red Team: Quality assurance con possibile loop di correzione
-    
+    Generates a full MFI report.
+
+    The process includes:
+    1. MFI Data Agent: Retrieves/generates MFI data for markets
+    2. Context Retrieval: Retrieves contextual news
+    3. Context Extractor: Extracts context with the LLM
+    4. Graph Designer: Generates visualizations (radar, heatmap, etc.)
+    5. Dimension Drafter: Drafts findings for each dimension
+    6. Executive Summary Drafter: Drafts the executive summary
+    7. Red Team: Quality assurance with possible correction loop
+
     Returns:
-        GenerateMFIReportOutput con tutte le sezioni del report
+        GenerateMFIReportOutput with all report sections
     """
     try:
         logger.info(f"Starting MFI report generation for {input_data.country}")
@@ -99,47 +108,54 @@ async def generate_mfi_report_async(
     background_tasks: BackgroundTasks
 ):
     """
-    Avvia generazione report in background.
-    
+    Starts report generation in the background.
+
     Returns:
-        run_id per polling dello status
+        run_id for polling status
     """
     import uuid
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
-    
-    _report_status[run_id] = {
-        "status": "pending",
-        "current_node": None,
-        "progress_pct": 0,
-        "warnings": []
+
+    create_run(run_id)
+
+    progress_map = {
+        "mfi_data_agent": 10,
+        "context_retrieval": 25,
+        "context_extractor": 40,
+        "mfi_graph_designer": 55,
+        "dimension_drafter": 75,
+        "executive_summary_drafter": 90,
+        "red_team": 95,
     }
     
-    async def run_in_background():
+    def run_in_background():
         try:
-            _report_status[run_id]["status"] = "running"
+            update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_step(node_name: str, _state: dict):
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
             
             result = run_mfi_report_generation(
                 country=input_data.country,
                 data_collection_start=input_data.data_collection_start,
                 data_collection_end=input_data.data_collection_end,
-                markets=input_data.markets
+                markets=input_data.markets,
+                on_step=on_step
             )
-            
-            _report_status[run_id] = {
-                "status": "completed",
-                "current_node": "END",
-                "progress_pct": 100,
-                "result": result,
-                "warnings": result.get("warnings", [])
-            }
+
+            update_run(run_id, warnings=result.get("warnings", []))
+            set_run_completed(run_id, result=result)
             
         except Exception as e:
-            _report_status[run_id] = {
-                "status": "failed",
-                "error": str(e),
-                "progress_pct": 0,
-                "warnings": []
-            }
+            import traceback
+
+            tb_str = traceback.format_exc()
+            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
     
     background_tasks.add_task(run_in_background)
     
@@ -148,36 +164,37 @@ async def generate_mfi_report_async(
 
 @router.get("/status/{run_id}", response_model=MFIReportStatusOutput)
 async def get_report_status(run_id: str):
-    """Controlla lo status di un report in generazione."""
-    if run_id not in _report_status:
+    """Checks the status of an in-progress report."""
+    run = get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
-    
-    status = _report_status[run_id]
-    
+
     return MFIReportStatusOutput(
         run_id=run_id,
-        status=status.get("status", "pending"),
-        current_node=status.get("current_node"),
-        progress_pct=status.get("progress_pct", 0),
-        warnings=status.get("warnings", [])
+        status=run.status,
+        current_node=run.current_node,
+        progress_pct=run.progress_pct,
+        warnings=run.warnings,
+        error=run.error,
+        traceback=run.traceback,
     )
 
 
 @router.get("/result/{run_id}", response_model=GenerateMFIReportOutput)
 async def get_report_result(run_id: str):
-    """Recupera il risultato di un report completato."""
-    if run_id not in _report_status:
+    """Retrieves the result of a completed report."""
+    run = get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
-    
-    status = _report_status[run_id]
-    
-    if status.get("status") != "completed":
+
+    if run.status != "completed":
         raise HTTPException(
             status_code=400, 
-            detail=f"Report not completed. Current status: {status.get('status')}"
+            detail=f"Report not completed. Current status: {run.status}"
         )
-    
-    result = status.get("result", {})
+
+    result = run.result or {}
+
     dimension_scores = result.get("dimension_scores", [])
     national_mfi = round(
         np.mean([d["national_score"] for d in dimension_scores]), 1
@@ -210,13 +227,13 @@ async def get_report_result(run_id: str):
 
 @router.get("/info")
 def get_service_info():
-    """Restituisce metadata del servizio per il frontend."""
+    """Returns service metadata for the frontend."""
     return {
         "id": "mfi-drafter",
         "name": "MFI Report Generator",
-        "description": "Genera Market Functionality Index (MFI) Reports completi. "
-                       "Analizza 9 dimensioni di funzionalità di mercato, genera "
-                       "visualizzazioni, executive summary e raccomandazioni.",
+        "description": "Generates full Market Functionality Index (MFI) reports. "
+                       "Analyzes 9 market functionality dimensions and generates "
+                       "visualizations, an executive summary, and recommendations.",
         "version": "1.0.0",
         "inputs": [
             {
@@ -224,49 +241,49 @@ def get_service_info():
                 "type": "string",
                 "required": True,
                 "label": "Country",
-                "description": "Nome del paese"
+                "description": "Country name"
             },
             {
                 "name": "data_collection_start",
                 "type": "string",
                 "required": True,
                 "label": "Data Collection Start",
-                "description": "Data inizio raccolta dati (YYYY-MM-DD)"
+                "description": "Data collection start date (YYYY-MM-DD)"
             },
             {
                 "name": "data_collection_end",
                 "type": "string",
                 "required": True,
                 "label": "Data Collection End",
-                "description": "Data fine raccolta dati (YYYY-MM-DD)"
+                "description": "Data collection end date (YYYY-MM-DD)"
             },
             {
                 "name": "markets",
                 "type": "array",
                 "required": True,
                 "label": "Markets",
-                "description": "Lista dei mercati surveyati (nomi)"
+                "description": "List of surveyed markets (names)"
             }
         ],
         "outputs": {
-            "run_id": "Identificativo univoco della generazione",
-            "national_mfi": "Score MFI nazionale (0-10)",
-            "risk_distribution": "Distribuzione mercati per livello di rischio",
-            "markets_data": "Dati dettagliati per ogni mercato",
-            "dimension_scores": "Score per ogni dimensione MFI",
-            "executive_summary": "Executive summary generato",
-            "dimension_findings": "Findings per ogni dimensione",
-            "visualizations": "Grafici in formato Base64",
-            "llm_calls": "Numero di chiamate LLM effettuate",
-            "success": "True se la generazione è completata"
+            "run_id": "Unique generation identifier",
+            "national_mfi": "National MFI score (0-10)",
+            "risk_distribution": "Distribution of markets by risk level",
+            "markets_data": "Detailed data for each market",
+            "dimension_scores": "Score for each MFI dimension",
+            "executive_summary": "Generated executive summary",
+            "dimension_findings": "Findings for each dimension",
+            "visualizations": "Charts in Base64 format",
+            "llm_calls": "Number of LLM calls performed",
+            "success": "True if generation is completed"
         },
         "workflow_nodes": [
-            {"id": "mfi_data_agent", "name": "MFI Data Agent", "description": "Recupera/genera dati MFI"},
-            {"id": "context_retrieval", "name": "Context Retrieval", "description": "Recupera notizie contestuali"},
-            {"id": "context_extractor", "name": "Context Extractor", "description": "Estrae contesto con LLM"},
-            {"id": "mfi_graph_designer", "name": "Graph Designer", "description": "Genera visualizzazioni"},
-            {"id": "dimension_drafter", "name": "Dimension Drafter", "description": "Genera findings per dimensione"},
-            {"id": "executive_summary_drafter", "name": "Executive Summary", "description": "Genera executive summary"},
+            {"id": "mfi_data_agent", "name": "MFI Data Agent", "description": "Retrieves/generates MFI data"},
+            {"id": "context_retrieval", "name": "Context Retrieval", "description": "Retrieves contextual news"},
+            {"id": "context_extractor", "name": "Context Extractor", "description": "Extracts context with the LLM"},
+            {"id": "mfi_graph_designer", "name": "Graph Designer", "description": "Generates visualizations"},
+            {"id": "dimension_drafter", "name": "Dimension Drafter", "description": "Drafts findings per dimension"},
+            {"id": "executive_summary_drafter", "name": "Executive Summary", "description": "Drafts executive summary"},
             {"id": "red_team", "name": "Red Team QA", "description": "Quality assurance"}
         ],
         "mfi_dimensions": MFI_DIMENSIONS,
@@ -282,7 +299,7 @@ def health_check():
 
 @router.get("/dimensions")
 def get_mfi_dimensions():
-    """Restituisce le 9 dimensioni MFI con descrizioni."""
+    """Returns the 9 MFI dimensions with descriptions."""
     from .graph import DIMENSION_DESCRIPTIONS
     
     return {
@@ -305,7 +322,7 @@ def get_mfi_dimensions():
 
 @router.get("/sample-markets")
 def get_sample_markets():
-    """Restituisce mercati di esempio per testing."""
+    """Returns sample markets for testing."""
     return {
         "Ghana": {
             "markets": [

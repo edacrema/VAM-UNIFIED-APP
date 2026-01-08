@@ -18,7 +18,7 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Dict, Any, Optional, Callable
 from collections import Counter
 import operator
 
@@ -32,6 +32,8 @@ from app.shared.llm import get_model
 from .schemas import ValidationError, LayerResult, PriceDataTemplate, Severity
 
 logger = logging.getLogger(__name__)
+
+OnStepCallback = Callable[[str, Dict[str, Any]], None]
 
 
 # ============================================================================
@@ -149,6 +151,11 @@ PROMPTS = {
     "batch_product_classification": {
         "system": """You are a food product classification expert for WFP.
 You will classify multiple products at once against the WFP standard product list.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+- Keep "original_name" exactly as provided (it may be non-English). Do not translate it.
+- All other text values (e.g., "matched_name") must be in English.
 
 For each product, find the best matching WFP standard product.
 Consider common variations, typos, abbreviations, and language differences.
@@ -306,7 +313,7 @@ def layer0_file_validation(state: PriceDataState) -> dict:
         errors.append(ValidationError(
             code="F0.0",
             severity=Severity.CRITICAL,
-            message="File non trovato"
+            message="File not found"
         ))
         result = LayerResult(
             layer_id=0,
@@ -336,8 +343,8 @@ def layer0_file_validation(state: PriceDataState) -> dict:
         errors.append(ValidationError(
             code="F0.1",
             severity=Severity.CRITICAL,
-            message=f"Formato file non supportato: {suffix}",
-            suggestion="Usare file Excel (.xlsx) o CSV (.csv)"
+            message="Unsupported file format: {}".format(suffix),
+            suggestion="Use an Excel (.xlsx) or CSV (.csv) file"
         ))
     
     # F0.2: Binary file detection (for CSV)
@@ -351,18 +358,18 @@ def layer0_file_validation(state: PriceDataState) -> dict:
                 errors.append(ValidationError(
                     code="F0.2",
                     severity=Severity.CRITICAL,
-                    message="File è Excel (.xlsx), non CSV",
-                    suggestion="Rinominare in .xlsx o esportare come CSV"
+                    message="File is Excel (.xlsx), not CSV",
+                    suggestion="Rename to .xlsx or export as CSV"
                 ))
             elif header[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':  # XLS
                 errors.append(ValidationError(
                     code="F0.2",
                     severity=Severity.CRITICAL,
-                    message="File è Excel (.xls), non CSV",
-                    suggestion="Rinominare in .xls o esportare come CSV"
+                    message="File is Excel (.xls), not CSV",
+                    suggestion="Rename to .xls or export as CSV"
                 ))
         except Exception as e:
-            logger.warning(f"Binary detection failed: {e}")
+            logger.warning("Binary detection failed: {}".format(e))
         
         # F0.3: Encoding detection
         try:
@@ -386,7 +393,7 @@ def layer0_file_validation(state: PriceDataState) -> dict:
             warnings.append(ValidationError(
                 code="F0.3",
                 severity=Severity.WARNING,
-                message=f"Impossibile rilevare encoding: {e}"
+                message="Unable to detect encoding: {}".format(e)
             ))
             detected_encoding = 'utf-8'
     
@@ -473,7 +480,7 @@ def layer1_structural_parsing(state: PriceDataState) -> dict:
             errors.append(ValidationError(
                 code="S1.0",
                 severity=Severity.CRITICAL,
-                message=f"Impossibile leggere file Excel: {e}"
+                message="Unable to read Excel file: {}".format(e)
             ))
     
     elif file_type == "CSV":
@@ -490,8 +497,8 @@ def layer1_structural_parsing(state: PriceDataState) -> dict:
                 warnings.append(ValidationError(
                     code="S1.1",
                     severity=Severity.WARNING,
-                    message="Delimitatore ';' rilevato (tipico tastiera francese)",
-                    suggestion="Usare ',' come separatore standard"
+                    message="Detected ';' delimiter (common with French locale settings)",
+                    suggestion="Use ',' as the standard delimiter"
                 ))
             
             # Check for broken rows
@@ -517,9 +524,9 @@ def layer1_structural_parsing(state: PriceDataState) -> dict:
                 errors.append(ValidationError(
                     code="S1.2",
                     severity=Severity.CRITICAL,
-                    message=f"Rilevate {len(broken_rows)}+ righe con numero colonne errato",
+                    message="Detected {}+ rows with an incorrect number of columns".format(len(broken_rows)),
                     details={'broken_rows': broken_rows},
-                    suggestion="Verificare ritorni a capo dentro celle"
+                    suggestion="Check for line breaks within quoted cells"
                 ))
             
             # Load DataFrame
@@ -529,7 +536,7 @@ def layer1_structural_parsing(state: PriceDataState) -> dict:
             errors.append(ValidationError(
                 code="S1.0",
                 severity=Severity.CRITICAL,
-                message=f"Impossibile leggere il file CSV: {e}"
+                message="Unable to read CSV file: {}".format(e)
             ))
     
     if df is not None:
@@ -612,9 +619,9 @@ def layer2_schema_validation(state: PriceDataState) -> dict:
         errors.append(ValidationError(
             code="SC2.1",
             severity=Severity.ERROR,
-            message=f"Categorie di colonne mancanti: {missing_categories}",
+            message="Missing required column categories: {}".format(missing_categories),
             details={'missing': missing_categories},
-            suggestion=f"Aggiungere almeno una colonna per: {', '.join(missing_categories)}"
+            suggestion="Add at least one column for: {}".format(', '.join(missing_categories))
         ))
     
     # SC2.2: Duplicate columns
@@ -625,7 +632,7 @@ def layer2_schema_validation(state: PriceDataState) -> dict:
         errors.append(ValidationError(
             code="SC2.2",
             severity=Severity.CRITICAL,
-            message=f"Colonne duplicate: {list(duplicates.keys())}",
+            message="Duplicate columns: {}".format(list(duplicates.keys())),
             details={'duplicates': duplicates}
         ))
     
@@ -637,9 +644,9 @@ def layer2_schema_validation(state: PriceDataState) -> dict:
         warnings.append(ValidationError(
             code="SC2.3",
             severity=Severity.WARNING,
-            message=f"Lingua rilevata: {detected_language.upper()} (non inglese)",
+            message="Detected language: {} (not English)".format(detected_language.upper()),
             details={'language': detected_language},
-            suggestion="Standardizzare i mesi in inglese (January, February, ...)"
+            suggestion="Standardize month names to English (January, February, ...)"
         ))
     
     # SC2.4: Template comparison if provided
@@ -654,14 +661,14 @@ def layer2_schema_validation(state: PriceDataState) -> dict:
             errors.append(ValidationError(
                 code="SC2.4a",
                 severity=Severity.ERROR,
-                message=f"Colonne mancanti rispetto al template: {list(missing_from_template)[:10]}"
+                message="Columns missing compared to template: {}".format(list(missing_from_template)[:10])
             ))
         
         if extra_in_submitted:
             warnings.append(ValidationError(
                 code="SC2.4b",
                 severity=Severity.INFO,
-                message=f"Colonne extra non nel template: {list(extra_in_submitted)[:10]}"
+                message="Extra columns not in template: {}".format(list(extra_in_submitted)[:10])
             ))
         
         # Check column order
@@ -672,7 +679,7 @@ def layer2_schema_validation(state: PriceDataState) -> dict:
             warnings.append(ValidationError(
                 code="SC2.4c",
                 severity=Severity.INFO,
-                message="Ordine colonne diverso dal template"
+                message="Column order differs from template"
             ))
     
     # Extract metadata
@@ -783,7 +790,7 @@ def layer3_product_classification(state: PriceDataState) -> dict:
         warnings.append(ValidationError(
             code="PC3.0",
             severity=Severity.WARNING,
-            message="Colonna prodotti non trovata, classificazione saltata"
+            message="Product column not found; classification skipped"
         ))
         result = LayerResult(
             layer_id=3,
@@ -844,18 +851,18 @@ def layer3_product_classification(state: PriceDataState) -> dict:
                 classifications.append(item)
                 
         except Exception as e:
-            logger.warning(f"LLM classification failed: {e}")
+            logger.warning("LLM classification failed: {}".format(e))
             warnings.append(ValidationError(
                 code="PC3.1",
                 severity=Severity.WARNING,
-                message=f"Classificazione LLM fallita per {len(unmatched)} prodotti"
+                message="LLM classification failed for {} products".format(len(unmatched))
             ))
     
     elif len(unmatched) > 20:
         warnings.append(ValidationError(
             code="PC3.2",
             severity=Severity.INFO,
-            message=f"{len(unmatched)} prodotti non classificati (troppi per batch LLM)"
+            message="{} products not classified (too many for LLM batch)".format(len(unmatched))
         ))
     
     # Count unmatched (confidence < 0.5 or null)
@@ -865,7 +872,7 @@ def layer3_product_classification(state: PriceDataState) -> dict:
         warnings.append(ValidationError(
             code="PC3.3",
             severity=Severity.WARNING,
-            message=f"{len(low_confidence)} prodotti con match bassa confidenza o non trovati",
+            message="{} products with low-confidence match or not found".format(len(low_confidence)),
             details={'products': [c['original_name'] for c in low_confidence[:10]]}
         ))
     
@@ -980,21 +987,29 @@ def route_after_layer(state: PriceDataState) -> Literal["continue", "report"]:
 # GRAPH BUILDER
 # ============================================================================
 
-def build_graph():
+def build_graph(on_step: Optional[OnStepCallback] = None):
     """
     Costruisce il grafo LangGraph per Price Data troubleshooting.
     
     Struttura:
         L0 → [route] → L1 → [route] → L2 → [route] → L3 → report → END
     """
+    def wrap_node(node_name: str, fn):
+        def wrapped(state: PriceDataState):
+            if on_step is not None:
+                on_step(node_name, dict(state))
+            return fn(state)
+
+        return wrapped
+
     graph = StateGraph(PriceDataState)
     
     # Add nodes
-    graph.add_node("layer0", layer0_file_validation)
-    graph.add_node("layer1", layer1_structural_parsing)
-    graph.add_node("layer2", layer2_schema_validation)
-    graph.add_node("layer3", layer3_product_classification)
-    graph.add_node("report", layer4_generate_report)
+    graph.add_node("layer0", wrap_node("layer0", layer0_file_validation))
+    graph.add_node("layer1", wrap_node("layer1", layer1_structural_parsing))
+    graph.add_node("layer2", wrap_node("layer2", layer2_schema_validation))
+    graph.add_node("layer3", wrap_node("layer3", layer3_product_classification))
+    graph.add_node("report", wrap_node("report", layer4_generate_report))
     
     # Set entry point
     graph.set_entry_point("layer0")
@@ -1033,7 +1048,8 @@ def build_graph():
 
 def run_troubleshooting(
     file_path: str,
-    template_path: str | None = None
+    template_path: str | None = None,
+    on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
     Entry point per validazione Price Data.
@@ -1046,5 +1062,5 @@ def run_troubleshooting(
         Stato finale con report
     """
     initial_state = create_initial_state(file_path, template_path)
-    agent = build_graph()
+    agent = build_graph(on_step=on_step)
     return agent.invoke(initial_state)

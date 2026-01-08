@@ -18,7 +18,7 @@ import random
 import logging
 from math import pi
 from datetime import datetime, timedelta
-from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional
+from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
 import operator
 
 import pandas as pd
@@ -35,6 +35,8 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+OnStepCallback = Callable[[str, Dict[str, Any]], None]
 
 WFP_BLUE = "#0072BC"
 
@@ -335,8 +337,6 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         "current_node": "context_retrieval"
     }
 
-
-# ============================================================================
 # NODE: CONTEXT EXTRACTOR
 # ============================================================================
 
@@ -357,6 +357,9 @@ def node_context_extractor(state: MFIReportState) -> dict:
     doc_text = "\n".join([f"[{d['source']}]: {d['content'][:400]}..." for d in docs[:5]])
     
     prompt = f"""Extract a brief country context (3-4 sentences) relevant for MFI report from these sources about {state['country']}.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 Focus on: economic situation, food security, market-affecting factors.
 
 SOURCES:
@@ -381,153 +384,6 @@ Return JSON: {{"country_context": "Your 3-4 sentence context..."}}"""
         "country_context": context,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "current_node": "context_extractor"
-    }
-
-
-# ============================================================================
-# NODE: MFI GRAPH DESIGNER
-# ============================================================================
-
-def node_mfi_graph_designer(state: MFIReportState) -> dict:
-    """Nodo: Genera visualizzazioni MFI."""
-    logger.info("[GraphDesigner] Generating MFI visualizations")
-    
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import seaborn as sns
-    
-    sns.set_style("whitegrid")
-    
-    visualizations = {}
-    markets_data = state["markets_data"]
-    dimension_scores = state["dimension_scores"]
-    survey_meta = state.get("survey_metadata", {}) or {}
-    regions = survey_meta.get("regions_covered", [])
-    if not regions:
-        regions = sorted({m.get("region", "Unknown") for m in markets_data})
-    
-    # 1. Radar Chart - Regional Comparison
-    try:
-        categories = [d["dimension"] for d in dimension_scores]
-        N = len(categories)
-        angles = [n / float(N) * 2 * pi for n in range(N)]
-        angles += angles[:1]
-        
-        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-        colors = plt.cm.Set2(np.linspace(0, 1, len(regions)))
-        
-        for idx, region in enumerate(regions):
-            values = []
-            for dim_data in dimension_scores:
-                val = dim_data["regional_scores"].get(region, 0)
-                values.append(val)
-            values += values[:1]
-            ax.plot(angles, values, 'o-', linewidth=2, label=region, color=colors[idx])
-            ax.fill(angles, values, alpha=0.15, color=colors[idx])
-        
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(categories, size=9)
-        ax.set_ylim(0, 10)
-        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
-        plt.title(f"MFI Regional Comparison - {state['country']}", size=14, fontweight='bold', y=1.08)
-        
-        visualizations["radar_regional"] = save_plot_to_base64()
-        logger.info("Radar chart generated")
-    except Exception as e:
-        logger.error(f"Radar chart error: {e}")
-    
-    # 2. Dimension Heatmap
-    try:
-        market_names = [m["market_name"] for m in markets_data]
-        dims = [d["dimension"] for d in dimension_scores]
-        
-        matrix = []
-        for market in markets_data:
-            row = [market["dimension_scores"].get(dim, 0) for dim in dims]
-            matrix.append(row)
-        
-        df_heatmap = pd.DataFrame(matrix, index=market_names, columns=dims)
-        
-        fig, ax = plt.subplots(figsize=(14, max(8, len(market_names) * 0.4)))
-        sns.heatmap(df_heatmap, annot=True, fmt='.1f', cmap='RdYlGn',
-                   vmin=0, vmax=10, linewidths=0.5, ax=ax,
-                   cbar_kws={'label': 'MFI Score'})
-        ax.set_title(f"MFI Scores by Market and Dimension - {state['country']}", 
-                    fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        
-        visualizations["dimension_heatmap"] = save_plot_to_base64()
-        logger.info("Heatmap generated")
-    except Exception as e:
-        logger.error(f"Heatmap error: {e}")
-    
-    # 3. Risk Distribution
-    try:
-        risk_counts = {}
-        for m in markets_data:
-            risk_counts[m["risk_level"]] = risk_counts.get(m["risk_level"], 0) + 1
-        
-        risk_order = ["Low Risk", "Medium Risk", "High Risk", "Very High Risk"]
-        labels = [r for r in risk_order if r in risk_counts]
-        values = [risk_counts[r] for r in labels]
-        colors = [RISK_COLORS[r] for r in labels]
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        bars = ax.bar(labels, values, color=colors, edgecolor='black')
-        
-        for bar, val in zip(bars, values):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
-                   str(val), ha='center', fontsize=12, fontweight='bold')
-        
-        ax.set_title(f"Market Risk Distribution - {state['country']}", 
-                    fontsize=14, fontweight='bold')
-        ax.set_ylabel("Number of Markets")
-        sns.despine()
-        
-        visualizations["risk_distribution"] = save_plot_to_base64()
-        logger.info("Risk distribution generated")
-    except Exception as e:
-        logger.error(f"Risk distribution error: {e}")
-    
-    # 4. National Overview (Horizontal Bar)
-    try:
-        dims = [d["dimension"] for d in dimension_scores]
-        national_scores = [d["national_score"] for d in dimension_scores]
-        bar_colors = [
-            RISK_COLORS["Low Risk"] if s >= 7 else 
-            RISK_COLORS["Medium Risk"] if s >= 5.5 else 
-            RISK_COLORS["High Risk"] if s >= 4 else 
-            RISK_COLORS["Very High Risk"] 
-            for s in national_scores
-        ]
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        bars = ax.barh(dims, national_scores, color=bar_colors, edgecolor='black')
-        
-        for bar, score in zip(bars, national_scores):
-            ax.text(score + 0.1, bar.get_y() + bar.get_height()/2, 
-                   f'{score:.1f}', va='center', fontsize=10)
-        
-        ax.set_xlim(0, 10)
-        ax.set_xlabel("MFI Score")
-        ax.set_title(f"National MFI Scores - {state['country']}", 
-                    fontsize=14, fontweight='bold')
-        ax.axvline(x=7, color='green', linestyle='--', alpha=0.5)
-        ax.axvline(x=5.5, color='orange', linestyle='--', alpha=0.5)
-        ax.axvline(x=4, color='red', linestyle='--', alpha=0.5)
-        sns.despine()
-        plt.tight_layout()
-        
-        visualizations["national_overview"] = save_plot_to_base64()
-        logger.info("National overview generated")
-    except Exception as e:
-        logger.error(f"National overview error: {e}")
-    
-    return {
-        "visualizations": visualizations,
-        "current_node": "mfi_graph_designer"
     }
 
 
@@ -573,6 +429,9 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
             sub_scores_avg = {k: round(np.mean(v), 2) for k, v in sub_scores_combined.items()}
             
             prompt = f"""Generate findings for the **{dimension}** MFI dimension.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 
 Data:
 - National Score: {dim_data['national_score']}/10
@@ -645,6 +504,9 @@ def node_executive_summary_drafter(state: MFIReportState) -> dict:
     regions_covered = survey_meta.get("regions_covered", [])
     prompt = f"""Generate Executive Summary for {state['country']} MFI Report ({collection_period}).
 
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+
 Survey: {len(markets_data)} markets, {len(regions_covered)} admin1 areas, {survey_meta.get('total_traders', 'N/A')} traders
 Risk Distribution: {json.dumps(risk_dist)}
 Best: {sorted_dims[0]['dimension']} ({sorted_dims[0]['national_score']}), Worst: {sorted_dims[-1]['dimension']} ({sorted_dims[-1]['national_score']})
@@ -657,7 +519,8 @@ Generate:
 2. KEY FINDINGS: 4-5 bullets
 3. RECOMMENDATIONS: 2-3 items
 
-Output JSON: {{"motivation": "...", "key_findings": "...", "recommendations": "..."}}"""
+Output JSON:
+{{"motivation": "...", "key_findings": "...", "recommendations": "..."}}"""
     
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -711,6 +574,9 @@ def node_red_team(state: MFIReportState) -> dict:
     ])
     
     prompt = f"""Fact-check this MFI report against the source data.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
 
 GROUND TRUTH:
 Dimension Scores: {json.dumps([{'dimension': d['dimension'], 'score': d['national_score']} for d in state['dimension_scores']])}
@@ -768,19 +634,30 @@ def should_correct(state: MFIReportState) -> Literal["correct", "finish"]:
     return "finish"
 
 
-def build_graph():
+def build_graph(on_step: Optional[OnStepCallback] = None):
     """Costruisce il grafo LangGraph per MFI Report."""
-    
+
+    def wrap_node(node_name: str, fn):
+        def wrapped(state: MFIReportState):
+            if on_step is not None:
+                on_step(node_name, dict(state))
+            return fn(state)
+
+        return wrapped
+
     graph = StateGraph(MFIReportState)
     
     # Add nodes
-    graph.add_node("mfi_data_agent", node_mfi_data_agent)
-    graph.add_node("context_retrieval", node_context_retrieval)
-    graph.add_node("context_extractor", node_context_extractor)
-    graph.add_node("mfi_graph_designer", node_mfi_graph_designer)
-    graph.add_node("dimension_drafter", node_dimension_drafter)
-    graph.add_node("executive_summary_drafter", node_executive_summary_drafter)
-    graph.add_node("red_team", node_red_team)
+    graph.add_node("mfi_data_agent", wrap_node("mfi_data_agent", node_mfi_data_agent))
+    graph.add_node("context_retrieval", wrap_node("context_retrieval", node_context_retrieval))
+    graph.add_node("context_extractor", wrap_node("context_extractor", node_context_extractor))
+    graph.add_node("mfi_graph_designer", wrap_node("mfi_graph_designer", node_mfi_graph_designer))
+    graph.add_node("dimension_drafter", wrap_node("dimension_drafter", node_dimension_drafter))
+    graph.add_node(
+        "executive_summary_drafter",
+        wrap_node("executive_summary_drafter", node_executive_summary_drafter),
+    )
+    graph.add_node("red_team", wrap_node("red_team", node_red_team))
     
     # Set entry point
     graph.set_entry_point("mfi_data_agent")
@@ -814,7 +691,8 @@ def run_mfi_report_generation(
     country: str,
     data_collection_start: str,
     data_collection_end: str,
-    markets: List[str]
+    markets: List[str],
+    on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
     Entry point per la generazione del MFI Report.
@@ -829,5 +707,5 @@ def run_mfi_report_generation(
         markets=markets
     )
     
-    agent = build_graph()
+    agent = build_graph(on_step=on_step)
     return agent.invoke(initial_state)

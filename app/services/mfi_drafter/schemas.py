@@ -138,15 +138,15 @@ class SurveyMetadata:
 # ============================================================================
 
 class GenerateMFIReportInput(BaseModel):
-    """Input per generazione report MFI."""
-    country: str = Field(..., description="Nome del paese")
-    data_collection_start: str = Field(..., description="Data inizio raccolta dati (YYYY-MM-DD)")
-    data_collection_end: str = Field(..., description="Data fine raccolta dati (YYYY-MM-DD)")
-    markets: List[str] = Field(..., description="Lista dei mercati surveyati")
+    """Input for generating MFI report."""
+    country: str = Field(..., description="Country name")
+    data_collection_start: str = Field(..., description="Data collection start date (YYYY-MM-DD)")
+    data_collection_end: str = Field(..., description="Data collection end date (YYYY-MM-DD)")
+    markets: List[str] = Field(..., description="List of surveyed markets")
 
 
 class GenerateMFIReportOutput(BaseModel):
-    """Output della generazione report MFI."""
+    """Output of MFI report generation."""
     run_id: str
     country: str
     data_collection_start: str
@@ -177,9 +177,11 @@ class GenerateMFIReportOutput(BaseModel):
 
 
 class MFIReportStatusOutput(BaseModel):
-    """Status di un report in generazione."""
+    """Status of an in-progress report."""
     run_id: str
     status: Literal["pending", "running", "completed", "failed"]
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = []
+    error: Optional[str] = None
+    traceback: Optional[str] = None
