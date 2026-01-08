@@ -21,7 +21,8 @@ import requests
 from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional
+from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
+
 from collections import Counter
 import operator
 
@@ -35,6 +36,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from app.shared.llm import get_model
 
 logger = logging.getLogger(__name__)
+
+OnStepCallback = Callable[[str, Dict[str, Any]], None]
 
 
 # ============================================================================
@@ -992,21 +995,29 @@ def should_correct(state: MarketReportState) -> Literal["correct", "finish"]:
     return "finish"
 
 
-def build_graph():
+def build_graph(on_step: Optional[OnStepCallback] = None):
     """Costruisce il grafo LangGraph per Market Monitor."""
     
+    def wrap_node(node_name: str, fn):
+        def wrapped(state: MarketReportState):
+            if on_step is not None:
+                on_step(node_name, dict(state))
+            return fn(state)
+
+        return wrapped
+
     graph = StateGraph(MarketReportState)
     
     # Add nodes
-    graph.add_node("data_agent", node_data_agent)
-    graph.add_node("graph_designer", node_graph_designer)
-    graph.add_node("news_retrieval", node_news_retrieval)
-    graph.add_node("event_mapper", node_event_mapper)
-    graph.add_node("trend_analyst", node_trend_analyst)
-    graph.add_node("module_orchestrator", node_module_orchestrator)
-    graph.add_node("highlights_drafter", node_highlights_drafter)
-    graph.add_node("narrative_drafter", node_narrative_drafter)
-    graph.add_node("red_team", node_red_team)
+    graph.add_node("data_agent", wrap_node("data_agent", node_data_agent))
+    graph.add_node("graph_designer", wrap_node("graph_designer", node_graph_designer))
+    graph.add_node("news_retrieval", wrap_node("news_retrieval", node_news_retrieval))
+    graph.add_node("event_mapper", wrap_node("event_mapper", node_event_mapper))
+    graph.add_node("trend_analyst", wrap_node("trend_analyst", node_trend_analyst))
+    graph.add_node("module_orchestrator", wrap_node("module_orchestrator", node_module_orchestrator))
+    graph.add_node("highlights_drafter", wrap_node("highlights_drafter", node_highlights_drafter))
+    graph.add_node("narrative_drafter", wrap_node("narrative_drafter", node_narrative_drafter))
+    graph.add_node("red_team", wrap_node("red_team", node_red_team))
     
     # Set entry point
     graph.set_entry_point("data_agent")
@@ -1046,7 +1057,8 @@ def run_report_generation(
     currency_code: str = "USD",
     enabled_modules: List[str] = None,
     previous_report_text: str = "",
-    use_mock_data: bool = True
+    use_mock_data: bool = True,
+    on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
     Entry point per la generazione del Market Monitor.
@@ -1068,5 +1080,5 @@ def run_report_generation(
         use_mock_data=use_mock_data
     )
     
-    agent = build_graph()
+    agent = build_graph(on_step=on_step)
     return agent.invoke(initial_state)
