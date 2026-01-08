@@ -139,6 +139,8 @@ class GenerateReportOutput(BaseModel):
     trend_analysis: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = []
     module_sections: Dict[str, str] = {}
+    document_references: List[Dict[str, Any]] = []
+    news_counts: Dict[str, int] = {}
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True
@@ -151,5 +153,6 @@ class ReportStatusOutput(BaseModel):
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = []
+    metadata: Dict[str, Any] = {}
     error: Optional[str] = None
     traceback: Optional[str] = None

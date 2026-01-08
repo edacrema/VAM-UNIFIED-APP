@@ -83,6 +83,8 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             trend_analysis=result.get("trend_analysis"),
             events=result.get("events", []),
             module_sections=result.get("module_sections", {}),
+            document_references=result.get("document_references", []),
+            news_counts=result.get("news_counts", {}),
             warnings=result.get("warnings", []),
             llm_calls=result.get("llm_calls", 0),
             success=True
@@ -142,6 +144,10 @@ async def generate_market_monitor_async(
                 else:
                     update_run(run_id, current_node=node_name)
 
+                news_counts = _state.get("news_counts")
+                if isinstance(news_counts, dict):
+                    update_run(run_id, metadata={"news_counts": news_counts})
+                    
             result = run_report_generation(
                 country=input_data.country,
                 time_period=input_data.time_period,
@@ -184,6 +190,7 @@ async def get_report_status(run_id: str):
         current_node=run.current_node,
         progress_pct=run.progress_pct,
         warnings=run.warnings,
+        metadata=getattr(run, "metadata", {}) or {},
         error=run.error,
         traceback=run.traceback,
     )
@@ -216,6 +223,8 @@ async def get_report_result(run_id: str):
         trend_analysis=result.get("trend_analysis"),
         events=result.get("events", []),
         module_sections=result.get("module_sections", {}),
+        document_references=result.get("document_references", []),
+        news_counts=result.get("news_counts", {}),
         warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
         success=True

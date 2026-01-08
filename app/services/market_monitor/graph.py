@@ -101,6 +101,8 @@ class MarketReportState(TypedDict):
 
     # ===== BRANCH 2 OUTPUTS (Contextual Intelligence) =====
     documents: List[Dict[str, Any]]
+    document_references: List[Dict[str, Any]]
+    news_counts: Dict[str, int]
     events: List[Dict[str, Any]]
     trend_analysis: Optional[Dict[str, Any]]
 
@@ -145,6 +147,8 @@ def create_initial_state(
         data_statistics=None,
         visualizations={},
         documents=[],
+        document_references=[],
+        news_counts={"GDELT": 0, "ReliefWeb": 0, "total": 0},
         events=[],
         trend_analysis=None,
         exchange_rate_data=None,
@@ -598,9 +602,29 @@ def node_news_retrieval(state: MarketReportState) -> dict:
             "content": f"The local currency has experienced depreciation against the USD, putting additional pressure on import costs. Fuel prices remain elevated, affecting transportation and production costs."
         }
     ]
+
+    refs = [
+        {
+            "doc_id": d.get("doc_id"),
+            "source": d.get("source"),
+            "title": d.get("title"),
+            "url": d.get("url"),
+            "date": d.get("date"),
+        }
+        for d in documents
+    ]
+
+    counts = Counter([d.get("source", "Unknown") for d in documents])
+    news_counts = {
+        "GDELT": int(counts.get("GDELT", 0)),
+        "ReliefWeb": int(counts.get("ReliefWeb", 0)),
+        "total": int(len(documents)),
+    }
     
     return {
         "documents": documents,
+        "document_references": refs,
+        "news_counts": news_counts,
         "current_node": "news_retrieval"
     }
 
@@ -915,6 +939,21 @@ Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"
         section_key = f"{module_id.upper()}_ANALYSIS"
         sections[section_key] = section_text
     
+    document_references = state.get("document_references", []) or []
+    if document_references:
+        lines = ["REFERENCES"]
+        for ref in document_references:
+            doc_id = ref.get("doc_id", "")
+            source = ref.get("source", "")
+            date = ref.get("date", "")
+            title = ref.get("title", "")
+            url = ref.get("url", "")
+            lines.append(f"[{doc_id}] {source} ({date}) {title}")
+            if url:
+                lines.append(url)
+            lines.append("")
+        sections["REFERENCES"] = "\n".join(lines).strip()
+    
     return {
         "report_draft_sections": sections,
         "skeptic_flags": [],
@@ -1000,9 +1039,19 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     
     def wrap_node(node_name: str, fn):
         def wrapped(state: MarketReportState):
+            state_dict = dict(state)
             if on_step is not None:
-                on_step(node_name, dict(state))
-            return fn(state)
+                on_step(node_name, state_dict)
+
+            updates = fn(state)
+
+            if on_step is not None:
+                merged = dict(state_dict)
+                if isinstance(updates, dict):
+                    merged.update(updates)
+                on_step(node_name, merged)
+
+            return updates
 
         return wrapped
 

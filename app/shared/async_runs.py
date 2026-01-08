@@ -18,6 +18,7 @@ class RunRecord:
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     traceback: Optional[str] = None
     result: Any = None
@@ -31,7 +32,7 @@ _LOCK = threading.Lock()
 
 def create_run(run_id: str) -> None:
     with _LOCK:
-        _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0)
+        _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={})
 
 
 def get_run(run_id: str) -> Optional[RunRecord]:
@@ -44,6 +45,7 @@ def get_run(run_id: str) -> Optional[RunRecord]:
             current_node=rec.current_node,
             progress_pct=rec.progress_pct,
             warnings=list(rec.warnings),
+            metadata=dict(rec.metadata),
             error=rec.error,
             traceback=rec.traceback,
             result=rec.result,
@@ -59,6 +61,7 @@ def update_run(
     current_node: Any = _UNSET,
     progress_pct: Any = _UNSET,
     warnings: Any = _UNSET,
+    metadata: Any = _UNSET,
     error: Any = _UNSET,
     traceback: Any = _UNSET,
     result: Any = _UNSET,
@@ -82,6 +85,14 @@ def update_run(
                 rec.warnings.extend([w for w in warnings if w])
             else:
                 rec.warnings = []
+
+        if metadata is not _UNSET:
+            if metadata is None:
+                rec.metadata = {}
+            elif isinstance(metadata, dict):
+                rec.metadata.update(metadata)
+            else:
+                rec.metadata = {"value": metadata}
 
         if error is not _UNSET:
             rec.error = error
