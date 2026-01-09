@@ -60,7 +60,6 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             data_collection_start=input_data.data_collection_start,
             data_collection_end=input_data.data_collection_end,
             markets=input_data.markets,
-            use_mock_data=input_data.use_mock_data,
         )
         
         # Calculate national MFI
@@ -153,7 +152,6 @@ async def generate_mfi_report_async(
                 data_collection_start=input_data.data_collection_start,
                 data_collection_end=input_data.data_collection_end,
                 markets=input_data.markets,
-                use_mock_data=input_data.use_mock_data,
                 on_step=on_step
             )
             
@@ -274,14 +272,6 @@ def get_service_info():
                 "required": True,
                 "label": "Markets",
                 "description": "List of surveyed markets (names)"
-            },
-            {
-                "name": "use_mock_data",
-                "type": "boolean",
-                "required": False,
-                "label": "Use Mock Data",
-                "description": "If True, use simulated context documents instead of calling real external APIs",
-                "default": True
             }
         ],
         "outputs": {

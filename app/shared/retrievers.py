@@ -80,17 +80,17 @@ class GDELTRetriever:
                 documents = []
                 for art in articles:
                     content = self._scrape_content(art.get("url"))
-                    if len(content) >= 150:
-                        publisher = art.get("domain", "")
-                        documents.append({
-                            "doc_id": f"gdelt_{uuid.uuid4().hex[:8]}",
-                            "title": art.get("title", ""),
-                            "url": art.get("url", ""),
-                            "source": "GDELT",
-                            "publisher": publisher,
-                            "date": art.get("seendate", "")[:8],
-                            "content": content
-                        })
+                    publisher = art.get("domain", "")
+                    safe_content = content if content else (art.get("title", "") or "")
+                    documents.append({
+                        "doc_id": f"gdelt_{uuid.uuid4().hex[:8]}",
+                        "title": art.get("title", ""),
+                        "url": art.get("url", ""),
+                        "source": "GDELT",
+                        "publisher": publisher,
+                        "date": art.get("seendate", "")[:8],
+                        "content": safe_content[:5000],
+                    })
                 trace["num_documents"] = len(documents)
                 trace["samples"] = [
                     {

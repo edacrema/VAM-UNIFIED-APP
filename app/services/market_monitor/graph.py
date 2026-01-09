@@ -577,7 +577,6 @@ def node_graph_designer(state: MarketReportState) -> dict:
         "current_node": "graph_designer"
     }
 
-
 # ============================================================================
 # NODE: NEWS RETRIEVAL (Simplified - uses mock)
 # ============================================================================
@@ -589,64 +588,42 @@ def node_news_retrieval(state: MarketReportState) -> dict:
     documents: List[Dict[str, Any]] = []
     retriever_traces: List[Dict[str, Any]] = []
 
-    if not state.get("use_mock_data", True):
-        country = state.get("country", "")
-        time_period = state.get("time_period", "")
+    country = state.get("country", "")
+    time_period = state.get("time_period", "")
 
-        try:
-            start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
-        except Exception:
-            start_dt = datetime.utcnow().replace(day=1)
+    try:
+        start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
+    except Exception:
+        start_dt = datetime.utcnow().replace(day=1)
 
-        end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-        start_date = start_dt.strftime("%Y-%m-%d")
-        end_date = end_dt.strftime("%Y-%m-%d")
+    end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    start_date = start_dt.strftime("%Y-%m-%d")
+    end_date = end_dt.strftime("%Y-%m-%d")
 
-        rw = ReliefWebRetriever(verbose=False)
-        rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=10)
-        if getattr(rw, "last_trace", None):
-            retriever_traces.append(rw.last_trace)
+    rw = ReliefWebRetriever(verbose=False)
+    rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=10)
+    if getattr(rw, "last_trace", None):
+        retriever_traces.append(rw.last_trace)
 
-        gdelt = GDELTRetriever(verbose=False)
-        query = f"{country} food prices market"
-        gd_docs = gdelt.fetch(query=query, start_date=start_date, end_date=end_date, max_records=10)
-        if getattr(gdelt, "last_trace", None):
-            retriever_traces.append(gdelt.last_trace)
+    gdelt = GDELTRetriever(verbose=False)
+    query = f"{country} food prices market"
+    gd_docs = gdelt.fetch(query=query, start_date=start_date, end_date=end_date, max_records=10)
+    if getattr(gdelt, "last_trace", None):
+        retriever_traces.append(gdelt.last_trace)
 
-        combined = list(rw_docs) + list(gd_docs)
-        seen_keys = set()
-        deduped: List[Dict[str, Any]] = []
-        for d in combined:
-            url = (d.get("url") or "").strip()
-            key = url or d.get("doc_id")
-            if not key or key in seen_keys:
-                continue
-            seen_keys.add(key)
-            if not d.get("content"):
-                d["content"] = d.get("title", "")
-            deduped.append(d)
-        documents = deduped
-
-    if not documents:
-        # Mock documents
-        documents = [
-            {
-                "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
-                "title": f"Food Security Update - {state['country']}",
-                "url": "https://reliefweb.int/example",
-                "source": "ReliefWeb",
-                "date": state["time_period"] + "-15",
-                "content": f"Food prices in {state['country']} have continued to rise due to ongoing economic challenges and supply chain disruptions. The cost of basic commodities has increased significantly compared to the previous month."
-            },
-            {
-                "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
-                "title": f"Economic Outlook - {state['country']}",
-                "url": "https://example.com/economic",
-                "source": "GDELT",
-                "date": state["time_period"] + "-10",
-                "content": f"The local currency has experienced depreciation against the USD, putting additional pressure on import costs. Fuel prices remain elevated, affecting transportation and production costs."
-            }
-        ]
+    combined = list(rw_docs) + list(gd_docs)
+    seen_keys = set()
+    deduped: List[Dict[str, Any]] = []
+    for d in combined:
+        url = (d.get("url") or "").strip()
+        key = url or d.get("doc_id")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if not d.get("content"):
+            d["content"] = d.get("title", "")
+        deduped.append(d)
+    documents = deduped
 
     refs = [
         {

@@ -124,7 +124,7 @@ class GenerateReportInput(BaseModel):
     )
     use_mock_data: bool = Field(
         default=True,
-        description="If True, use mock data instead of real APIs"
+        description="If True, use mock numeric datasets instead of real APIs (GDELT/ReliefWeb news retrieval is always real)"
     )
 
 
