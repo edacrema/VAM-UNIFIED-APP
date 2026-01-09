@@ -178,7 +178,33 @@ async def generate_market_monitor_async(
     
     return {"run_id": run_id, "status": "pending"}
 
+@router.get("/data-availability")
+def check_data_availability_endpoint(
+    country: str,
+    time_period: str = "2025-01",
+    commodities: str = "Sugar,Wheat flour"
+):
+    '''
+    Check what price data is available for a given country and period.
+    
+    Useful for:
+    - Validating inputs before running a report
+    - Showing users what data is available
+    - Debugging data loading issues
+    '''
+    from .data_loader import check_data_availability
+    
+    commodity_list = [c.strip() for c in commodities.split(",")]
+    
+    availability = check_data_availability(
+        country=country,
+        time_period=time_period,
+        commodities=commodity_list
+    )
+    
+    return availability
 
+    
 @router.get("/status/{run_id}", response_model=ReportStatusOutput)
 async def get_report_status(run_id: str):
     """
@@ -299,8 +325,8 @@ def get_service_info():
                 "type": "boolean",
                 "required": False,
                 "label": "Use Mock Data",
-                "description": "If True, use simulated data instead of real APIs",
-                "default": True
+                "description": "If True, force mock numeric price data. If False (default), load price data from CSV and fall back to mock only on errors.",
+                "default": False
             }
         ],
         "outputs": {

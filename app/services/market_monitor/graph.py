@@ -36,6 +36,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from app.shared.llm import get_model
 from app.shared.retrievers import GDELTRetriever, ReliefWebRetriever
 
+from .data_loader import (
+    extract_time_series_from_csv,
+    calculate_statistics_from_csv,
+    check_data_availability,
+    normalize_country_name
+)
+
 logger = logging.getLogger(__name__)
 
 OnStepCallback = Callable[[str, Dict[str, Any]], None]
@@ -132,7 +139,7 @@ def create_initial_state(
     currency_code: str,
     enabled_modules: List[str],
     previous_report_text: str = "",
-    use_mock_data: bool = True
+    use_mock_data: bool = False
 ) -> MarketReportState:
     """Crea stato iniziale per il grafo."""
     return MarketReportState(
@@ -322,12 +329,10 @@ class ExchangeRateModule(ReportModule):
         
         currency_code = state["currency_code"]
         
-        if self.use_mock or state.get("use_mock_data", True):
-            data = self._generate_mock_data(currency_code)
-        else:
-            # API reale (da implementare)
-            data = self._generate_mock_data(currency_code)
-            data["is_mock"] = False
+        # NOTE: Exchange rate real API is not implemented yet.
+        # We intentionally DO NOT couple this to state['use_mock_data'] (used for price CSV vs mock).
+        # If/when the real API is implemented, this branch can be updated to use it when api_key is present.
+        data = self._generate_mock_data(currency_code)
         
         return {"exchange_rate_data": data}
     
@@ -474,24 +479,133 @@ def calculate_statistics(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def node_data_agent(state: MarketReportState) -> dict:
-    """Nodo: Recupera e processa i dati."""
+    """
+    Nodo: Recupera e processa i dati.
+    
+    Supports two modes:
+    - use_mock_data=True: Uses generated mock data (original behavior)
+    - use_mock_data=False: Loads real data from data/price_data.csv
+    
+    The function gracefully falls back to mock data if CSV loading fails,
+    adding appropriate warnings to the state.
+    """
     logger.info(f"[DataAgent] Processing data for {state['country']}")
     
-    df_national, df_regional = generate_mock_time_series(
-        state["country"],
-        state["time_period"],
-        state["commodity_list"],
-        state["admin1_list"]
-    )
+    use_mock = state.get("use_mock_data", False)
+    warnings = []
     
-    stats = calculate_statistics(df_national)
+    if use_mock:
+        # =====================================================================
+        # MOCK DATA MODE (Original behavior)
+        # =====================================================================
+        logger.info("[DataAgent] Using MOCK data generation")
+        df_national, df_regional = generate_mock_time_series(
+            state["country"],
+            state["time_period"],
+            state["commodity_list"],
+            state["admin1_list"]
+        )
+        stats = calculate_statistics(df_national)
+        
+    else:
+        # =====================================================================
+        # CSV DATA MODE (New behavior)
+        # =====================================================================
+        logger.info("[DataAgent] Loading data from CSV file")
+        
+        try:
+            # First, check what data is available
+            availability = check_data_availability(
+                country=state["country"],
+                time_period=state["time_period"],
+                commodities=state["commodity_list"]
+            )
+            
+            # If country not available, raise error
+            if not availability["available"]:
+                raise ValueError(
+                    f"Country '{state['country']}' not found in price data. "
+                    f"Available countries: {availability['countries']}"
+                )
+            
+            # Add any warnings from availability check
+            if availability.get("warnings"):
+                warnings.extend(availability["warnings"])
+            
+            # Extract time series from CSV
+            df_national, df_regional = extract_time_series_from_csv(
+                country=state["country"],
+                time_period=state["time_period"],
+                commodities=state["commodity_list"],
+                admin1_list=state["admin1_list"]
+            )
+            
+            # Calculate statistics using CSV-compatible function
+            stats = calculate_statistics_from_csv(
+                df_national, 
+                state["commodity_list"]
+            )
+            
+            logger.info(
+                f"[DataAgent] Successfully loaded {len(df_national)} months of data "
+                f"with {len(df_national.columns)} columns"
+            )
+            
+        except FileNotFoundError as e:
+            # CSV file doesn't exist - fallback to mock
+            logger.error(f"[DataAgent] CSV file not found: {e}")
+            warnings.append(
+                f"Price data file not found: {e}. Falling back to mock data."
+            )
+            df_national, df_regional = generate_mock_time_series(
+                state["country"],
+                state["time_period"],
+                state["commodity_list"],
+                state["admin1_list"]
+            )
+            stats = calculate_statistics(df_national)
+            
+        except ValueError as e:
+            # Data validation error (country not found, date range issues, etc.)
+            logger.error(f"[DataAgent] Data validation error: {e}")
+            warnings.append(
+                f"Data validation error: {str(e)}. Falling back to mock data."
+            )
+            df_national, df_regional = generate_mock_time_series(
+                state["country"],
+                state["time_period"],
+                state["commodity_list"],
+                state["admin1_list"]
+            )
+            stats = calculate_statistics(df_national)
+            
+        except Exception as e:
+            # Any other unexpected error
+            logger.exception(f"[DataAgent] Unexpected error loading CSV: {e}")
+            warnings.append(
+                f"Unexpected error loading price data: {str(e)}. "
+                f"Falling back to mock data."
+            )
+            df_national, df_regional = generate_mock_time_series(
+                state["country"],
+                state["time_period"],
+                state["commodity_list"],
+                state["admin1_list"]
+            )
+            stats = calculate_statistics(df_national)
     
+    # =========================================================================
+    # RETURN STATE UPDATE
+    # =========================================================================
     return {
         "time_series_data_national": df_national.to_json(date_format='iso'),
         "time_series_data_regional": df_regional.to_json(date_format='iso'),
         "data_statistics": stats,
+        "warnings": warnings,
         "current_node": "data_agent"
     }
+
+
 
 
 # ============================================================================
@@ -1129,7 +1243,7 @@ def run_report_generation(
     currency_code: str = "USD",
     enabled_modules: List[str] = None,
     previous_report_text: str = "",
-    use_mock_data: bool = True,
+    use_mock_data: bool = False,
     on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
