@@ -146,7 +146,11 @@ async def generate_market_monitor_async(
 
                 news_counts = _state.get("news_counts")
                 if isinstance(news_counts, dict):
-                    update_run(run_id, metadata={"news_counts": news_counts})
+                    meta_update = {"news_counts": news_counts}
+                    retriever_traces = _state.get("retriever_traces")
+                    if isinstance(retriever_traces, list):
+                        meta_update["retriever_traces"] = retriever_traces
+                    update_run(run_id, metadata=meta_update)
                     
             result = run_report_generation(
                 country=input_data.country,

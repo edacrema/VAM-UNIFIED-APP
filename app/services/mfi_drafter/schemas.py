@@ -143,6 +143,10 @@ class GenerateMFIReportInput(BaseModel):
     data_collection_start: str = Field(..., description="Data collection start date (YYYY-MM-DD)")
     data_collection_end: str = Field(..., description="Data collection end date (YYYY-MM-DD)")
     markets: List[str] = Field(..., description="List of surveyed markets")
+    use_mock_data: bool = Field(
+        default=True,
+        description="If True, use mock context documents instead of calling real external APIs",
+    )
 
 
 class GenerateMFIReportOutput(BaseModel):
@@ -183,5 +187,6 @@ class MFIReportStatusOutput(BaseModel):
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = []
+    metadata: Dict[str, Any] = {}
     error: Optional[str] = None
     traceback: Optional[str] = None

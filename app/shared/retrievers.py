@@ -1,12 +1,15 @@
 """Retrievers per news e documenti (usati da market_monitor e mfi_drafter)."""
+import logging
 import requests
 import time
 import uuid
 import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 
+
+logger = logging.getLogger(__name__)
 
 class GDELTRetriever:
     BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -15,6 +18,7 @@ class GDELTRetriever:
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
+        self.last_trace: Dict[str, Any] = {}
 
     def _format_datetime(self, date_str: str) -> str:
         try:
@@ -30,7 +34,7 @@ class GDELTRetriever:
             resp = requests.get(url, headers=self.HEADERS, timeout=10)
             if resp.status_code != 200:
                 return ""
-            soup = BeautifulSoup(resp.text, 'lxml')
+            soup = BeautifulSoup(resp.text, 'html.parser')
             paragraphs = soup.find_all('p')
             text = ' '.join([p.get_text() for p in paragraphs])
             return text.strip()[:5000]
@@ -38,6 +42,21 @@ class GDELTRetriever:
             return ""
 
     def fetch(self, query: str, start_date: str, end_date: str, max_records: int = 5) -> List[Dict]:
+        started = time.time()
+        trace: Dict[str, Any] = {
+            "retriever": "GDELT",
+            "query": query,
+            "start_date": start_date,
+            "end_date": end_date,
+            "max_records": max_records,
+            "attempts": 0,
+            "status_code": None,
+            "num_articles": 0,
+            "num_documents": 0,
+            "samples": [],
+            "error": None,
+            "duration_ms": None,
+        }
         params = {
             "query": f"{query} sourcelang:english",
             "mode": "artlist",
@@ -49,27 +68,51 @@ class GDELTRetriever:
         }
         for attempt in range(self.MAX_RETRIES):
             try:
+                trace["attempts"] = attempt + 1
                 resp = requests.get(self.BASE_URL, params=params, timeout=30)
+                trace["status_code"] = resp.status_code
                 if resp.status_code == 429:
                     time.sleep(2 ** attempt)
                     continue
                 data = resp.json() if resp.text.strip() else {}
                 articles = data.get("articles", [])
+                trace["num_articles"] = len(articles) if isinstance(articles, list) else 0
                 documents = []
                 for art in articles:
                     content = self._scrape_content(art.get("url"))
                     if len(content) >= 150:
+                        publisher = art.get("domain", "")
                         documents.append({
                             "doc_id": f"gdelt_{uuid.uuid4().hex[:8]}",
                             "title": art.get("title", ""),
                             "url": art.get("url", ""),
-                            "source": art.get("domain", "GDELT"),
+                            "source": "GDELT",
+                            "publisher": publisher,
                             "date": art.get("seendate", "")[:8],
                             "content": content
                         })
+                trace["num_documents"] = len(documents)
+                trace["samples"] = [
+                    {
+                        "title": d.get("title", ""),
+                        "url": d.get("url", ""),
+                        "date": d.get("date", ""),
+                        "publisher": d.get("publisher", ""),
+                    }
+                    for d in documents[:3]
+                ]
+                trace["duration_ms"] = int((time.time() - started) * 1000)
+                self.last_trace = trace
+                if self.verbose:
+                    logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
                 return documents
-            except Exception:
+            except Exception as e:
+                trace["error"] = str(e)
                 time.sleep(1)
+        trace["duration_ms"] = int((time.time() - started) * 1000)
+        self.last_trace = trace
+        if self.verbose:
+            logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
         return []
 
 
@@ -78,8 +121,22 @@ class ReliefWebRetriever:
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
+        self.last_trace: Dict[str, Any] = {}
 
     def fetch(self, country: str, start_date: str, end_date: str, max_records: int = 10) -> List[Dict]:
+        started = time.time()
+        trace: Dict[str, Any] = {
+            "retriever": "ReliefWeb",
+            "country": country,
+            "start_date": start_date,
+            "end_date": end_date,
+            "max_records": max_records,
+            "status_code": None,
+            "num_documents": 0,
+            "samples": [],
+            "error": None,
+            "duration_ms": None,
+        }
         payload = {
             "filter": {
                 "operator": "AND",
@@ -93,6 +150,7 @@ class ReliefWebRetriever:
         }
         try:
             resp = requests.post(self.BASE_URL, json=payload, timeout=30)
+            trace["status_code"] = resp.status_code
             data = resp.json().get("data", [])
             documents = []
             for item in data:
@@ -105,6 +163,21 @@ class ReliefWebRetriever:
                     "date": fields.get("date", {}).get("created", "")[:10],
                     "content": fields.get("body", "")[:5000]
                 })
+
+            trace["num_documents"] = len(documents)
+            trace["samples"] = [
+                {"title": d.get("title", ""), "url": d.get("url", ""), "date": d.get("date", "")}
+                for d in documents[:3]
+            ]
+            trace["duration_ms"] = int((time.time() - started) * 1000)
+            self.last_trace = trace
+            if self.verbose:
+                logger.info(json.dumps({"reliefweb_trace": trace}, ensure_ascii=False))
             return documents
-        except Exception:
+        except Exception as e:
+            trace["error"] = str(e)
+            trace["duration_ms"] = int((time.time() - started) * 1000)
+            self.last_trace = trace
+            if self.verbose:
+                logger.info(json.dumps({"reliefweb_trace": trace}, ensure_ascii=False))
             return []

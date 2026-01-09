@@ -20,6 +20,7 @@ from math import pi
 from datetime import datetime, timedelta
 from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
 import operator
+from collections import Counter
 
 import pandas as pd
 import numpy as np
@@ -29,6 +30,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.shared.llm import get_model
+from app.shared.retrievers import GDELTRetriever, ReliefWebRetriever
 from .schemas import (
     MFI_DIMENSIONS, RISK_COLORS, get_risk_level,
     Document, MFIMarketData, MFIDimensionScore, SurveyMetadata
@@ -53,6 +55,7 @@ class MFIReportState(TypedDict):
     data_collection_start: str
     data_collection_end: str
     markets: List[str]
+    use_mock_data: bool
     
     # ===== BRANCH 1: MFI DATA =====
     raw_survey_data: Optional[str]
@@ -63,6 +66,8 @@ class MFIReportState(TypedDict):
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
     country_context: Optional[str]
+    context_counts: Dict[str, int]
+    retriever_traces: List[Dict[str, Any]]
     
     # ===== VISUALIZATIONS =====
     visualizations: Dict[str, str]  # Base64
@@ -84,7 +89,8 @@ def create_initial_state(
     country: str,
     data_collection_start: str,
     data_collection_end: str,
-    markets: List[str]
+    markets: List[str],
+    use_mock_data: bool = True
 ) -> MFIReportState:
     """Crea stato iniziale per il grafo."""
     return MFIReportState(
@@ -92,12 +98,15 @@ def create_initial_state(
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
         markets=markets,
+        use_mock_data=use_mock_data,
         raw_survey_data=None,
         markets_data=[],
         dimension_scores=[],
         survey_metadata=None,
         contextual_documents=[],
         country_context=None,
+        context_counts={"GDELT": 0, "ReliefWeb": 0, "total": 0},
+        retriever_traces=[],
         visualizations={},
         executive_summary=None,
         dimension_findings={},
@@ -266,7 +275,7 @@ def generate_mock_mfi_data(
         "country": country,
         "collection_period": f"{data_collection_start} to {data_collection_end}",
         "total_traders": sum(m["traders_surveyed"] for m in markets_data),
-        "total_markets": len(markets),
+        "total_markets": len(markets_data),
         "regions_covered": regions
     }
     
@@ -309,34 +318,79 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
 def node_context_retrieval(state: MFIReportState) -> dict:
     """Nodo: Recupera notizie contestuali (mock)."""
     logger.info(f"[ContextRetrieval] Fetching context for {state['country']}")
-    
-    # Mock documents
-    docs = [
-        {
-            "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
-            "title": f"Food Security Update - {state['country']}",
-            "url": "https://reliefweb.int/example",
-            "source": "ReliefWeb",
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "content": f"The food security situation in {state['country']} continues to be monitored. "
-                       f"Market functionality assessments indicate varying levels of access across regions."
-        },
-        {
-            "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
-            "title": f"Market Assessment - {state['country']}",
-            "url": "https://example.com/market",
-            "source": "WFP",
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "content": f"Recent market assessments in {state['country']} show mixed results across "
-                       f"different dimensions of market functionality."
-        }
-    ]
+
+    docs: List[Dict[str, Any]] = []
+    retriever_traces: List[Dict[str, Any]] = []
+
+    if not state.get("use_mock_data", True):
+        country = state.get("country", "")
+        start_date = state.get("data_collection_start", "")
+        end_date = state.get("data_collection_end", "")
+
+        rw = ReliefWebRetriever(verbose=False)
+        rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=8)
+        if getattr(rw, "last_trace", None):
+            retriever_traces.append(rw.last_trace)
+
+        gdelt = GDELTRetriever(verbose=False)
+        query = f"{country} market functionality food security"
+        gd_docs = gdelt.fetch(query=query, start_date=start_date, end_date=end_date, max_records=8)
+        if getattr(gdelt, "last_trace", None):
+            retriever_traces.append(gdelt.last_trace)
+
+        combined = list(rw_docs) + list(gd_docs)
+        seen_keys = set()
+        deduped: List[Dict[str, Any]] = []
+        for d in combined:
+            url = (d.get("url") or "").strip()
+            key = url or d.get("doc_id")
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if not d.get("content"):
+                d["content"] = d.get("title", "")
+            deduped.append(d)
+        docs = deduped
+
+    if not docs:
+        # Mock documents
+        docs = [
+            {
+                "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
+                "title": f"Food Security Update - {state['country']}",
+                "url": "https://reliefweb.int/example",
+                "source": "ReliefWeb",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "content": f"The food security situation in {state['country']} continues to be monitored. "
+                           f"Market functionality assessments indicate varying levels of access across regions."
+            },
+            {
+                "doc_id": f"doc_{uuid.uuid4().hex[:6]}",
+                "title": f"Market Assessment - {state['country']}",
+                "url": "https://example.com/market",
+                "source": "WFP",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "content": f"Recent market assessments in {state['country']} show mixed results across "
+                           f"different dimensions of market functionality."
+            }
+        ]
+
+    counts = Counter([d.get("source", "Unknown") for d in docs])
+    context_counts = {
+        "GDELT": int(counts.get("GDELT", 0)),
+        "ReliefWeb": int(counts.get("ReliefWeb", 0)),
+        "total": int(len(docs)),
+    }
     
     return {
         "contextual_documents": docs,
+        "context_counts": context_counts,
+        "retriever_traces": retriever_traces,
         "current_node": "context_retrieval"
     }
 
+
+# ============================================================================
 # NODE: CONTEXT EXTRACTOR
 # ============================================================================
 
@@ -360,6 +414,7 @@ def node_context_extractor(state: MFIReportState) -> dict:
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
+
 Focus on: economic situation, food security, market-affecting factors.
 
 SOURCES:
@@ -639,9 +694,19 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
 
     def wrap_node(node_name: str, fn):
         def wrapped(state: MFIReportState):
+            state_dict = dict(state)
             if on_step is not None:
-                on_step(node_name, dict(state))
-            return fn(state)
+                on_step(node_name, state_dict)
+
+            updates = fn(state)
+
+            if on_step is not None:
+                merged = dict(state_dict)
+                if isinstance(updates, dict):
+                    merged.update(updates)
+                on_step(node_name, merged)
+
+            return updates
 
         return wrapped
 
@@ -692,6 +757,7 @@ def run_mfi_report_generation(
     data_collection_start: str,
     data_collection_end: str,
     markets: List[str],
+    use_mock_data: bool = True,
     on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
@@ -704,7 +770,8 @@ def run_mfi_report_generation(
         country=country,
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
-        markets=markets
+        markets=markets,
+        use_mock_data=use_mock_data,
     )
     
     agent = build_graph(on_step=on_step)

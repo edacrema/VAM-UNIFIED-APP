@@ -59,7 +59,8 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             country=input_data.country,
             data_collection_start=input_data.data_collection_start,
             data_collection_end=input_data.data_collection_end,
-            markets=input_data.markets
+            markets=input_data.markets,
+            use_mock_data=input_data.use_mock_data,
         )
         
         # Calculate national MFI
@@ -138,15 +139,24 @@ async def generate_mfi_report_async(
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
                     update_run(run_id, current_node=node_name)
+
+                context_counts = _state.get("context_counts")
+                if isinstance(context_counts, dict):
+                    meta_update = {"context_counts": context_counts}
+                    retriever_traces = _state.get("retriever_traces")
+                    if isinstance(retriever_traces, list):
+                        meta_update["retriever_traces"] = retriever_traces
+                    update_run(run_id, metadata=meta_update)
             
             result = run_mfi_report_generation(
                 country=input_data.country,
                 data_collection_start=input_data.data_collection_start,
                 data_collection_end=input_data.data_collection_end,
                 markets=input_data.markets,
+                use_mock_data=input_data.use_mock_data,
                 on_step=on_step
             )
-
+            
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
             
@@ -175,6 +185,7 @@ async def get_report_status(run_id: str):
         current_node=run.current_node,
         progress_pct=run.progress_pct,
         warnings=run.warnings,
+        metadata=getattr(run, "metadata", {}) or {},
         error=run.error,
         traceback=run.traceback,
     )
@@ -263,6 +274,14 @@ def get_service_info():
                 "required": True,
                 "label": "Markets",
                 "description": "List of surveyed markets (names)"
+            },
+            {
+                "name": "use_mock_data",
+                "type": "boolean",
+                "required": False,
+                "label": "Use Mock Data",
+                "description": "If True, use simulated context documents instead of calling real external APIs",
+                "default": True
             }
         ],
         "outputs": {
