@@ -116,7 +116,7 @@ class GenerateReportInput(BaseModel):
     )
     enabled_modules: List[str] = Field(
         default=["exchange_rate"],
-        description="Optional modules to enable"
+        description="Optional modules to enable (exchange_rate requires TE_API_KEY and has no mock fallback)"
     )
     previous_report_text: str = Field(
         default="",

@@ -316,7 +316,7 @@ def get_service_info():
                 "type": "array",
                 "required": False,
                 "label": "Optional Modules",
-                "description": "Optional modules to enable",
+                "description": "Optional modules to enable (note: exchange_rate requires TE_API_KEY and has no mock fallback)",
                 "default": ["exchange_rate"],
                 "options": list(AVAILABLE_MODULES.keys())
             },
@@ -355,7 +355,7 @@ def get_service_info():
             {
                 "id": "exchange_rate",
                 "name": "Exchange Rate Analysis",
-                "description": "Exchange rate analysis using Trading Economics data"
+                "description": "Exchange rate analysis using TradingEconomics API data (requires TE_API_KEY; no mock fallback)"
             }
         ]
     }

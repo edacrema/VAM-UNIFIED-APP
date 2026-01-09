@@ -250,8 +250,6 @@ class ReportModule(ABC):
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
         pass
 
-
-# ============================================================================
 # EXCHANGE RATE MODULE
 # ============================================================================
 
@@ -263,7 +261,8 @@ class ExchangeRateModule(ReportModule):
     def __init__(self, api_key: Optional[str] = None):
         import os
         self.api_key = api_key or os.getenv("TE_API_KEY")
-        self.use_mock = self.api_key is None
+        if not self.api_key:
+            raise RuntimeError("TE_API_KEY is required to run the exchange_rate module")
     
     @property
     def module_id(self) -> str:
@@ -281,59 +280,108 @@ class ExchangeRateModule(ReportModule):
         return CURRENCY_SYMBOLS.get(currency_code, f"USD{currency_code}:CUR")
     
     def _generate_mock_data(self, currency_code: str) -> Dict[str, Any]:
-        """Genera dati mock realistici."""
-        base = BASE_EXCHANGE_RATES.get(currency_code, 100.0)
-        current_rate = base * (1 + random.uniform(-0.05, 0.15))
-        mom_change = random.uniform(-2, 15)
-        yoy_change = random.uniform(10, 80)
-        
-        # Determina trend
-        if yoy_change > 30:
-            trend = "rapid_depreciation"
-        elif yoy_change > 10:
-            trend = "depreciation"
-        elif yoy_change < -10:
-            trend = "appreciation"
-        else:
-            trend = "stable"
-        
-        # Serie storica mock
-        dates = pd.date_range(end=datetime.now(), periods=13*22, freq='B')
-        prices = [base]
-        for i in range(1, len(dates)):
-            change = random.gauss(0.001, 0.01)
-            prices.append(prices[-1] * (1 + change))
-        
-        df = pd.DataFrame({
-            "Date": dates,
-            "Close": prices,
-        })
-        
-        return {
-            "symbol": self._get_symbol(currency_code),
-            "currency_code": currency_code,
-            "current_rate": round(current_rate, 2),
-            "daily_change_pct": round(random.uniform(-1, 2), 2),
-            "weekly_change_pct": round(random.uniform(-2, 5), 2),
-            "monthly_change_pct": round(mom_change, 2),
-            "yearly_change_pct": round(yoy_change, 2),
-            "trend": trend,
-            "last_update": datetime.now().isoformat(),
-            "historical_data_json": df.to_json(date_format='iso'),
-            "is_mock": True,
-        }
+        raise RuntimeError("Mock exchange rate data generation is not allowed")
+
+    def _fetch_historical_series(self, symbol: str, d1: str, d2: str) -> pd.DataFrame:
+        url = f"{self.TE_API_BASE}/markets/historical/{symbol}"
+        params = {"c": self.api_key, "d1": d1, "d2": d2, "f": "json"}
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+
+        payload = resp.json()
+        if not isinstance(payload, list) or not payload:
+            raise RuntimeError(f"TradingEconomics returned no historical data for symbol '{symbol}'")
+
+        df = pd.DataFrame(payload)
+        if "Date" not in df.columns or "Close" not in df.columns:
+            raise RuntimeError("TradingEconomics response missing required fields 'Date' and/or 'Close'")
+
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
+        if df.empty:
+            raise RuntimeError(f"TradingEconomics returned only invalid rows for symbol '{symbol}'")
+
+        df = df.set_index("Date")
+        return df[["Close"]]
+
+    def _pct_change(self, current: float, previous: Optional[float]) -> Optional[float]:
+        if previous is None:
+            return None
+        try:
+            prev = float(previous)
+            curr = float(current)
+        except Exception:
+            return None
+        if prev == 0:
+            return None
+        return (curr - prev) / prev * 100.0
     
     def fetch_data(self, state: dict) -> Dict[str, Any]:
         """Recupera dati tasso di cambio."""
         logger.info(f"[ExchangeRateModule] Fetching data for {state['currency_code']}")
         
         currency_code = state["currency_code"]
-        
-        # NOTE: Exchange rate real API is not implemented yet.
-        # We intentionally DO NOT couple this to state['use_mock_data'] (used for price CSV vs mock).
-        # If/when the real API is implemented, this branch can be updated to use it when api_key is present.
-        data = self._generate_mock_data(currency_code)
-        
+        symbol = self._get_symbol(currency_code)
+
+        try:
+            period_start = pd.to_datetime(state["time_period"] + "-01")
+        except Exception as e:
+            raise ValueError(f"Invalid time_period: {state.get('time_period')}") from e
+
+        period_end = (period_start + pd.offsets.MonthEnd(0)).normalize()
+        end_dt = period_end.to_pydatetime()
+
+        d2 = end_dt.strftime("%Y-%m-%d")
+        d1 = (period_end - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+
+        df = self._fetch_historical_series(symbol=symbol, d1=d1, d2=d2)
+        df_upto_end = df.loc[:period_end]
+        if df_upto_end.empty:
+            raise RuntimeError(f"No exchange rate data for {symbol} up to {d2}")
+
+        current_close = float(df_upto_end.iloc[-1]["Close"])
+
+        def close_on_or_before(ts: pd.Timestamp) -> Optional[float]:
+            sub = df_upto_end.loc[:ts]
+            if sub.empty:
+                return None
+            return float(sub.iloc[-1]["Close"])
+
+        prev_day = close_on_or_before(period_end - pd.Timedelta(days=1))
+        prev_week = close_on_or_before(period_end - pd.Timedelta(days=7))
+        prev_month = close_on_or_before(period_end - pd.DateOffset(months=1))
+        prev_year = close_on_or_before(period_end - pd.DateOffset(years=1))
+
+        daily_change_pct = self._pct_change(current_close, prev_day)
+        weekly_change_pct = self._pct_change(current_close, prev_week)
+        monthly_change_pct = self._pct_change(current_close, prev_month)
+        yearly_change_pct = self._pct_change(current_close, prev_year)
+
+        yoy_for_trend = yearly_change_pct if yearly_change_pct is not None else 0.0
+        if yoy_for_trend > 30:
+            trend = "rapid_depreciation"
+        elif yoy_for_trend > 10:
+            trend = "depreciation"
+        elif yoy_for_trend < -10:
+            trend = "appreciation"
+        else:
+            trend = "stable"
+
+        data = {
+            "symbol": symbol,
+            "currency_code": currency_code,
+            "current_rate": round(current_close, 6),
+            "daily_change_pct": None if daily_change_pct is None else round(daily_change_pct, 2),
+            "weekly_change_pct": None if weekly_change_pct is None else round(weekly_change_pct, 2),
+            "monthly_change_pct": None if monthly_change_pct is None else round(monthly_change_pct, 2),
+            "yearly_change_pct": None if yearly_change_pct is None else round(yearly_change_pct, 2),
+            "trend": trend,
+            "last_update": end_dt.isoformat(),
+            "historical_data_json": df.to_json(date_format='iso'),
+            "is_mock": False,
+        }
+
         return {"exchange_rate_data": data}
     
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
@@ -341,10 +389,7 @@ class ExchangeRateModule(ReportModule):
         exchange_data = state.get("exchange_rate_data", {})
         
         if not exchange_data or exchange_data.get("current_rate") is None:
-            return {
-                "section_title": self.display_name,
-                "narrative": "Exchange rate data is currently unavailable.",
-            }
+            raise RuntimeError("Exchange rate data is unavailable (no mock fallback is permitted)")
         
         prompt = f"""You are a WFP economic analyst writing the Exchange Rate Analysis section.
 
@@ -897,8 +942,6 @@ Return JSON:
         "current_node": "trend_analyst"
     }
 
-
-# ============================================================================
 # NODE: MODULE ORCHESTRATOR
 # ============================================================================
 
@@ -926,6 +969,13 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             module = module_class()
             
             if not module.validate_inputs(state):
+                if module_id == "exchange_rate":
+                    missing = [
+                        f
+                        for f in getattr(module, "required_inputs", [])
+                        if f not in state or state[f] is None
+                    ]
+                    raise ValueError(f"Module '{module_id}' missing required inputs: {missing}")
                 continue
             
             # Fetch data
@@ -942,7 +992,9 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             
         except Exception as e:
             logger.error(f"Module '{module_id}' failed: {e}")
-    
+            if module_id == "exchange_rate":
+                raise
+
     updates["module_sections"] = module_sections
     updates["llm_calls"] = state.get("llm_calls", 0) + llm_calls
     updates["current_node"] = "module_orchestrator"
