@@ -200,6 +200,7 @@ class GenerateMFIReportOutput(BaseModel):
     # Generated content
     executive_summary: str
     dimension_findings: Dict[str, Dict[str, str]]
+    market_recommendations: Dict[str, Dict[str, Any]] = {}
     country_context: Optional[str] = None
 
     document_references: List[Dict[str, Any]] = []

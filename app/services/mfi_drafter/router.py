@@ -87,8 +87,9 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
     3. Context Extractor: Extracts context with the LLM
     4. Graph Designer: Generates visualizations (radar, heatmap, etc.)
     5. Dimension Drafter: Drafts findings for each dimension
-    6. Executive Summary Drafter: Drafts the executive summary
-    7. Red Team: Quality assurance with possible correction loop
+    6. Market Recommendations Drafter: Drafts recommendations by market
+    7. Executive Summary Drafter: Drafts the executive summary
+    8. Red Team: Quality assurance with possible correction loop
 
     Returns:
         GenerateMFIReportOutput with all report sections
@@ -128,6 +129,7 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             dimension_scores=result.get("dimension_scores", []),
             executive_summary=result.get("executive_summary", ""),
             dimension_findings=normalized_dimension_findings,
+            market_recommendations=result.get("market_recommendations", {}) or {},
             country_context=result.get("country_context"),
             document_references=result.get("document_references", []),
             report_blocks=build_mfi_report_blocks(
@@ -137,6 +139,7 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
                     "data_collection_start": input_data.data_collection_start,
                     "data_collection_end": input_data.data_collection_end,
                     "dimension_findings": normalized_dimension_findings,
+                    "market_recommendations": result.get("market_recommendations", {}) or {},
                 }
             ),
             visualizations=result.get("visualizations", {}),
@@ -216,6 +219,7 @@ async def generate_mfi_report_from_csv(
             dimension_scores=result.get("dimension_scores", []),
             executive_summary=result.get("executive_summary", ""),
             dimension_findings=normalized_dimension_findings,
+            market_recommendations=result.get("market_recommendations", {}) or {},
             country_context=result.get("country_context"),
             document_references=result.get("document_references", []),
             report_blocks=build_mfi_report_blocks(
@@ -225,6 +229,7 @@ async def generate_mfi_report_from_csv(
                     "data_collection_start": data_collection_start,
                     "data_collection_end": data_collection_end,
                     "dimension_findings": normalized_dimension_findings,
+                    "market_recommendations": result.get("market_recommendations", {}) or {},
                 }
             ),
             visualizations=result.get("visualizations", {}),
@@ -295,9 +300,10 @@ async def generate_mfi_report_from_csv_async(
         "context_retrieval": 25,
         "context_extractor": 40,
         "mfi_graph_designer": 55,
-        "dimension_drafter": 75,
-        "executive_summary_drafter": 90,
-        "red_team": 95,
+        "dimension_drafter": 72,
+        "market_recommendations_drafter": 82,
+        "executive_summary_drafter": 92,
+        "red_team": 97,
     }
 
     def run_in_background():
@@ -371,9 +377,10 @@ async def generate_mfi_report_async(
         "context_retrieval": 25,
         "context_extractor": 40,
         "mfi_graph_designer": 55,
-        "dimension_drafter": 75,
-        "executive_summary_drafter": 90,
-        "red_team": 95,
+        "dimension_drafter": 72,
+        "market_recommendations_drafter": 82,
+        "executive_summary_drafter": 92,
+        "red_team": 97,
     }
     
     def run_in_background():
@@ -454,6 +461,7 @@ async def get_report_result(run_id: str):
     normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
     result_for_blocks = dict(result)
     result_for_blocks["dimension_findings"] = normalized_dimension_findings
+    result_for_blocks["market_recommendations"] = result.get("market_recommendations", {}) or {}
 
     dimension_scores = result.get("dimension_scores", [])
     national_mfi = round(
@@ -476,6 +484,7 @@ async def get_report_result(run_id: str):
         dimension_scores=result.get("dimension_scores", []),
         executive_summary=result.get("executive_summary", ""),
         dimension_findings=normalized_dimension_findings,
+        market_recommendations=result.get("market_recommendations", {}) or {},
         country_context=result.get("country_context"),
         document_references=result.get("document_references", []),
         report_blocks=build_mfi_report_blocks(result_for_blocks),
@@ -502,6 +511,7 @@ async def export_mfi_docx(
     result = run.result or {}
     result_for_blocks = dict(result)
     result_for_blocks["dimension_findings"] = _normalize_dimension_findings(result.get("dimension_findings"))
+    result_for_blocks["market_recommendations"] = result.get("market_recommendations", {}) or {}
 
     try:
         report_blocks = build_mfi_report_blocks(result_for_blocks)
@@ -595,6 +605,7 @@ def get_service_info():
             "dimension_scores": "Score for each MFI dimension",
             "executive_summary": "Generated executive summary",
             "dimension_findings": "Findings for each dimension",
+            "market_recommendations": "Recommendations by market",
             "visualizations": "Charts in Base64 format",
             "llm_calls": "Number of LLM calls performed",
             "success": "True if generation is completed"
@@ -605,6 +616,7 @@ def get_service_info():
             {"id": "context_extractor", "name": "Context Extractor", "description": "Extracts context with the LLM"},
             {"id": "mfi_graph_designer", "name": "Graph Designer", "description": "Generates visualizations"},
             {"id": "dimension_drafter", "name": "Dimension Drafter", "description": "Drafts findings per dimension"},
+            {"id": "market_recommendations_drafter", "name": "Market Recommendations", "description": "Drafts recommendations by market"},
             {"id": "executive_summary_drafter", "name": "Executive Summary", "description": "Drafts executive summary"},
             {"id": "red_team", "name": "Red Team QA", "description": "Quality assurance"}
         ],

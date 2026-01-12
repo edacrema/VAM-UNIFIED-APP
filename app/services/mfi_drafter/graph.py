@@ -14,12 +14,14 @@ import io
 import re
 import json
 import uuid
+import html as html_lib
 import base64
 import random
 import logging
 from math import pi
 from datetime import datetime, timedelta
 from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
+
 import operator
 from collections import Counter
 
@@ -80,6 +82,7 @@ class MFIReportState(TypedDict):
     # ===== DRAFTED SECTIONS =====
     executive_summary: Optional[str]
     dimension_findings: Dict[str, Dict[str, str]]
+    market_recommendations: Dict[str, Dict[str, Any]]
     
     # ===== QA & CONTROL =====
     skeptic_flags: List[Dict[str, Any]]
@@ -117,6 +120,7 @@ def create_initial_state(
         visualizations={},
         executive_summary=None,
         dimension_findings={},
+        market_recommendations={},
         skeptic_flags=[],
         warnings=[],
         run_id=f"mfi_{uuid.uuid4().hex[:8]}",
@@ -158,6 +162,46 @@ def _normalize_llm_text(value: Any, *, bulletify: bool = False) -> str:
 
     if isinstance(value, str):
         s = value.strip()
+
+        if "<" in s and ">" in s:
+            s = html_lib.unescape(s)
+
+            def _strip_tags(text: str) -> str:
+                return re.sub(r"<[^>]+>", "", text).strip()
+
+            def _render_list(inner_html: str, *, ordered: bool) -> str:
+                items = re.findall(r"<li[^>]*>(.*?)</li>", inner_html, flags=re.IGNORECASE | re.DOTALL)
+                cleaned = [_strip_tags(item) for item in items]
+                cleaned = [c for c in cleaned if c]
+                if not cleaned:
+                    return ""
+                if ordered:
+                    return "\n".join([f"{i + 1}. {c}" for i, c in enumerate(cleaned)])
+                return "\n".join([f"- {c}" for c in cleaned])
+
+            s = re.sub(
+                r"<ol[^>]*>(.*?)</ol>",
+                lambda m: _render_list(m.group(1), ordered=True),
+                s,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            s = re.sub(
+                r"<ul[^>]*>(.*?)</ul>",
+                lambda m: _render_list(m.group(1), ordered=False),
+                s,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
+            s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+            s = re.sub(r"</p\s*>", "\n", s, flags=re.IGNORECASE)
+            s = re.sub(r"<p\b[^>]*>", "", s, flags=re.IGNORECASE)
+
+            s = re.sub(r"</li\s*>", "\n", s, flags=re.IGNORECASE)
+            s = re.sub(r"<li\b[^>]*>", "- ", s, flags=re.IGNORECASE)
+
+            s = re.sub(r"<[^>]+>", "", s)
+            s = re.sub(r"\n\s*\n+", "\n\n", s).strip()
+
         if s.startswith("[") and s.endswith("]"):
             try:
                 parsed = json.loads(s)
@@ -180,7 +224,11 @@ def _normalize_llm_text(value: Any, *, bulletify: bool = False) -> str:
                 continue
             if bulletify:
                 stripped = item_str.lstrip()
-                if not (stripped.startswith("-") or stripped.startswith("*")):
+                if not (
+                    stripped.startswith("-")
+                    or stripped.startswith("*")
+                    or re.match(r"^\d+\.\s+", stripped)
+                ):
                     item_str = f"- {item_str}"
             parts.append(item_str)
         return "\n".join(parts)
@@ -490,6 +538,7 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
 
         dim_scores = state.get("dimension_scores") or []
         score_map: Dict[str, float] = {}
@@ -540,6 +589,187 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             ax.set_title("Risk distribution")
             plt.tight_layout()
             visualizations["risk_distribution"] = save_plot_to_base64()
+
+        markets_data = [
+            m for m in (state.get("markets_data", []) or [])
+            if isinstance(m, dict)
+        ]
+
+        if markets_data:
+            market_names = [str(m.get("market_name", "")).strip() for m in markets_data]
+            dims = list(MFI_DIMENSIONS)
+
+            data_matrix: list[list[float]] = []
+            for m in markets_data:
+                dim_scores = m.get("dimension_scores") or {}
+                row = []
+                for dim in dims:
+                    try:
+                        row.append(float(dim_scores.get(dim, 0) or 0))
+                    except Exception:
+                        row.append(0.0)
+                data_matrix.append(row)
+
+            data_matrix_np = np.array(data_matrix, dtype=float)
+
+            heat_colors = ["#d62728", "#ff7f0e", "#ffbb78", "#98df8a", "#2ca02c"]
+            cmap = mcolors.LinearSegmentedColormap.from_list("mfi_risk", heat_colors)
+
+            fig_height = max(8, len(market_names) * 0.35)
+            fig_width = max(12, len(dims) * 1.2)
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+            im = ax.imshow(data_matrix_np, cmap=cmap, aspect="auto", vmin=0, vmax=10)
+
+            ax.set_xticks(np.arange(len(dims)))
+            ax.set_yticks(np.arange(len(market_names)))
+            ax.set_xticklabels(dims, rotation=45, ha="right", fontsize=9)
+            ax.set_yticklabels(market_names, fontsize=8)
+
+            for i in range(len(market_names)):
+                for j in range(len(dims)):
+                    score = float(data_matrix_np[i, j])
+                    text_color = "white" if score < 4 or score > 8 else "black"
+                    ax.text(
+                        j,
+                        i,
+                        f"{score:.1f}",
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=7,
+                        fontweight="bold",
+                    )
+
+            cbar = ax.figure.colorbar(im, ax=ax, shrink=0.5)
+            cbar.set_label("MFI Score (0-10)", rotation=270, labelpad=15)
+
+            ax.set_title(
+                "Market Functionality Index - Overview by Market and Dimension",
+                fontsize=12,
+                fontweight="bold",
+                pad=10,
+            )
+
+            plt.tight_layout()
+            visualizations["overview_table"] = save_plot_to_base64()
+
+        dim_scores = state.get("dimension_scores") or []
+
+        for dim_data in dim_scores:
+            if not isinstance(dim_data, dict):
+                continue
+
+            dim_name = dim_data.get("dimension")
+            market_scores = dim_data.get("market_scores") or {}
+
+            if not dim_name or not isinstance(market_scores, dict) or not market_scores:
+                continue
+
+            sorted_markets = sorted(
+                [(str(k), float(v)) for k, v in market_scores.items() if v is not None],
+                key=lambda x: x[1],
+            )
+            markets = [m[0] for m in sorted_markets]
+            scores = [m[1] for m in sorted_markets]
+
+            bar_colors: list[str] = []
+            for s in scores:
+                if s < 4:
+                    bar_colors.append("#d62728")
+                elif s < 5.5:
+                    bar_colors.append("#ff7f0e")
+                elif s < 7:
+                    bar_colors.append("#ffbb78")
+                else:
+                    bar_colors.append("#2ca02c")
+
+            fig_height = max(6, len(markets) * 0.3)
+            fig, ax = plt.subplots(figsize=(10, fig_height))
+
+            y_pos = np.arange(len(markets))
+            ax.barh(y_pos, scores, color=bar_colors, edgecolor="white", linewidth=0.5)
+
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(markets, fontsize=8)
+            ax.set_xlabel("Score (0-10)")
+            ax.set_xlim(0, 10)
+            ax.set_title(f"{dim_name} - Score by Market", fontsize=11, fontweight="bold")
+
+            ax.axvline(x=5.5, color="gray", linestyle="--", linewidth=1, alpha=0.7)
+            ax.text(5.6, max(0, len(markets) - 1), "Medium Risk\nThreshold", fontsize=7, color="gray")
+
+            for i, score in enumerate(scores):
+                ax.text(score + 0.1, i, f"{score:.1f}", va="center", fontsize=7)
+
+            plt.tight_layout()
+
+            safe_dim_name = str(dim_name).lower().replace(" ", "_").replace("&", "and")
+            safe_dim_name = re.sub(r"[^a-z0-9_]+", "_", safe_dim_name).strip("_")
+            visualizations[f"dim_{safe_dim_name}_bars"] = save_plot_to_base64()
+
+        markets_with_coords = [
+            m
+            for m in markets_data
+            if m.get("latitude") is not None and m.get("longitude") is not None
+        ]
+
+        if markets_with_coords:
+            lats = [float(m["latitude"]) for m in markets_with_coords]
+            lons = [float(m["longitude"]) for m in markets_with_coords]
+            mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
+            names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
+
+            fig, ax = plt.subplots(figsize=(12, 10))
+
+            scatter = ax.scatter(
+                lons,
+                lats,
+                c=mfi_scores,
+                cmap="RdYlGn",
+                s=100,
+                vmin=0,
+                vmax=10,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+
+            for i, name in enumerate(names):
+                if not name:
+                    continue
+                ax.annotate(
+                    name,
+                    (lons[i], lats[i]),
+                    fontsize=6,
+                    xytext=(3, 3),
+                    textcoords="offset points",
+                )
+
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            country = str(state.get("country", "")).strip()
+            suffix = f" ({country})" if country else ""
+            ax.set_title(
+                f"MFI Scores - Geographic Distribution{suffix}",
+                fontsize=12,
+                fontweight="bold",
+            )
+
+            cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
+            cbar.set_label("MFI Score")
+
+            from matplotlib.patches import Patch
+
+            legend_elements = [
+                Patch(facecolor="#2ca02c", label="Low Risk (≥7)"),
+                Patch(facecolor="#ffbb78", label="Medium Risk (5.5-7)"),
+                Patch(facecolor="#ff7f0e", label="High Risk (4-5.5)"),
+                Patch(facecolor="#d62728", label="Very High Risk (<4)"),
+            ]
+            ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
+
+            plt.tight_layout()
+            visualizations["geographic_map"] = save_plot_to_base64()
     except Exception as e:
         logger.error(f"Error generating visualizations: {e}")
 
@@ -554,16 +784,61 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
 # ============================================================================
 
 DIMENSION_DESCRIPTIONS = {
-    "Assortment": "Variety of essential goods available.",
-    "Availability": "Risk of stockouts and scarcity.",
-    "Price": "Price stability and predictability.",
-    "Resilience": "Supply chain robustness.",
-    "Competition": "Market competition levels.",
-    "Infrastructure": "Physical market conditions.",
-    "Service": "Quality of retail service.",
-    "Food Quality": "Food safety standards.",
-    "Access & Protection": "Accessibility and safety."
+    "Assortment": """The assortment of essential goods measures market breadth and depth.
+It answers two key questions: (1) Can beneficiaries find all essential food and non-food items?
+(2) Do they have a wide range of choices within each category?
+Essential needs include cereals, pulses, oils, and basic NFIs. A high score indicates markets
+can support diverse household needs; a low score suggests limited product variety.""",
+
+    "Availability": """Availability measures consistent supply of essential commodities.
+It answers: (1) Are essential goods consistently in stock? (2) How frequent are stockouts?
+The dimension tracks scarcity reports and runout frequency across food and NFI categories.
+High scores indicate reliable supply; low scores signal supply chain disruptions or
+seasonal shortages requiring intervention.""",
+
+    "Price": """Price stability measures affordability and predictability of essential goods.
+It answers: (1) Have prices increased significantly? (2) Are prices stable over time?
+This dimension tracks both price levels and volatility across commodity categories.
+High scores indicate stable, accessible pricing; low scores suggest inflation pressures
+or market manipulation affecting household purchasing power.""",
+
+    "Resilience": """Resilience measures supply chain robustness and adaptive capacity.
+It answers: (1) Can markets respond to demand shocks? (2) How vulnerable are supply networks?
+The dimension evaluates node density, complexity, and criticality of supply chains.
+High scores indicate robust, diversified supply networks; low scores suggest fragile
+systems vulnerable to disruptions.""",
+
+    "Competition": """Competition measures market structure and trader dynamics.
+It answers: (1) Are there enough traders to ensure fair pricing? (2) Is there monopoly risk?
+The dimension tracks market concentration and number of active competitors.
+High scores indicate healthy competition; low scores suggest market power concentration
+that may disadvantage consumers.""",
+
+    "Infrastructure": """Infrastructure measures physical market conditions and facilities.
+It answers: (1) What is the condition of market structures? (2) Are essential facilities available?
+The dimension evaluates structural condition, sanitation, electricity, and water access.
+High scores indicate well-maintained facilities; low scores suggest infrastructure
+investments are needed.""",
+
+    "Service": """Service quality measures the retail experience for consumers.
+It answers: (1) How efficient is the checkout process? (2) Is the shopping experience positive?
+The dimension tracks service speed, courtesy, and overall consumer satisfaction.
+High scores indicate professional retail operations; low scores suggest service
+improvements are needed.""",
+
+    "Food Quality": """Food quality measures safety and handling standards.
+It answers: (1) Are food items properly stored and handled? (2) Do products meet safety standards?
+The dimension evaluates packaging integrity, storage conditions, and hygiene practices.
+High scores indicate safe food handling; low scores suggest food safety risks
+requiring monitoring.""",
+
+    "Access & Protection": """Access and protection measures physical and social accessibility.
+It answers: (1) Can all population groups access the market? (2) Are there safety concerns?
+The dimension tracks geographic accessibility, operating hours, and protection issues.
+High scores indicate inclusive, safe markets; low scores suggest access barriers
+or protection concerns.""",
 }
+
 
 def node_dimension_drafter(state: MFIReportState) -> dict:
     """Nodo: Genera findings per ogni dimensione."""
@@ -594,6 +869,8 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
+- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
+- For bullets, use plain text lines starting with '- '.
 
 Data:
 - National Score: {dim_data['national_score']}/10
@@ -642,6 +919,118 @@ Output JSON:
     }
 
 
+def node_market_recommendations_drafter(state: MFIReportState) -> dict:
+    """Nodo: Genera raccomandazioni per mercato invece che per dimensione."""
+    logger.info("[MarketRecDrafter] Generating market-level recommendations")
+
+    markets_data = state.get("markets_data", [])
+    if not markets_data:
+        return {
+            "market_recommendations": {},
+            "current_node": "market_recommendations_drafter",
+        }
+
+    llm = get_model()
+    market_recommendations: Dict[str, Dict[str, Any]] = {}
+    llm_calls = 0
+
+    critical_markets = [
+        m
+        for m in markets_data
+        if isinstance(m, dict) and m.get("risk_level") in ["High Risk", "Very High Risk"]
+    ]
+
+    if len(critical_markets) > 15:
+        critical_markets = sorted(
+            critical_markets,
+            key=lambda x: float(x.get("overall_mfi", 0) or 0),
+        )[:15]
+
+    for market in critical_markets:
+        market_name = str(market.get("market_name", "")).strip()
+        if not market_name:
+            continue
+
+        region = str(market.get("region", market.get("admin1", "")) or "").strip()
+
+        weak_dims = [
+            (dim, score)
+            for dim, score in (market.get("dimension_scores") or {}).items()
+            if score is not None and float(score) < 6.0
+        ]
+        weak_dims = sorted(weak_dims, key=lambda x: float(x[1]))
+
+        if not weak_dims:
+            continue
+
+        prompt = f"""Generate targeted recommendations for {market_name} market ({region}).
+
+MARKET DATA:
+- Overall MFI: {market.get('overall_mfi')}/10 ({market.get('risk_level')})
+- Weak dimensions: {json.dumps([{'dim': d, 'score': float(s)} for d, s in weak_dims[:4]])}
+- Sub-scores: {json.dumps(market.get('sub_scores', {}))}
+
+RULES:
+- Language: English only
+- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
+- Focus on the 2-3 weakest dimensions
+- Provide specific, actionable interventions
+- Link interventions to specific issues identified
+
+Output JSON:
+{{
+    \"priority_issues\": [\"issue1\", \"issue2\"],
+    \"recommended_interventions\": [\"intervention1\", \"intervention2\", \"intervention3\"],
+    \"modality_considerations\": \"Brief note on CBT feasibility given market conditions\"
+}}"""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            result = robust_json_parse(response)
+            llm_calls += 1
+
+            if not isinstance(result, dict):
+                continue
+
+            priority_issues_raw = result.get("priority_issues", []) or []
+            if not isinstance(priority_issues_raw, list):
+                priority_issues_raw = []
+            priority_issues: list[str] = []
+            for item in priority_issues_raw:
+                s = _normalize_llm_text(item).strip()
+                if s:
+                    priority_issues.append(s)
+
+            interventions_raw = result.get("recommended_interventions", []) or []
+            if not isinstance(interventions_raw, list):
+                interventions_raw = []
+            recommended_interventions: list[str] = []
+            for item in interventions_raw:
+                s = _normalize_llm_text(item).strip()
+                if s:
+                    recommended_interventions.append(s)
+
+            modality_considerations = _normalize_llm_text(result.get("modality_considerations", "")).strip()
+
+            market_recommendations[market_name] = {
+                "region": region,
+                "mfi_score": float(market.get("overall_mfi", 0) or 0),
+                "risk_level": str(market.get("risk_level", "")).strip(),
+                "weak_dimensions": [d for d, _s in weak_dims[:3]],
+                "priority_issues": priority_issues,
+                "recommended_interventions": recommended_interventions,
+                "modality_considerations": modality_considerations,
+            }
+        except Exception as e:
+            logger.error(f"Market {market_name} recommendation error: {e}")
+
+    return {
+        "market_recommendations": market_recommendations,
+        "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "current_node": "market_recommendations_drafter",
+    }
+
+
 # ============================================================================
 # NODE: EXECUTIVE SUMMARY DRAFTER
 # ============================================================================
@@ -672,6 +1061,9 @@ def node_executive_summary_drafter(state: MFIReportState) -> dict:
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
+- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
+- For bullets, use plain text lines starting with '- '.
+- For numbered lists, use plain text lines starting with '1. ', '2. ', etc.
 
 Survey: {len(markets_data)} markets, {len(regions_covered)} admin1 areas, {survey_meta.get('total_traders', 'N/A')} traders
 Risk Distribution: {json.dumps(risk_dist)}
@@ -833,6 +1225,10 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph.add_node("mfi_graph_designer", wrap_node("mfi_graph_designer", node_mfi_graph_designer))
     graph.add_node("dimension_drafter", wrap_node("dimension_drafter", node_dimension_drafter))
     graph.add_node(
+        "market_recommendations_drafter",
+        wrap_node("market_recommendations_drafter", node_market_recommendations_drafter),
+    )
+    graph.add_node(
         "executive_summary_drafter",
         wrap_node("executive_summary_drafter", node_executive_summary_drafter),
     )
@@ -846,7 +1242,8 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph.add_edge("context_retrieval", "context_extractor")
     graph.add_edge("context_extractor", "mfi_graph_designer")
     graph.add_edge("mfi_graph_designer", "dimension_drafter")
-    graph.add_edge("dimension_drafter", "executive_summary_drafter")
+    graph.add_edge("dimension_drafter", "market_recommendations_drafter")
+    graph.add_edge("market_recommendations_drafter", "executive_summary_drafter")
     graph.add_edge("executive_summary_drafter", "red_team")
     
     # QA Loop

@@ -140,6 +140,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     country_context = result.get("country_context")
     executive_summary = result.get("executive_summary")
     dimension_findings = result.get("dimension_findings") or {}
+    market_recommendations = result.get("market_recommendations") or {}
 
     document_references = result.get("document_references") or []
 
@@ -151,12 +152,30 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
 
     blocks.append(ReportBlock(type="figure", figure_id="mfi_radar", caption="MFI dimension scores"))
 
+    blocks.append(
+        ReportBlock(
+            type="figure",
+            figure_id="overview_table",
+            caption="Market Functionality Index overview by market and dimension",
+            width=7.0,
+        )
+    )
+
     if isinstance(executive_summary, str) and executive_summary.strip():
         blocks.append(ReportBlock(type="heading", text="Executive Summary", level=2))
         blocks.extend(_text_to_paragraph_blocks(executive_summary))
 
     blocks.append(
         ReportBlock(type="figure", figure_id="risk_distribution", caption="Market risk distribution")
+    )
+
+    blocks.append(
+        ReportBlock(
+            type="figure",
+            figure_id="geographic_map",
+            caption="MFI scores - geographic distribution",
+            width=7.0,
+        )
     )
 
     if isinstance(dimension_findings, dict) and dimension_findings:
@@ -166,6 +185,16 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             if not isinstance(finding, dict):
                 continue
             blocks.append(ReportBlock(type="heading", text=dim, level=3))
+
+            safe_dim_name = dim.lower().replace(" ", "_").replace("&", "and")
+            safe_dim_name = re.sub(r"[^a-z0-9_]+", "_", safe_dim_name).strip("_")
+            blocks.append(
+                ReportBlock(
+                    type="figure",
+                    figure_id=f"dim_{safe_dim_name}_bars",
+                    caption=f"{dim} - score by market",
+                )
+            )
 
             key_findings = finding.get("key_findings")
             if isinstance(key_findings, str) and key_findings.strip():
@@ -178,6 +207,50 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             recs = finding.get("recommendations")
             if isinstance(recs, str) and recs.strip():
                 blocks.extend(_text_to_paragraph_blocks(f"Recommendations\n{recs}"))
+
+    if isinstance(market_recommendations, dict) and market_recommendations:
+        blocks.append(ReportBlock(type="heading", text="Recommendations by Market", level=2))
+
+        items: List[tuple[str, Dict[str, Any]]] = []
+        for market_name, payload in market_recommendations.items():
+            if not isinstance(payload, dict):
+                continue
+            items.append((str(market_name), payload))
+
+        items = sorted(items, key=lambda x: float(x[1].get("mfi_score", 0) or 0))
+
+        for market_name, payload in items:
+            region = str(payload.get("region", "") or "").strip()
+            risk_level = str(payload.get("risk_level", "") or "").strip()
+            try:
+                mfi_score = float(payload.get("mfi_score", 0) or 0)
+            except Exception:
+                mfi_score = 0.0
+
+            heading = market_name
+            if region:
+                heading = f"{heading} ({region})"
+            if risk_level:
+                heading = f"{heading} - {risk_level}"
+            heading = f"{heading} (MFI: {mfi_score:.1f})"
+
+            blocks.append(ReportBlock(type="heading", text=heading, level=3))
+
+            priority_issues = payload.get("priority_issues") or []
+            if isinstance(priority_issues, list) and priority_issues:
+                issues_text = "\n".join([f"- {str(i).strip()}" for i in priority_issues if str(i).strip()])
+                if issues_text.strip():
+                    blocks.extend(_text_to_paragraph_blocks(f"Priority Issues\n{issues_text}"))
+
+            interventions = payload.get("recommended_interventions") or []
+            if isinstance(interventions, list) and interventions:
+                int_text = "\n".join([f"- {str(i).strip()}" for i in interventions if str(i).strip()])
+                if int_text.strip():
+                    blocks.extend(_text_to_paragraph_blocks(f"Recommended Interventions\n{int_text}"))
+
+            modality = payload.get("modality_considerations")
+            if isinstance(modality, str) and modality.strip():
+                blocks.extend(_text_to_paragraph_blocks(f"Modality Consideration\n{modality.strip()}"))
 
     if document_references:
         blocks.append(ReportBlock(type="references", references=document_references))
