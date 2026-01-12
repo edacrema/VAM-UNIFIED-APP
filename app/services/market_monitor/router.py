@@ -3,8 +3,9 @@ Market Monitor - Router
 =======================
 FastAPI endpoints for the Market Monitor service.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 from typing import Optional
 import logging
 import traceback
@@ -24,12 +25,22 @@ from app.shared.async_runs import (
     update_run_progress,
 )
 
+from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
+from app.shared.report_blocks import build_market_monitor_report_blocks
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 # In-memory store per report status (in produzione usare Redis/DB)
 _report_status: dict = {}
+
+
+class ExportDocxOptions(BaseModel):
+    filename: Optional[str] = None
+    include_sources: bool = True
+    include_visualizations: bool = True
+    template: Optional[str] = None
 
 
 @router.post("/generate", response_model=GenerateReportOutput)
@@ -53,13 +64,13 @@ async def generate_market_monitor(input_data: GenerateReportInput):
     """
     try:
         logger.info(f"Starting report generation for {input_data.country} - {input_data.time_period}")
-        
+
         # If admin1_list is empty, use default
         admin1_list = input_data.admin1_list
         if not admin1_list:
-            admin1_list = [f"{input_data.country} North", f"{input_data.country} South", 
+            admin1_list = [f"{input_data.country} North", f"{input_data.country} South",
                           f"{input_data.country} Central"]
-        
+
         # Run generation
         result = run_report_generation(
             country=input_data.country,
@@ -68,16 +79,21 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             admin1_list=admin1_list,
             currency_code=input_data.currency_code,
             enabled_modules=input_data.enabled_modules,
+            news_start_date=input_data.news_start_date,
+            news_end_date=input_data.news_end_date,
             previous_report_text=input_data.previous_report_text,
             use_mock_data=input_data.use_mock_data
         )
-        
+
         # Build output
         output = GenerateReportOutput(
             run_id=result.get("run_id", "unknown"),
             country=input_data.country,
             time_period=input_data.time_period,
             report_sections=result.get("report_draft_sections", {}),
+            report_blocks=build_market_monitor_report_blocks(
+                {**(result or {}), "country": input_data.country, "time_period": input_data.time_period}
+            ),
             visualizations=result.get("visualizations", {}),
             data_statistics=result.get("data_statistics", {}),
             trend_analysis=result.get("trend_analysis"),
@@ -89,11 +105,11 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             llm_calls=result.get("llm_calls", 0),
             success=True
         )
-        
+
         logger.info(f"Report generation completed: {output.run_id}")
-        
+
         return output
-        
+
     except Exception as e:
         logger.error(f"Report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -127,16 +143,16 @@ async def generate_market_monitor_async(
         "narrative_drafter": 85,
         "red_team": 95,
     }
-    
+
     def run_in_background():
         try:
             update_run(run_id, status="running", error=None, traceback=None)
-            
+
             admin1_list = input_data.admin1_list or [
-                f"{input_data.country} North", 
+                f"{input_data.country} North",
                 f"{input_data.country} South"
             ]
-            
+
             def on_step(node_name: str, _state: dict):
                 progress = progress_map.get(node_name)
                 if progress is not None:
@@ -151,7 +167,7 @@ async def generate_market_monitor_async(
                     if isinstance(retriever_traces, list):
                         meta_update["retriever_traces"] = retriever_traces
                     update_run(run_id, metadata=meta_update)
-                    
+
             result = run_report_generation(
                 country=input_data.country,
                 time_period=input_data.time_period,
@@ -159,6 +175,8 @@ async def generate_market_monitor_async(
                 admin1_list=admin1_list,
                 currency_code=input_data.currency_code,
                 enabled_modules=input_data.enabled_modules,
+                news_start_date=input_data.news_start_date,
+                news_end_date=input_data.news_end_date,
                 previous_report_text=input_data.previous_report_text,
                 use_mock_data=input_data.use_mock_data,
                 on_step=on_step
@@ -166,17 +184,18 @@ async def generate_market_monitor_async(
 
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
-            
+
         except Exception as e:
             tb_str = traceback.format_exc()
             logger.exception(f"Report generation failed for {run_id}: {e}")
 
             current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
             set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
-    
+
     background_tasks.add_task(run_in_background)
-    
+
     return {"run_id": run_id, "status": "pending"}
+
 
 @router.get("/data-availability")
 def check_data_availability_endpoint(
@@ -186,25 +205,25 @@ def check_data_availability_endpoint(
 ):
     '''
     Check what price data is available for a given country and period.
-    
+
     Useful for:
     - Validating inputs before running a report
     - Showing users what data is available
     - Debugging data loading issues
     '''
     from .data_loader import check_data_availability
-    
+
     commodity_list = [c.strip() for c in commodities.split(",")]
-    
+
     availability = check_data_availability(
         country=country,
         time_period=time_period,
         commodities=commodity_list
     )
-    
+
     return availability
 
-    
+
 @router.get("/status/{run_id}", response_model=ReportStatusOutput)
 async def get_report_status(run_id: str):
     """
@@ -237,17 +256,18 @@ async def get_report_result(run_id: str):
 
     if run.status != "completed":
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Report not completed. Current status: {run.status}"
         )
 
     result = run.result or {}
-    
+
     return GenerateReportOutput(
         run_id=run_id,
         country=result.get("country", "Unknown"),
         time_period=result.get("time_period", "Unknown"),
         report_sections=result.get("report_draft_sections", {}),
+        report_blocks=build_market_monitor_report_blocks(result),
         visualizations=result.get("visualizations", {}),
         data_statistics=result.get("data_statistics", {}),
         trend_analysis=result.get("trend_analysis"),
@@ -258,6 +278,40 @@ async def get_report_result(run_id: str):
         warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
         success=True
+    )
+
+
+@router.post("/export-docx/{run_id}")
+async def export_market_monitor_docx(
+    run_id: str,
+    options: ExportDocxOptions = Body(default_factory=ExportDocxOptions),
+):
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
+
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail=f"Run not completed. Current status: {run.status}")
+
+    result = run.result or {}
+
+    try:
+        report_blocks = build_market_monitor_report_blocks(result)
+        docx_bytes = build_docx_bytes_from_report_blocks(
+            report_blocks,
+            visualizations=result.get("visualizations", {}),
+            include_sources=options.include_sources,
+            include_visualizations=options.include_visualizations,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DOCX generation failed: {str(e)}")
+
+    filename = options.filename or f"market-monitor-{run_id}.docx"
+    headers = {"Content-Disposition": build_content_disposition(filename)}
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=headers,
     )
 
 
@@ -317,7 +371,7 @@ def get_service_info():
                 "required": False,
                 "label": "Optional Modules",
                 "description": "Optional modules to enable (note: exchange_rate requires TE_API_KEY and has no mock fallback)",
-                "default": ["exchange_rate"],
+                "default": [],
                 "options": list(AVAILABLE_MODULES.keys())
             },
             {

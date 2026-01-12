@@ -35,6 +35,7 @@ from .schemas import (
     MFI_DIMENSIONS, RISK_COLORS, get_risk_level,
     Document, MFIMarketData, MFIDimensionScore, SurveyMetadata
 )
+from .data_loader import load_mfi_from_csv
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class MFIReportState(TypedDict):
     data_collection_start: str
     data_collection_end: str
     markets: List[str]
+
+    csv_data: Optional[Dict[str, Any]]
+    use_csv_data: bool
     
     # ===== BRANCH 1: MFI DATA =====
     raw_survey_data: Optional[str]
@@ -64,6 +68,7 @@ class MFIReportState(TypedDict):
     
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
+    document_references: List[Dict[str, Any]]
     country_context: Optional[str]
     context_counts: Dict[str, int]
     retriever_traces: List[Dict[str, Any]]
@@ -88,7 +93,8 @@ def create_initial_state(
     country: str,
     data_collection_start: str,
     data_collection_end: str,
-    markets: List[str]
+    markets: List[str],
+    csv_data: Optional[Dict[str, Any]] = None
 ) -> MFIReportState:
     """Crea stato iniziale per il grafo."""
     return MFIReportState(
@@ -96,11 +102,14 @@ def create_initial_state(
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
         markets=markets,
+        csv_data=csv_data,
+        use_csv_data=csv_data is not None,
         raw_survey_data=None,
         markets_data=[],
         dimension_scores=[],
         survey_metadata=None,
         contextual_documents=[],
+        document_references=[],
         country_context=None,
         context_counts={"GDELT": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
@@ -286,13 +295,18 @@ def generate_mock_mfi_data(
 def node_mfi_data_agent(state: MFIReportState) -> dict:
     """Nodo: Recupera/genera dati MFI."""
     logger.info(f"[MFIDataAgent] Processing for {state['country']}")
-    
-    data = generate_mock_mfi_data(
-        state["country"],
-        state["markets"],
-        state["data_collection_start"],
-        state["data_collection_end"]
-    )
+
+    if state.get("use_csv_data") and state.get("csv_data"):
+        logger.info("[MFIDataAgent] Using CSV data")
+        data = state["csv_data"]
+    else:
+        logger.info("[MFIDataAgent] Using mock data (no CSV provided)")
+        data = generate_mock_mfi_data(
+            state["country"],
+            state["markets"],
+            state["data_collection_start"],
+            state["data_collection_end"],
+        )
     
     # Log risk distribution
     risk_dist = {}
@@ -307,8 +321,6 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
         "current_node": "mfi_data_agent"
     }
 
-
-# ============================================================================
 # NODE: CONTEXT RETRIEVAL (Mock)
 # ============================================================================
 
@@ -324,13 +336,19 @@ def node_context_retrieval(state: MFIReportState) -> dict:
     end_date = state.get("data_collection_end", "")
 
     rw = ReliefWebRetriever(verbose=False)
-    rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=8)
+    rw_query = ReliefWebRetriever.build_economy_query(
+        extra_terms=["market functionality", "food security", "supply", "availability", "access"]
+    )
+    rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=8, query=rw_query)
     if getattr(rw, "last_trace", None):
         retriever_traces.append(rw.last_trace)
 
     gdelt = GDELTRetriever(verbose=False)
-    query = f"{country} market functionality food security"
-    gd_docs = gdelt.fetch(query=query, start_date=start_date, end_date=end_date, max_records=8)
+    gd_query = GDELTRetriever.build_economy_query(
+        country=country,
+        extra_terms=["market functionality", "food security", "supply", "availability", "access"],
+    )
+    gd_docs = gdelt.fetch(query=gd_query, start_date=start_date, end_date=end_date, max_records=8)
     if getattr(gdelt, "last_trace", None):
         retriever_traces.append(gdelt.last_trace)
 
@@ -354,16 +372,26 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         "ReliefWeb": int(counts.get("ReliefWeb", 0)),
         "total": int(len(docs)),
     }
+
+    refs = [
+        {
+            "doc_id": d.get("doc_id"),
+            "source": d.get("source"),
+            "title": d.get("title"),
+            "url": d.get("url"),
+            "date": d.get("date"),
+        }
+        for d in docs
+    ]
     
     return {
         "contextual_documents": docs,
+        "document_references": refs,
         "context_counts": context_counts,
         "retriever_traces": retriever_traces,
         "current_node": "context_retrieval"
     }
 
-
-# ============================================================================
 # NODE: CONTEXT EXTRACTOR
 # ============================================================================
 
@@ -412,6 +440,75 @@ Return JSON: {{"country_context": "Your 3-4 sentence context..."}}"""
         "country_context": context,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "current_node": "context_extractor"
+    }
+
+
+def node_mfi_graph_designer(state: MFIReportState) -> dict:
+    logger.info("[GraphDesigner] Generating visualizations")
+
+    visualizations: Dict[str, str] = {}
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        dim_scores = state.get("dimension_scores") or []
+        score_map: Dict[str, float] = {}
+        for d in dim_scores:
+            if isinstance(d, dict) and d.get("dimension") is not None:
+                try:
+                    score_map[str(d.get("dimension"))] = float(d.get("national_score", 0.0))
+                except Exception:
+                    score_map[str(d.get("dimension"))] = 0.0
+
+        dims = list(MFI_DIMENSIONS)
+        values = [float(score_map.get(dim, 0.0)) for dim in dims]
+        if any(values):
+            angles = [n / float(len(dims)) * 2 * pi for n in range(len(dims))]
+            values_loop = values + values[:1]
+            angles_loop = angles + angles[:1]
+
+            fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"polar": True})
+            ax.set_theta_offset(pi / 2)
+            ax.set_theta_direction(-1)
+            plt.xticks(angles, dims, size=8)
+            ax.set_ylim(0, 10)
+            ax.plot(angles_loop, values_loop, color=WFP_BLUE, linewidth=2)
+            ax.fill(angles_loop, values_loop, color=WFP_BLUE, alpha=0.25)
+            plt.tight_layout()
+            visualizations["mfi_radar"] = save_plot_to_base64()
+
+        risk_dist: Dict[str, int] = {}
+        for m in state.get("markets_data", []) or []:
+            if not isinstance(m, dict):
+                continue
+            risk = m.get("risk_level")
+            if not risk:
+                continue
+            risk_dist[str(risk)] = risk_dist.get(str(risk), 0) + 1
+
+        if risk_dist:
+            labels = ["Low Risk", "Medium Risk", "High Risk", "Very High Risk"]
+            counts = [risk_dist.get(lbl, 0) for lbl in labels]
+            colors = [RISK_COLORS.get(lbl, "#999999") for lbl in labels]
+            xs = list(range(len(labels)))
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.bar(xs, counts, color=colors)
+            ax.set_xticks(xs)
+            ax.set_xticklabels(labels, rotation=20, ha="right")
+            ax.set_ylabel("Number of markets")
+            ax.set_title("Risk distribution")
+            plt.tight_layout()
+            visualizations["risk_distribution"] = save_plot_to_base64()
+    except Exception as e:
+        logger.error(f"Error generating visualizations: {e}")
+
+    return {
+        "visualizations": visualizations,
+        "current_node": "mfi_graph_designer",
     }
 
 
@@ -730,6 +827,7 @@ def run_mfi_report_generation(
     data_collection_start: str,
     data_collection_end: str,
     markets: List[str],
+    csv_data: Optional[Dict[str, Any]] = None,
     on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
@@ -743,6 +841,7 @@ def run_mfi_report_generation(
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
         markets=markets,
+        csv_data=csv_data,
     )
     
     agent = build_graph(on_step=on_step)

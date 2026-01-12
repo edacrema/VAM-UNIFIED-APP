@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, field, asdict
 
+from app.shared.report_blocks import ReportBlock
+
 
 # ============================================================================
 # CONSTANTS
@@ -31,6 +33,31 @@ RISK_COLORS = {
     "High Risk": "#ff7f0e",
     "Medium Risk": "#ffbb78",
     "Low Risk": "#2ca02c"
+}
+
+DIMENSION_NAME_MAP = {
+    "Quality": "Food Quality",
+    "AccessProtection": "Access & Protection",
+    "Assortment": "Assortment",
+    "Availability": "Availability",
+    "Price": "Price",
+    "Resilience": "Resilience",
+    "Competition": "Competition",
+    "Infrastructure": "Infrastructure",
+    "Service": "Service",
+}
+
+SCORE_VARIABLE_MAP = {
+    "Assortment": "AssortmentScoreMFI",
+    "Availability": "AvailabilityScoreMFI",
+    "Price": "PriceScoreMFI",
+    "Resilience": "ResilienceScoreMFI",
+    "Competition": "CompetitionScoreMFI",
+    "Infrastructure": "InfrastructureScoreMFI",
+    "Service": "ServiceScoreMFI",
+    "Quality": "QualityScoreMFI",
+    "AccessProtection": "AccessProtectionScoreMFI",
+    "MFI": "MFIScoreMFI",
 }
 
 
@@ -77,6 +104,8 @@ class MFIMarketData:
     sub_scores: Dict[str, Dict[str, Any]]
     risk_level: str
     traders_surveyed: int
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -145,6 +174,13 @@ class GenerateMFIReportInput(BaseModel):
     markets: List[str] = Field(..., description="List of surveyed markets")
 
 
+class GenerateMFIReportFromCSVInput(BaseModel):
+    """Input for generating MFI report from uploaded CSV."""
+    country_override: Optional[str] = Field(None, description="Override country name from CSV")
+    data_collection_start_override: Optional[str] = Field(None, description="Override start date")
+    data_collection_end_override: Optional[str] = Field(None, description="Override end date")
+
+
 class GenerateMFIReportOutput(BaseModel):
     """Output of MFI report generation."""
     run_id: str
@@ -165,6 +201,10 @@ class GenerateMFIReportOutput(BaseModel):
     executive_summary: str
     dimension_findings: Dict[str, Dict[str, str]]
     country_context: Optional[str] = None
+
+    document_references: List[Dict[str, Any]] = []
+
+    report_blocks: List[ReportBlock] = []
     
     # Visualizations (Base64)
     visualizations: Dict[str, str]

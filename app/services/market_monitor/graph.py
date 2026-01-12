@@ -92,6 +92,8 @@ class MarketReportState(TypedDict):
     # ===== INPUTS =====
     country: str
     time_period: str
+    news_start_date: Optional[str]
+    news_end_date: Optional[str]
     commodity_list: List[str]
     admin1_list: List[str]
     previous_report_text: str
@@ -138,6 +140,8 @@ def create_initial_state(
     admin1_list: List[str],
     currency_code: str,
     enabled_modules: List[str],
+    news_start_date: Optional[str] = None,
+    news_end_date: Optional[str] = None,
     previous_report_text: str = "",
     use_mock_data: bool = False
 ) -> MarketReportState:
@@ -145,6 +149,8 @@ def create_initial_state(
     return MarketReportState(
         country=country,
         time_period=time_period,
+        news_start_date=news_start_date,
+        news_end_date=news_end_date,
         commodity_list=commodity_list,
         admin1_list=admin1_list,
         previous_report_text=previous_report_text,
@@ -737,7 +743,7 @@ def node_graph_designer(state: MarketReportState) -> dict:
     }
 
 # ============================================================================
-# NODE: NEWS RETRIEVAL (Simplified - uses mock)
+# NODE: NEWS RETRIEVAL 
 # ============================================================================
 
 def node_news_retrieval(state: MarketReportState) -> dict:
@@ -750,25 +756,41 @@ def node_news_retrieval(state: MarketReportState) -> dict:
     country = state.get("country", "")
     time_period = state.get("time_period", "")
 
-    try:
-        start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
-    except Exception:
-        start_dt = datetime.utcnow().replace(day=1)
+    explicit_start = (state.get("news_start_date") or "").strip()
+    explicit_end = (state.get("news_end_date") or "").strip()
 
-    end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-    start_date = start_dt.strftime("%Y-%m-%d")
-    end_date = end_dt.strftime("%Y-%m-%d")
+    if explicit_start and explicit_end:
+        start_date = explicit_start[:10]
+        end_date = explicit_end[:10]
+    else:
+        try:
+            start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
+        except Exception:
+            start_dt = datetime.utcnow().replace(day=1)
+
+        end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        prev_month_start = (start_dt - timedelta(days=1)).replace(day=1)
+        start_date = prev_month_start.strftime("%Y-%m-%d")
+        end_date = end_dt.strftime("%Y-%m-%d")
+    
 
     rw = ReliefWebRetriever(verbose=False)
-    rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=10)
+    rw_query = ReliefWebRetriever.build_economy_query(
+        extra_terms=["food security", "supply", "shortage", "subsidy"]
+    )
+    rw_docs = rw.fetch(country=country, start_date=start_date, end_date=end_date, max_records=10, query=rw_query)
     if getattr(rw, "last_trace", None):
         retriever_traces.append(rw.last_trace)
 
     gdelt = GDELTRetriever(verbose=False)
-    query = f"{country} food prices market"
-    gd_docs = gdelt.fetch(query=query, start_date=start_date, end_date=end_date, max_records=10)
+    gd_query = GDELTRetriever.build_economy_query(
+        country=country,
+        extra_terms=["food security", "wheat", "sorghum", "rice", "cooking oil"],
+    )
+    gd_docs = gdelt.fetch(query=gd_query, start_date=start_date, end_date=end_date, max_records=10)
     if getattr(gdelt, "last_trace", None):
         retriever_traces.append(gdelt.last_trace)
+    
 
     combined = list(rw_docs) + list(gd_docs)
     seen_keys = set()
@@ -942,6 +964,7 @@ Return JSON:
         "current_node": "trend_analyst"
     }
 
+# ============================================================================
 # NODE: MODULE ORCHESTRATOR
 # ============================================================================
 
@@ -958,11 +981,20 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
     module_sections = {}
     updates = {}
     llm_calls = 0
+    warnings: List[str] = []
     
     for module_id in enabled_modules:
         if module_id not in AVAILABLE_MODULES:
             logger.warning(f"Unknown module: {module_id}")
             continue
+
+        if module_id == "exchange_rate":
+            currency_code = str(state.get("currency_code") or "").strip().upper()
+            if not currency_code or currency_code == "USD":
+                warnings.append(
+                    "Skipped exchange_rate module because currency_code is USD (no exchange-rate pair to fetch)."
+                )
+                continue
         
         try:
             module_class = AVAILABLE_MODULES[module_id]
@@ -975,7 +1007,8 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
                         for f in getattr(module, "required_inputs", [])
                         if f not in state or state[f] is None
                     ]
-                    raise ValueError(f"Module '{module_id}' missing required inputs: {missing}")
+                    warnings.append(f"Skipped exchange_rate module due to missing required inputs: {missing}")
+                    continue
                 continue
             
             # Fetch data
@@ -993,9 +1026,12 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
         except Exception as e:
             logger.error(f"Module '{module_id}' failed: {e}")
             if module_id == "exchange_rate":
-                raise
-
+                warnings.append(f"Skipped exchange_rate module due to TradingEconomics error: {e}")
+            continue
+    
     updates["module_sections"] = module_sections
+    if warnings:
+        updates["warnings"] = warnings
     updates["llm_calls"] = state.get("llm_calls", 0) + llm_calls
     updates["current_node"] = "module_orchestrator"
     
@@ -1294,6 +1330,8 @@ def run_report_generation(
     admin1_list: List[str],
     currency_code: str = "USD",
     enabled_modules: List[str] = None,
+    news_start_date: Optional[str] = None,
+    news_end_date: Optional[str] = None,
     previous_report_text: str = "",
     use_mock_data: bool = False,
     on_step: Optional[OnStepCallback] = None
@@ -1314,6 +1352,8 @@ def run_report_generation(
         admin1_list=admin1_list,
         currency_code=currency_code,
         enabled_modules=enabled_modules,
+        news_start_date=news_start_date,
+        news_end_date=news_end_date,
         previous_report_text=previous_report_text,
         use_mock_data=use_mock_data
     )

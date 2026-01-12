@@ -3,13 +3,15 @@ MFI Drafter - Router
 ====================
 FastAPI endpoints for the MFI Report Generator service.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
-from typing import Optional
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, UploadFile, File, Form
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
+from typing import Optional, Any, Dict
 import logging
 import numpy as np
 
 from .graph import run_mfi_report_generation
+from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .schemas import (
     GenerateMFIReportInput,
     GenerateMFIReportOutput,
@@ -27,6 +29,9 @@ from app.shared.async_runs import (
     update_run_progress,
 )
 
+from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
+from app.shared.report_blocks import build_mfi_report_blocks
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -34,6 +39,42 @@ router = APIRouter()
 # In-memory store per report status
 _report_status: dict = {}
 
+class ExportDocxOptions(BaseModel):
+    filename: Optional[str] = None
+    include_sources: bool = True
+    include_visualizations: bool = True
+    template: Optional[str] = None
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            s = item if isinstance(item, str) else str(item)
+            s = s.strip()
+            if s:
+                parts.append(s)
+        return "\n".join(parts)
+    return str(value)
+
+def _normalize_dimension_findings(findings: Any) -> Dict[str, Dict[str, str]]:
+    if not isinstance(findings, dict):
+        return {}
+    normalized: Dict[str, Dict[str, str]] = {}
+    for dim, payload in findings.items():
+        if not isinstance(payload, dict):
+            continue
+        normalized[str(dim)] = {
+            "key_findings": _normalize_text(payload.get("key_findings")),
+            "score_interpretation": _normalize_text(payload.get("score_interpretation")),
+            "recommendations": _normalize_text(payload.get("recommendations")),
+        }
+    return normalized
 
 @router.post("/generate", response_model=GenerateMFIReportOutput)
 async def generate_mfi_report(input_data: GenerateMFIReportInput):
@@ -73,6 +114,8 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
         for m in result.get("markets_data", []):
             risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
         
+        normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
+
         output = GenerateMFIReportOutput(
             run_id=result.get("run_id", "unknown"),
             country=input_data.country,
@@ -84,8 +127,18 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             markets_data=result.get("markets_data", []),
             dimension_scores=result.get("dimension_scores", []),
             executive_summary=result.get("executive_summary", ""),
-            dimension_findings=result.get("dimension_findings", {}),
+            dimension_findings=normalized_dimension_findings,
             country_context=result.get("country_context"),
+            document_references=result.get("document_references", []),
+            report_blocks=build_mfi_report_blocks(
+                {
+                    **(result or {}),
+                    "country": input_data.country,
+                    "data_collection_start": input_data.data_collection_start,
+                    "data_collection_end": input_data.data_collection_end,
+                    "dimension_findings": normalized_dimension_findings,
+                }
+            ),
             visualizations=result.get("visualizations", {}),
             warnings=result.get("warnings", []),
             llm_calls=result.get("llm_calls", 0),
@@ -100,6 +153,201 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
     except Exception as e:
         logger.error(f"MFI report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/generate-from-csv", response_model=GenerateMFIReportOutput)
+async def generate_mfi_report_from_csv(
+    file: UploadFile = File(..., description="Processed MFI CSV file"),
+    country_override: Optional[str] = Form(None, description="Override country name"),
+    data_collection_start_override: Optional[str] = Form(None, description="Override start date"),
+    data_collection_end_override: Optional[str] = Form(None, description="Override end date"),
+):
+    """Generates a full MFI report from an uploaded CSV file."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    try:
+        content = await file.read()
+
+        logger.info(f"Loading CSV file: {filename}")
+        csv_data = load_mfi_from_csv(
+            file_content=content,
+            country_override=country_override,
+            start_date_override=data_collection_start_override,
+            end_date_override=data_collection_end_override,
+        )
+
+        country = csv_data["country"]
+        data_collection_start = csv_data["data_collection_start"]
+        data_collection_end = csv_data["data_collection_end"]
+        markets = csv_data["markets"]
+
+        logger.info(f"Starting MFI report generation from CSV for {country} ({len(markets)} markets)")
+
+        result = run_mfi_report_generation(
+            country=country,
+            data_collection_start=data_collection_start,
+            data_collection_end=data_collection_end,
+            markets=markets,
+            csv_data=csv_data,
+        )
+
+        dimension_scores = result.get("dimension_scores", [])
+        national_mfi = round(
+            np.mean([d["national_score"] for d in dimension_scores]), 1
+        ) if dimension_scores else 0.0
+
+        risk_dist = {}
+        for m in result.get("markets_data", []):
+            risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
+
+        normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
+
+        output = GenerateMFIReportOutput(
+            run_id=result.get("run_id", "unknown"),
+            country=country,
+            data_collection_start=data_collection_start,
+            data_collection_end=data_collection_end,
+            survey_metadata=result.get("survey_metadata", {}),
+            national_mfi=national_mfi,
+            risk_distribution=risk_dist,
+            markets_data=result.get("markets_data", []),
+            dimension_scores=result.get("dimension_scores", []),
+            executive_summary=result.get("executive_summary", ""),
+            dimension_findings=normalized_dimension_findings,
+            country_context=result.get("country_context"),
+            document_references=result.get("document_references", []),
+            report_blocks=build_mfi_report_blocks(
+                {
+                    **(result or {}),
+                    "country": country,
+                    "data_collection_start": data_collection_start,
+                    "data_collection_end": data_collection_end,
+                    "dimension_findings": normalized_dimension_findings,
+                }
+            ),
+            visualizations=result.get("visualizations", {}),
+            warnings=result.get("warnings", []),
+            llm_calls=result.get("llm_calls", 0),
+            correction_attempts=result.get("correction_attempts", 0),
+            success=True,
+        )
+
+        logger.info(f"MFI report generation from CSV completed: {output.run_id}")
+        return output
+    except ValueError as e:
+        logger.error(f"CSV validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"MFI report generation from CSV failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/validate-csv")
+async def validate_mfi_csv(
+    file: UploadFile = File(..., description="CSV file to validate"),
+):
+    """Validates a CSV file structure before processing."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    try:
+        content = await file.read()
+        return validate_csv_structure(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV validation failed: {str(e)}")
+
+
+@router.post("/generate-from-csv-async")
+async def generate_mfi_report_from_csv_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="Processed MFI CSV file"),
+    country_override: Optional[str] = Form(None),
+    data_collection_start_override: Optional[str] = Form(None),
+    data_collection_end_override: Optional[str] = Form(None),
+):
+    """Starts report generation from CSV in the background."""
+    import uuid as uuid_module
+
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    content = await file.read()
+
+    try:
+        csv_data = load_mfi_from_csv(
+            file_content=content,
+            country_override=country_override,
+            start_date_override=data_collection_start_override,
+            end_date_override=data_collection_end_override,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    run_id = f"mfi_{uuid_module.uuid4().hex[:8]}"
+    create_run(run_id)
+
+    progress_map = {
+        "mfi_data_agent": 10,
+        "context_retrieval": 25,
+        "context_extractor": 40,
+        "mfi_graph_designer": 55,
+        "dimension_drafter": 75,
+        "executive_summary_drafter": 90,
+        "red_team": 95,
+    }
+
+    def run_in_background():
+        try:
+            update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_step(node_name: str, _state: dict):
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
+
+                context_counts = _state.get("context_counts")
+                if isinstance(context_counts, dict):
+                    meta_update = {"context_counts": context_counts}
+                    retriever_traces = _state.get("retriever_traces")
+                    if isinstance(retriever_traces, list):
+                        meta_update["retriever_traces"] = retriever_traces
+                    update_run(run_id, metadata=meta_update)
+
+            result = run_mfi_report_generation(
+                country=csv_data["country"],
+                data_collection_start=csv_data["data_collection_start"],
+                data_collection_end=csv_data["data_collection_end"],
+                markets=csv_data["markets"],
+                csv_data=csv_data,
+                on_step=on_step,
+            )
+
+            update_run(run_id, warnings=result.get("warnings", []))
+            set_run_completed(run_id, result=result)
+        except Exception as e:
+            import traceback
+
+            tb_str = traceback.format_exc()
+            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
+
+    background_tasks.add_task(run_in_background)
+
+    return {
+        "run_id": run_id,
+        "status": "pending",
+        "preview": {
+            "country": csv_data["country"],
+            "markets_count": len(csv_data["markets"]),
+            "collection_period": csv_data["survey_metadata"]["collection_period"],
+        },
+    }
 
 
 @router.post("/generate-async")
@@ -203,6 +451,9 @@ async def get_report_result(run_id: str):
         )
 
     result = run.result or {}
+    normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
+    result_for_blocks = dict(result)
+    result_for_blocks["dimension_findings"] = normalized_dimension_findings
 
     dimension_scores = result.get("dimension_scores", [])
     national_mfi = round(
@@ -224,13 +475,51 @@ async def get_report_result(run_id: str):
         markets_data=result.get("markets_data", []),
         dimension_scores=result.get("dimension_scores", []),
         executive_summary=result.get("executive_summary", ""),
-        dimension_findings=result.get("dimension_findings", {}),
+        dimension_findings=normalized_dimension_findings,
         country_context=result.get("country_context"),
+        document_references=result.get("document_references", []),
+        report_blocks=build_mfi_report_blocks(result_for_blocks),
         visualizations=result.get("visualizations", {}),
         warnings=result.get("warnings", []),
         llm_calls=result.get("llm_calls", 0),
         correction_attempts=result.get("correction_attempts", 0),
         success=True
+    )
+
+
+@router.post("/export-docx/{run_id}")
+async def export_mfi_docx(
+    run_id: str,
+    options: ExportDocxOptions = Body(default_factory=ExportDocxOptions),
+):
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
+
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail=f"Run not completed. Current status: {run.status}")
+
+    result = run.result or {}
+    result_for_blocks = dict(result)
+    result_for_blocks["dimension_findings"] = _normalize_dimension_findings(result.get("dimension_findings"))
+
+    try:
+        report_blocks = build_mfi_report_blocks(result_for_blocks)
+        docx_bytes = build_docx_bytes_from_report_blocks(
+            report_blocks,
+            visualizations=result.get("visualizations", {}),
+            include_sources=options.include_sources,
+            include_visualizations=options.include_visualizations,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DOCX generation failed: {str(e)}")
+
+    filename = options.filename or f"mfi-drafter-{run_id}.docx"
+    headers = {"Content-Disposition": build_content_disposition(filename)}
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=headers,
     )
 
 
@@ -243,7 +532,8 @@ def get_service_info():
         "description": "Generates full Market Functionality Index (MFI) reports. "
                        "Analyzes 9 market functionality dimensions and generates "
                        "visualizations, an executive summary, and recommendations.",
-        "version": "1.0.0",
+        "version": "1.1.0",
+        "supports_csv_upload": True,
         "inputs": [
             {
                 "name": "country",
@@ -274,6 +564,29 @@ def get_service_info():
                 "description": "List of surveyed markets (names)"
             }
         ],
+        "csv_upload": {
+            "endpoint": "/generate-from-csv",
+            "async_endpoint": "/generate-from-csv-async",
+            "validate_endpoint": "/validate-csv",
+            "required_columns": [
+                "MarketName",
+                "Adm0Name",
+                "Adm1Name",
+                "LevelID",
+                "DimensionName",
+                "VariableName",
+                "OutputValue",
+                "TradersSampleSize",
+            ],
+            "optional_columns": [
+                "MarketLatitude",
+                "MarketLongitude",
+                "Adm2Name",
+                "StartDate",
+                "EndDate",
+            ],
+            "description": "Upload a processed MFI CSV file instead of providing manual input",
+        },
         "outputs": {
             "run_id": "Unique generation identifier",
             "national_mfi": "National MFI score (0-10)",

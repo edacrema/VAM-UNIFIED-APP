@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, field, asdict
 
+from app.shared.report_blocks import ReportBlock
+
 
 # ============================================================================
 # DATA CLASSES
@@ -102,6 +104,16 @@ class GenerateReportInput(BaseModel):
     """Input for generating a report."""
     country: str = Field(..., description="Country name (e.g., 'Sudan', 'Yemen')")
     time_period: str = Field(..., description="Period in YYYY-MM format (e.g., '2025-01')")
+
+    news_start_date: Optional[str] = Field(
+        default=None,
+        description="Optional start date for news retrieval (YYYY-MM-DD). If provided, must be paired with news_end_date."
+    )
+    news_end_date: Optional[str] = Field(
+        default=None,
+        description="Optional end date for news retrieval (YYYY-MM-DD). If provided, must be paired with news_start_date."
+    )
+
     commodity_list: List[str] = Field(
         default=["Sorghum", "Wheat flour", "Cooking oil", "Sugar"],
         description="List of commodities to analyze"
@@ -115,13 +127,14 @@ class GenerateReportInput(BaseModel):
         description="ISO 4217 currency code (e.g., 'SDG', 'YER')"
     )
     enabled_modules: List[str] = Field(
-        default=["exchange_rate"],
+        default=[],
         description="Optional modules to enable (exchange_rate requires TE_API_KEY and has no mock fallback)"
     )
     previous_report_text: str = Field(
         default="",
         description="Previous report text for context"
     )
+
     use_mock_data: bool = Field(
         default=False,
         description="If True, use mock numeric datasets instead of real APIs (GDELT/ReliefWeb news retrieval is always real)"
@@ -134,6 +147,7 @@ class GenerateReportOutput(BaseModel):
     country: str
     time_period: str
     report_sections: Dict[str, str]
+    report_blocks: List[ReportBlock] = []
     visualizations: Dict[str, str]  # Base64 encoded images
     data_statistics: Dict[str, Any]
     trend_analysis: Optional[Dict[str, Any]] = None
