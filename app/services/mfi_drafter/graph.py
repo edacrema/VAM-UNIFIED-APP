@@ -9,6 +9,7 @@ Struttura del grafo:
 """
 from __future__ import annotations
 
+import ast
 import io
 import re
 import json
@@ -149,6 +150,42 @@ def robust_json_parse(response: Any) -> Optional[Dict]:
         return json.loads(raw_output[start_index:end_index+1])
     except json.JSONDecodeError:
         return None
+
+
+def _normalize_llm_text(value: Any, *, bulletify: bool = False) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return _normalize_llm_text(parsed, bulletify=bulletify)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, list):
+                        return _normalize_llm_text(parsed, bulletify=bulletify)
+                except Exception:
+                    pass
+        return s
+
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for item in value:
+            item_str = _normalize_llm_text(item, bulletify=bulletify).strip()
+            if not item_str:
+                continue
+            if bulletify:
+                stripped = item_str.lstrip()
+                if not (stripped.startswith("-") or stripped.startswith("*")):
+                    item_str = f"- {item_str}"
+            parts.append(item_str)
+        return "\n".join(parts)
+
+    return str(value).strip()
 
 
 def save_plot_to_base64() -> str:
@@ -579,7 +616,11 @@ Output JSON:
             llm_calls += 1
             
             if result:
-                dimension_findings[dimension] = result
+                dimension_findings[dimension] = {
+                    "key_findings": _normalize_llm_text(result.get("key_findings"), bulletify=True),
+                    "score_interpretation": _normalize_llm_text(result.get("score_interpretation")),
+                    "recommendations": _normalize_llm_text(result.get("recommendations"), bulletify=True),
+                }
             else:
                 dimension_findings[dimension] = {
                     "key_findings": f"Score: {dim_data['national_score']}/10",
@@ -653,14 +694,17 @@ Output JSON:
         llm_calls = 1
         
         if result:
+            motivation = _normalize_llm_text(result.get("motivation"))
+            key_findings = _normalize_llm_text(result.get("key_findings"), bulletify=True)
+            recommendations = _normalize_llm_text(result.get("recommendations"), bulletify=True)
             executive_summary = f"""**MOTIVATION**
-{result.get('motivation', '')}
+{motivation}
 
 **KEY FINDINGS**
-{result.get('key_findings', '')}
+{key_findings}
 
 **RECOMMENDATIONS**
-{result.get('recommendations', '')}"""
+{recommendations}"""
         else:
             executive_summary = f"MFI Assessment for {state['country']} - {collection_period}"
     except Exception as e:
