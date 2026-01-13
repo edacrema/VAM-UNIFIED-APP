@@ -247,6 +247,63 @@ def save_plot_to_base64() -> str:
     return base64.b64encode(buf.read()).decode('utf-8')
 
 
+def _generate_simple_geographic_map(
+    state: MFIReportState,
+    markets_with_coords: List[Dict[str, Any]],
+    visualizations: Dict[str, str],
+) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    lats = [float(m["latitude"]) for m in markets_with_coords]
+    lons = [float(m["longitude"]) for m in markets_with_coords]
+    mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
+    names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    scatter = ax.scatter(
+        lons,
+        lats,
+        c=mfi_scores,
+        cmap="RdYlGn",
+        s=100,
+        vmin=0,
+        vmax=10,
+        edgecolors="black",
+        linewidths=0.5,
+    )
+
+    for lon, lat, score, name in zip(lons, lats, mfi_scores, names):
+        if not name:
+            continue
+        if score < 5.5:
+            ax.annotate(name, (lon, lat), fontsize=6, xytext=(3, 3), textcoords="offset points")
+
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    country = str(state.get("country", "")).strip()
+    suffix = f" ({country})" if country else ""
+    ax.set_title(
+        f"MFI Scores - Geographic Distribution{suffix}",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
+    cbar.set_label("MFI Score")
+
+    legend_elements = [
+        Patch(facecolor="#2ca02c", label="Low Risk (≥7)"),
+        Patch(facecolor="#ffbb78", label="Medium Risk (5.5-7)"),
+        Patch(facecolor="#ff7f0e", label="High Risk (4-5.5)"),
+        Patch(facecolor="#d62728", label="Very High Risk (<4)"),
+    ]
+    ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
+
+    plt.tight_layout()
+    visualizations["geographic_map"] = save_plot_to_base64()
+
+
 # ============================================================================
 # NODE: MFI DATA AGENT
 # ============================================================================
@@ -487,10 +544,9 @@ def node_context_extractor(state: MFIReportState) -> dict:
     docs = state.get("contextual_documents", [])
     
     if not docs:
-        context = f"{state['country']} market assessment conducted to evaluate market functionality."
         return {
-            "country_context": context,
-            "current_node": "context_extractor"
+            "country_context": None,
+            "current_node": "context_extractor",
         }
     
     llm = get_model()
@@ -500,6 +556,8 @@ def node_context_extractor(state: MFIReportState) -> dict:
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
+- If the sources do not contain relevant information about the economic situation, food security, or market-affecting factors, return an empty string for country_context.
+- Do not include disclaimers like 'cannot be extracted' or 'insufficient information'.
 
 Focus on: economic situation, food security, market-affecting factors.
 
@@ -515,11 +573,33 @@ Return JSON: {{"country_context": "Your 3-4 sentence context..."}}"""
         llm_calls = 1
     except Exception as e:
         logger.error(f"Context extraction failed: {e}")
-        context = f"{state['country']} market assessment conducted to evaluate market functionality."
+        context = ""
         llm_calls = 0
-    
+
+    context = (context or "").strip()
+
+    if context:
+        lc = context.lower()
+        looks_like_disclaimer = (
+            "cannot be extracted" in lc
+            or "can not be extracted" in lc
+            or "unable to extract" in lc
+            or "unable to" in lc and "extract" in lc
+            or "do not contain specific information" in lc
+            or "does not contain specific information" in lc
+            or ("do not contain" in lc and "specific information" in lc)
+            or "not enough information" in lc
+            or "insufficient information" in lc
+        )
+        if looks_like_disclaimer:
+            context = ""
+
     if not context:
-        context = f"{state['country']} market assessment conducted to evaluate market functionality."
+        return {
+            "country_context": None,
+            "llm_calls": state.get("llm_calls", 0) + llm_calls,
+            "current_node": "context_extractor",
+        }
     
     return {
         "country_context": context,
@@ -715,61 +795,100 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
         ]
 
         if markets_with_coords:
-            lats = [float(m["latitude"]) for m in markets_with_coords]
-            lons = [float(m["longitude"]) for m in markets_with_coords]
-            mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
-            names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
+            try:
+                import cartopy.crs as ccrs
+                import cartopy.feature as cfeature
+                from matplotlib.patches import Patch
 
-            fig, ax = plt.subplots(figsize=(12, 10))
+                lats = [float(m["latitude"]) for m in markets_with_coords]
+                lons = [float(m["longitude"]) for m in markets_with_coords]
+                mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
+                names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
 
-            scatter = ax.scatter(
-                lons,
-                lats,
-                c=mfi_scores,
-                cmap="RdYlGn",
-                s=100,
-                vmin=0,
-                vmax=10,
-                edgecolors="black",
-                linewidths=0.5,
-            )
+                lat_min, lat_max = min(lats) - 0.5, max(lats) + 0.5
+                lon_min, lon_max = min(lons) - 0.5, max(lons) + 0.5
 
-            for i, name in enumerate(names):
-                if not name:
-                    continue
-                ax.annotate(
-                    name,
-                    (lons[i], lats[i]),
-                    fontsize=6,
-                    xytext=(3, 3),
-                    textcoords="offset points",
+                def get_risk_color(score: float) -> str:
+                    if score < 4.0:
+                        return "#d62728"
+                    if score < 5.5:
+                        return "#ff7f0e"
+                    if score < 7.0:
+                        return "#ffbb78"
+                    return "#2ca02c"
+
+                colors = [get_risk_color(s) for s in mfi_scores]
+
+                fig = plt.figure(figsize=(12, 10))
+                ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+                ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+                ax.add_feature(cfeature.LAND, facecolor="#f5f5f5")
+                ax.add_feature(cfeature.OCEAN, facecolor="#e6f3ff")
+                ax.add_feature(cfeature.BORDERS, linestyle="-", linewidth=0.5, edgecolor="gray")
+                ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+
+                try:
+                    ax.add_feature(cfeature.STATES, linestyle=":", linewidth=0.3, edgecolor="gray")
+                except Exception:
+                    pass
+
+                for lon, lat, score, name, color in zip(lons, lats, mfi_scores, names, colors):
+                    size = 150 if score < 5.5 else 80
+                    edge_width = 2 if score < 4.0 else 1
+                    ax.scatter(
+                        lon,
+                        lat,
+                        c=color,
+                        s=size,
+                        edgecolors="black",
+                        linewidths=edge_width,
+                        transform=ccrs.PlateCarree(),
+                        zorder=5,
+                    )
+                    if name and score < 5.5:
+                        ax.annotate(
+                            name,
+                            xy=(lon, lat),
+                            xytext=(5, 5),
+                            textcoords="offset points",
+                            fontsize=7,
+                            fontweight="bold",
+                            color="black",
+                            transform=ccrs.PlateCarree(),
+                            zorder=6,
+                        )
+
+                gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
+                gl.top_labels = False
+                gl.right_labels = False
+                gl.xlabel_style = {"size": 8}
+                gl.ylabel_style = {"size": 8}
+
+                country = str(state.get("country", "")).strip()
+                ax.set_title(
+                    f"Market Functionality Index - {country}\nGeographic Distribution by Risk Level",
+                    fontsize=12,
+                    fontweight="bold",
+                    pad=10,
                 )
 
-            ax.set_xlabel("Longitude")
-            ax.set_ylabel("Latitude")
-            country = str(state.get("country", "")).strip()
-            suffix = f" ({country})" if country else ""
-            ax.set_title(
-                f"MFI Scores - Geographic Distribution{suffix}",
-                fontsize=12,
-                fontweight="bold",
-            )
+                legend_elements = [
+                    Patch(facecolor="#2ca02c", edgecolor="black", label="Low Risk (≥7.0)"),
+                    Patch(facecolor="#ffbb78", edgecolor="black", label="Medium Risk (5.5-6.9)"),
+                    Patch(facecolor="#ff7f0e", edgecolor="black", label="High Risk (4.0-5.4)"),
+                    Patch(facecolor="#d62728", edgecolor="black", label="Very High Risk (<4.0)"),
+                ]
+                ax.legend(handles=legend_elements, loc="lower right", fontsize=9, framealpha=0.9)
 
-            cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
-            cbar.set_label("MFI Score")
-
-            from matplotlib.patches import Patch
-
-            legend_elements = [
-                Patch(facecolor="#2ca02c", label="Low Risk (≥7)"),
-                Patch(facecolor="#ffbb78", label="Medium Risk (5.5-7)"),
-                Patch(facecolor="#ff7f0e", label="High Risk (4-5.5)"),
-                Patch(facecolor="#d62728", label="Very High Risk (<4)"),
-            ]
-            ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
-
-            plt.tight_layout()
-            visualizations["geographic_map"] = save_plot_to_base64()
+                plt.tight_layout()
+                visualizations["geographic_map"] = save_plot_to_base64()
+            except ImportError:
+                logger.warning("Cartopy not available, falling back to simple scatter plot")
+                _generate_simple_geographic_map(state, markets_with_coords, visualizations)
+            except Exception as e:
+                logger.error(f"Error generating cartopy map: {e}")
+                _generate_simple_geographic_map(state, markets_with_coords, visualizations)
     except Exception as e:
         logger.error(f"Error generating visualizations: {e}")
 
