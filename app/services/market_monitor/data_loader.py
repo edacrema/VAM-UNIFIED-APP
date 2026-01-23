@@ -187,6 +187,66 @@ def get_available_markets(df: pd.DataFrame, country: str) -> List[str]:
     return sorted(country_df['Market Name'].unique().tolist())
 
 
+def get_all_commodities(df: pd.DataFrame) -> List[str]:
+    """Get list of all unique commodities across all countries."""
+    return sorted(df['Commodity'].unique().tolist())
+
+
+def get_commodity_categories(df: pd.DataFrame) -> Dict[str, List[str]]:
+    """
+    Get commodities grouped by category (inferred from naming conventions).
+
+    Returns:
+        Dictionary mapping category names to lists of commodities
+    """
+    all_commodities = get_all_commodities(df)
+
+    categories = {
+        "Cereals": [],
+        "Pulses": [],
+        "Oil": [],
+        "Sugar": [],
+        "Condiments": [],
+        "Vegetables": [],
+        "Livestock": [],
+        "Fuel": [],
+        "Exchange Rate": [],
+        "Milling": [],
+        "Wage": [],
+        "Other": []
+    }
+
+    for commodity in all_commodities:
+        commodity_lower = commodity.lower()
+
+        if any(x in commodity_lower for x in ["sorghum", "maize", "wheat", "rice", "millet", "bread"]):
+            categories["Cereals"].append(commodity)
+        elif any(x in commodity_lower for x in ["beans", "lentil", "pea", "chickpea", "pulse"]):
+            categories["Pulses"].append(commodity)
+        elif "oil" in commodity_lower:
+            categories["Oil"].append(commodity)
+        elif "sugar" in commodity_lower:
+            categories["Sugar"].append(commodity)
+        elif "salt" in commodity_lower:
+            categories["Condiments"].append(commodity)
+        elif any(x in commodity_lower for x in ["cabbage", "tomato", "onion", "vegetable", "leaves", "sukuma", "pumpkin", "cassava"]):
+            categories["Vegetables"].append(commodity)
+        elif "livestock" in commodity_lower or any(x in commodity_lower for x in ["goat", "sheep", "cattle", "chicken"]):
+            categories["Livestock"].append(commodity)
+        elif "fuel" in commodity_lower or any(x in commodity_lower for x in ["petrol", "diesel", "gasoline"]):
+            categories["Fuel"].append(commodity)
+        elif "exchange" in commodity_lower:
+            categories["Exchange Rate"].append(commodity)
+        elif "milling" in commodity_lower:
+            categories["Milling"].append(commodity)
+        elif "wage" in commodity_lower or "labour" in commodity_lower:
+            categories["Wage"].append(commodity)
+        else:
+            categories["Other"].append(commodity)
+
+    return {k: v for k, v in categories.items() if v}
+
+
 def get_date_range(df: pd.DataFrame, country: str) -> Tuple[datetime, datetime]:
     """Get the date range available for a specific country."""
     country_normalized = normalize_country_name(country)
@@ -514,12 +574,18 @@ def calculate_statistics_from_csv(
         # Categorize the statistic
         if col == "FoodBasket":
             stats["food_basket"] = data
-        elif col in ["ExchangeRate", "FuelPrice"]:
-            if pd.notna(current_val):
-                stats["auxiliary"][col] = data
-        elif col not in ["ExchangeRate", "FuelPrice", "FoodBasket"]:
-            # This is a commodity column
-            stats["commodities"][col] = data
+        else:
+            # Auxiliary indicators (non-food items)
+            auxiliary_patterns = ["exchange", "fuel", "wage", "milling"]
+            is_auxiliary = any(pattern in col.lower() for pattern in auxiliary_patterns)
+
+            if is_auxiliary:
+                if pd.notna(current_val):
+                    stats["auxiliary"][col] = data
+            elif col != "FoodBasket":
+                # This is a commodity column
+                if pd.notna(current_val):
+                    stats["commodities"][col] = data
     
     return stats
 

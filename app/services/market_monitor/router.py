@@ -6,7 +6,7 @@ FastAPI endpoints for the Market Monitor service.
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import logging
 import traceback
 
@@ -65,11 +65,13 @@ async def generate_market_monitor(input_data: GenerateReportInput):
     try:
         logger.info(f"Starting report generation for {input_data.country} - {input_data.time_period}")
 
-        # If admin1_list is empty, use default
         admin1_list = input_data.admin1_list
-        if not admin1_list:
-            admin1_list = [f"{input_data.country} North", f"{input_data.country} South",
-                          f"{input_data.country} Central"]
+        if not admin1_list and input_data.use_mock_data:
+            admin1_list = [
+                f"{input_data.country} North",
+                f"{input_data.country} South",
+                f"{input_data.country} Central"
+            ]
 
         # Run generation
         result = run_report_generation(
@@ -148,10 +150,12 @@ async def generate_market_monitor_async(
         try:
             update_run(run_id, status="running", error=None, traceback=None)
 
-            admin1_list = input_data.admin1_list or [
-                f"{input_data.country} North",
-                f"{input_data.country} South"
-            ]
+            admin1_list = input_data.admin1_list
+            if not admin1_list and input_data.use_mock_data:
+                admin1_list = [
+                    f"{input_data.country} North",
+                    f"{input_data.country} South"
+                ]
 
             def on_step(node_name: str, _state: dict):
                 progress = progress_map.get(node_name)
@@ -347,8 +351,9 @@ def get_service_info():
                 "type": "array",
                 "required": False,
                 "label": "Commodities",
-                "description": "List of commodities to analyze",
-                "default": ["Sorghum", "Wheat flour", "Cooking oil", "Sugar"]
+                "description": "List of commodities to analyze. Use /countries/{country}/metadata endpoint to get available commodities for a specific country.",
+                "default": [],
+                "note": "Defaults are country-specific. Query /countries/{country}/metadata for recommended defaults."
             },
             {
                 "name": "admin1_list",
@@ -424,60 +429,191 @@ def health_check():
 @router.get("/countries")
 def get_supported_countries():
     """
-    Returns the list of supported countries with their currencies.
+    Returns the list of countries available in the dataset with their currencies.
     """
     from .graph import CURRENCY_SYMBOLS
-    
-    countries = [
-        {"name": "Sudan", "currency_code": "SDG", "currency_name": "Sudanese Pound"},
-        {"name": "Yemen", "currency_code": "YER", "currency_name": "Yemeni Rial"},
-        {"name": "Myanmar", "currency_code": "MMK", "currency_name": "Myanmar Kyat"},
-        {"name": "Syria", "currency_code": "SYP", "currency_name": "Syrian Pound"},
-        {"name": "Afghanistan", "currency_code": "AFN", "currency_name": "Afghan Afghani"},
-        {"name": "Ethiopia", "currency_code": "ETB", "currency_name": "Ethiopian Birr"},
-        {"name": "Nigeria", "currency_code": "NGN", "currency_name": "Nigerian Naira"},
-        {"name": "Pakistan", "currency_code": "PKR", "currency_name": "Pakistani Rupee"},
-        {"name": "Bangladesh", "currency_code": "BDT", "currency_name": "Bangladeshi Taka"},
-        {"name": "Kenya", "currency_code": "KES", "currency_name": "Kenyan Shilling"},
-        {"name": "Uganda", "currency_code": "UGX", "currency_name": "Ugandan Shilling"},
-        {"name": "Tanzania", "currency_code": "TZS", "currency_name": "Tanzanian Shilling"},
-        {"name": "Zambia", "currency_code": "ZMW", "currency_name": "Zambian Kwacha"},
-        {"name": "Malawi", "currency_code": "MWK", "currency_name": "Malawian Kwacha"},
-        {"name": "Haiti", "currency_code": "HTG", "currency_name": "Haitian Gourde"},
-        {"name": "Democratic Republic of Congo", "currency_code": "CDF", "currency_name": "Congolese Franc"},
-        {"name": "Somalia", "currency_code": "SOS", "currency_name": "Somali Shilling"},
-        {"name": "South Sudan", "currency_code": "SSP", "currency_name": "South Sudanese Pound"},
-    ]
-    
-    return {"countries": countries}
+
+    from .data_loader import load_csv_price_data, get_available_countries
+
+    COUNTRY_CURRENCIES = {
+        "South Sudan": {"code": "SSP", "name": "South Sudanese Pound"},
+        "Sudan": {"code": "SDG", "name": "Sudanese Pound"},
+        "Yemen": {"code": "YER", "name": "Yemeni Rial"},
+        "Myanmar": {"code": "MMK", "name": "Myanmar Kyat"},
+        "Syrian Arab Republic": {"code": "SYP", "name": "Syrian Pound"},
+        "Afghanistan": {"code": "AFN", "name": "Afghan Afghani"},
+        "Ethiopia": {"code": "ETB", "name": "Ethiopian Birr"},
+        "Nigeria": {"code": "NGN", "name": "Nigerian Naira"},
+        "Pakistan": {"code": "PKR", "name": "Pakistani Rupee"},
+        "Bangladesh": {"code": "BDT", "name": "Bangladeshi Taka"},
+        "Kenya": {"code": "KES", "name": "Kenyan Shilling"},
+        "Uganda": {"code": "UGX", "name": "Ugandan Shilling"},
+        "Tanzania": {"code": "TZS", "name": "Tanzanian Shilling"},
+        "Zambia": {"code": "ZMW", "name": "Zambian Kwacha"},
+        "Malawi": {"code": "MWK", "name": "Malawian Kwacha"},
+        "Haiti": {"code": "HTG", "name": "Haitian Gourde"},
+        "Democratic Republic of Congo": {"code": "CDF", "name": "Congolese Franc"},
+        "Somalia": {"code": "SOS", "name": "Somali Shilling"},
+        "Lebanon": {"code": "LBP", "name": "Lebanese Pound"},
+    }
+
+    try:
+        df = load_csv_price_data()
+        available_countries = get_available_countries(df)
+    except FileNotFoundError:
+        available_countries = []
+
+    countries = []
+    for country in available_countries:
+        currency_info = COUNTRY_CURRENCIES.get(country, {"code": "USD", "name": "US Dollar"})
+        countries.append({
+            "name": country,
+            "currency_code": currency_info["code"],
+            "currency_name": currency_info["name"],
+            "has_data": True
+        })
+
+    for country, currency_info in COUNTRY_CURRENCIES.items():
+        if country not in available_countries:
+            countries.append({
+                "name": country,
+                "currency_code": currency_info["code"],
+                "currency_name": currency_info["name"],
+                "has_data": False
+            })
+
+    return {"countries": sorted(countries, key=lambda x: x["name"])}
+
 
 
 @router.get("/commodities")
-def get_default_commodities():
+def get_commodities(country: Optional[str] = None):
     """
-    Returns the list of standard WFP commodities.
+    Returns the list of available commodities.
+
+    If country is provided, returns commodities available for that country.
+    Otherwise, returns all commodities in the dataset with categories.
     """
-    commodities = [
-        {"name": "Sorghum", "category": "Cereals"},
-        {"name": "Wheat flour", "category": "Cereals"},
-        {"name": "Maize", "category": "Cereals"},
-        {"name": "Rice", "category": "Cereals"},
-        {"name": "Millet", "category": "Cereals"},
-        {"name": "Cooking oil", "category": "Oil"},
-        {"name": "Vegetable oil", "category": "Oil"},
-        {"name": "Sugar", "category": "Sugar"},
-        {"name": "Salt", "category": "Condiments"},
-        {"name": "Beans", "category": "Pulses"},
-        {"name": "Lentils", "category": "Pulses"},
-        {"name": "Chickpeas", "category": "Pulses"},
-        {"name": "Meat (beef)", "category": "Protein"},
-        {"name": "Meat (goat)", "category": "Protein"},
-        {"name": "Fish", "category": "Protein"},
-        {"name": "Eggs", "category": "Protein"},
-        {"name": "Milk", "category": "Dairy"},
-        {"name": "Potatoes", "category": "Vegetables"},
-        {"name": "Onions", "category": "Vegetables"},
-        {"name": "Tomatoes", "category": "Vegetables"},
+
+    from .data_loader import (
+        load_csv_price_data,
+        get_available_commodities,
+        get_all_commodities,
+        get_commodity_categories,
+        normalize_country_name
+    )
+
+    try:
+        df = load_csv_price_data()
+    except FileNotFoundError:
+        return {
+            "commodities": [],
+            "categories": {},
+            "warning": "No price data file found. Please upload price_data.csv."
+        }
+
+    if country:
+        country_normalized = normalize_country_name(country)
+        commodity_list = get_available_commodities(df, country_normalized)
+
+        categories = get_commodity_categories(
+            df[df['Country'] == country_normalized]
+        )
+
+        return {
+            "country": country_normalized,
+            "commodities": [{"name": c} for c in commodity_list],
+            "categories": categories
+        }
+    else:
+        categories = get_commodity_categories(df)
+        all_commodities = get_all_commodities(df)
+
+        return {
+            "commodities": [{"name": c} for c in all_commodities],
+            "categories": categories
+        }
+
+
+@router.get("/countries/{country}/metadata")
+def get_country_metadata(country: str):
+    """
+    Returns all available metadata for a specific country:
+    - Available commodities
+    - Available regions (Admin1)
+    - Available markets
+    - Date range of available data
+    """
+    from .data_loader import (
+        load_csv_price_data,
+        get_available_commodities,
+        get_available_regions,
+        get_available_markets,
+        get_date_range,
+        get_commodity_categories,
+        normalize_country_name
+    )
+
+    try:
+        df = load_csv_price_data()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Price data file not found")
+
+    country_normalized = normalize_country_name(country)
+
+    if country_normalized not in df['Country'].values:
+        available = sorted(df['Country'].unique().tolist())
+        raise HTTPException(
+            status_code=404,
+            detail=f"Country '{country}' not found. Available: {available}"
+        )
+
+    date_range = get_date_range(df, country_normalized)
+    commodities = get_available_commodities(df, country_normalized)
+    categories = get_commodity_categories(df[df['Country'] == country_normalized])
+
+    return {
+        "country": country_normalized,
+        "commodities": commodities,
+        "commodity_categories": categories,
+        "regions": get_available_regions(df, country_normalized),
+        "markets": get_available_markets(df, country_normalized),
+        "date_range": {
+            "start": date_range[0].strftime("%Y-%m-%d"),
+            "end": date_range[1].strftime("%Y-%m-%d")
+        },
+        "default_commodities": _get_food_basket_commodities(commodities)
+    }
+
+
+def _get_food_basket_commodities(available: List[str]) -> List[str]:
+    """
+    Select default food basket commodities from available list.
+    Prioritizes: cereals, pulses, oil, salt (standard WFP food basket).
+    """
+    defaults = []
+
+    priority_patterns = [
+        ("sorghum", "Cereals"),
+        ("maize", "Cereals"),
+        ("wheat", "Cereals"),
+        ("rice", "Cereals"),
+        ("beans", "Pulses"),
+        ("lentil", "Pulses"),
+        ("oil", "Oil"),
+        ("salt", "Condiments"),
+        ("sugar", "Sugar"),
     ]
-    
-    return {"commodities": commodities}
+
+    selected_categories = set()
+
+    for pattern, category in priority_patterns:
+        if category in selected_categories and category != "Cereals":
+            continue
+        for commodity in available:
+            if pattern in commodity.lower() and commodity not in defaults:
+                defaults.append(commodity)
+                selected_categories.add(category)
+                break
+
+    return defaults[:6]

@@ -81,6 +81,15 @@ BASE_EXCHANGE_RATES = {
     "CDF": 2800.0, "SOS": 570.0, "SSP": 130.0
 }
 
+TERMINOLOGY_THRESHOLDS = {
+    "hyperinflation": {"monthly_min": 50.0},
+    "severe_inflation": {"yoy_min": 100.0},
+    "high_inflation": {"yoy_min": 50.0},
+    "severe_depreciation": {"yoy_min": 30.0, "mom_min": 10.0},
+    "significant_depreciation": {"yoy_min": 15.0},
+    "stable_currency": {"mom_range": (-5.0, 5.0)},
+}
+
 
 # ============================================================================
 # STATE DEFINITION
@@ -217,6 +226,112 @@ def format_pct(value) -> str:
             return f"{val:.1f}%"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _is_auxiliary_series(name: str) -> bool:
+    s = str(name or "").strip().lower()
+    if not s:
+        return False
+    patterns = [
+        "exchange",
+        "fx",
+        "fuel",
+        "petrol",
+        "diesel",
+        "gasoline",
+        "wage",
+        "salary",
+        "labour",
+        "labor",
+        "milling",
+        "transport",
+        "freight",
+    ]
+    return any(p in s for p in patterns)
+
+
+def _categorize_commodity(name: str) -> str:
+    s = str(name or "").strip().lower()
+    if not s:
+        return "Other"
+
+    if any(x in s for x in ["sorghum", "maize", "wheat", "rice", "millet", "bread", "teff", "barley", "flour"]):
+        return "Cereals"
+    if any(x in s for x in ["beans", "lentil", "pea", "chickpea", "pulse", "cowpea", "groundnut"]):
+        return "Pulses"
+    if "oil" in s:
+        return "Oil"
+    if "sugar" in s:
+        return "Sugar"
+    if "salt" in s:
+        return "Condiments"
+    if any(x in s for x in ["cabbage", "tomato", "onion", "vegetable", "leaves", "sukuma", "pumpkin", "cassava", "okra", "spinach"]):
+        return "Vegetables"
+    if "livestock" in s or any(x in s for x in ["goat", "sheep", "cattle", "chicken", "camel", "beef", "mutton"]):
+        return "Livestock"
+
+    return "Other"
+
+
+def _slugify(text: str) -> str:
+    s = str(text or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "other"
+
+
+def _chunk_list(items: List[str], size: int) -> List[List[str]]:
+    if size <= 0:
+        return [list(items)]
+    out: List[List[str]] = []
+    for i in range(0, len(items), size):
+        out.append(items[i : i + size])
+    return out
+
+
+def _commodity_importance_score(stats: Dict[str, Any], commodity: str) -> float:
+    if not isinstance(stats, dict):
+        return 0.0
+    comm = stats.get("commodities") or {}
+    if not isinstance(comm, dict):
+        return 0.0
+    s = comm.get(commodity) or {}
+    if not isinstance(s, dict):
+        return 0.0
+
+    yoy = s.get("yoy_change_pct")
+    mom = s.get("mom_change_pct")
+    try:
+        if yoy is not None:
+            return abs(float(yoy))
+    except Exception:
+        pass
+    try:
+        if mom is not None:
+            return abs(float(mom))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _has_currency_depreciation_driver(drivers: Any) -> bool:
+    if not drivers:
+        return False
+    try:
+        for d in drivers:
+            s = str(d or "").lower()
+            if "currency" in s and (
+                "depreciat" in s
+                or "devalu" in s
+                or "weak" in s
+                or "collapse" in s
+            ):
+                return True
+            if "fx" in s and "depreciat" in s:
+                return True
+    except Exception:
+        return False
+    return False
 
 
 # ============================================================================
@@ -442,8 +557,6 @@ AVAILABLE_MODULES: Dict[str, type] = {
     "exchange_rate": ExchangeRateModule,
 }
 
-
-# ============================================================================
 # NODE: DATA AGENT
 # ============================================================================
 
@@ -500,33 +613,56 @@ def calculate_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     
     if df.empty or len(df) < 13:
         return stats
-    
+
     current = df.iloc[-1]
     mom = df.iloc[-2]
     yoy = df.iloc[0]
-    
+
     for col in df.columns:
         current_val = current[col]
         mom_val = mom[col]
         yoy_val = yoy[col]
-        
+
         mom_pct = round(((current_val - mom_val) / mom_val * 100) if mom_val else 0, 1)
         yoy_pct = round(((current_val - yoy_val) / yoy_val * 100) if yoy_val else 0, 1)
-        
+
         data = {
             "current_price": round(current_val, 2),
             "mom_change_pct": mom_pct,
             "yoy_change_pct": yoy_pct
         }
-        
+
         if col == "FoodBasket":
             stats["food_basket"] = data
         elif col in ["ExchangeRate", "FuelPrice"]:
             stats["auxiliary"][col] = data
         else:
             stats["commodities"][col] = data
-    
+
     return stats
+
+
+def _select_default_commodities(available: List[str], max_items: int = 6) -> List[str]:
+    """Select default food basket commodities from available list."""
+    defaults = []
+
+    priority_patterns = [
+        "sorghum", "maize", "wheat", "rice",
+        "beans", "lentil",
+        "oil",
+        "salt",
+        "sugar",
+    ]
+
+    for pattern in priority_patterns:
+        for commodity in available:
+            if pattern in commodity.lower() and commodity not in defaults:
+                defaults.append(commodity)
+                break
+        if len(defaults) >= max_items:
+            break
+
+    return defaults
 
 
 def node_data_agent(state: MarketReportState) -> dict:
@@ -541,8 +677,27 @@ def node_data_agent(state: MarketReportState) -> dict:
     adding appropriate warnings to the state.
     """
     logger.info(f"[DataAgent] Processing data for {state['country']}")
-    
+
+    country = state["country"]
     use_mock = state.get("use_mock_data", False)
+    commodity_list = state.get("commodity_list", []) or []
+
+    if not commodity_list and not use_mock:
+        from .data_loader import (
+            load_csv_price_data,
+            get_available_commodities,
+            normalize_country_name
+        )
+        try:
+            df = load_csv_price_data()
+            country_normalized = normalize_country_name(country)
+            available = get_available_commodities(df, country_normalized)
+            commodity_list = _select_default_commodities(available)
+            logger.info(f"[DataAgent] Auto-selected commodities: {commodity_list}")
+        except Exception as e:
+            logger.warning(f"[DataAgent] Could not auto-select commodities: {e}")
+            commodity_list = []
+
     warnings = []
     
     if use_mock:
@@ -553,7 +708,7 @@ def node_data_agent(state: MarketReportState) -> dict:
         df_national, df_regional = generate_mock_time_series(
             state["country"],
             state["time_period"],
-            state["commodity_list"],
+            commodity_list,
             state["admin1_list"]
         )
         stats = calculate_statistics(df_national)
@@ -569,7 +724,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             availability = check_data_availability(
                 country=state["country"],
                 time_period=state["time_period"],
-                commodities=state["commodity_list"]
+                commodities=commodity_list
             )
             
             # If country not available, raise error
@@ -587,14 +742,14 @@ def node_data_agent(state: MarketReportState) -> dict:
             df_national, df_regional = extract_time_series_from_csv(
                 country=state["country"],
                 time_period=state["time_period"],
-                commodities=state["commodity_list"],
+                commodities=commodity_list,
                 admin1_list=state["admin1_list"]
             )
             
             # Calculate statistics using CSV-compatible function
             stats = calculate_statistics_from_csv(
                 df_national, 
-                state["commodity_list"]
+                commodity_list
             )
             
             logger.info(
@@ -611,7 +766,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             df_national, df_regional = generate_mock_time_series(
                 state["country"],
                 state["time_period"],
-                state["commodity_list"],
+                commodity_list,
                 state["admin1_list"]
             )
             stats = calculate_statistics(df_national)
@@ -625,7 +780,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             df_national, df_regional = generate_mock_time_series(
                 state["country"],
                 state["time_period"],
-                state["commodity_list"],
+                commodity_list,
                 state["admin1_list"]
             )
             stats = calculate_statistics(df_national)
@@ -640,7 +795,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             df_national, df_regional = generate_mock_time_series(
                 state["country"],
                 state["time_period"],
-                state["commodity_list"],
+                commodity_list,
                 state["admin1_list"]
             )
             stats = calculate_statistics(df_national)
@@ -649,14 +804,13 @@ def node_data_agent(state: MarketReportState) -> dict:
     # RETURN STATE UPDATE
     # =========================================================================
     return {
+        "commodity_list": commodity_list,
         "time_series_data_national": df_national.to_json(date_format='iso'),
         "time_series_data_regional": df_regional.to_json(date_format='iso'),
         "data_statistics": stats,
         "warnings": warnings,
         "current_node": "data_agent"
     }
-
-
 
 
 # ============================================================================
@@ -695,26 +849,65 @@ def node_graph_designer(state: MarketReportState) -> dict:
             buf.seek(0)
             visualizations["food_basket_trend"] = base64.b64encode(buf.read()).decode('utf-8')
         
-        # 2. Commodity Trends
-        commodity_cols = [c for c in df_national.columns 
-                         if c not in ["FoodBasket", "ExchangeRate", "FuelPrice"]]
-        
+        # 2. Commodity Trends (Grouped)
+        stats = state.get("data_statistics", {}) or {}
+        commodity_cols = []
+        for c in df_national.columns:
+            if c == "FoodBasket":
+                continue
+            if _is_auxiliary_series(c):
+                continue
+            try:
+                if df_national[c].dropna().empty:
+                    continue
+            except Exception:
+                pass
+            commodity_cols.append(c)
+
         if commodity_cols:
-            fig, ax = plt.subplots(figsize=(12, 6))
-            for col in commodity_cols[:5]:
-                ax.plot(df_national.index, df_national[col], marker='o', label=col)
-            ax.set_title(f"Commodity Price Trends - {state['country']}", fontweight='bold')
-            ax.set_ylabel("Price (LCU)")
-            ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-            plt.close()
-            buf.seek(0)
-            visualizations["commodity_trends"] = base64.b64encode(buf.read()).decode('utf-8')
+            grouped: Dict[str, List[str]] = {}
+            for c in commodity_cols:
+                cat = _categorize_commodity(c)
+                grouped.setdefault(cat, []).append(c)
+
+            category_order = ["Cereals", "Pulses", "Oil", "Sugar", "Condiments", "Vegetables", "Livestock", "Other"]
+            ordered_categories = [c for c in category_order if c in grouped]
+            for extra in sorted([c for c in grouped.keys() if c not in ordered_categories]):
+                ordered_categories.append(extra)
+
+            max_lines_per_chart = 6
+            for cat in ordered_categories:
+                cols = grouped.get(cat) or []
+                cols = sorted(
+                    cols,
+                    key=lambda x: (-_commodity_importance_score(stats, x), str(x).lower()),
+                )
+
+                pages = _chunk_list(cols, max_lines_per_chart)
+                cat_slug = _slugify(cat)
+                for page_idx, page_cols in enumerate(pages, start=1):
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    for col in page_cols:
+                        ax.plot(df_national.index, df_national[col], marker='o', label=col)
+                    title_suffix = f"{cat}"
+                    if len(pages) > 1:
+                        title_suffix = f"{cat} (Page {page_idx}/{len(pages)})"
+                    ax.set_title(f"Commodity Price Trends - {state['country']} - {title_suffix}", fontweight='bold')
+                    ax.set_ylabel("Price (LCU)")
+                    ax.legend(loc='upper left')
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+
+                    buf = io.BytesIO()
+                    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                    plt.close()
+                    buf.seek(0)
+                    fig_id = f"commodity_trends_{cat_slug}_p{page_idx}"
+                    fig_b64 = base64.b64encode(buf.read()).decode('utf-8')
+                    visualizations[fig_id] = fig_b64
+                    if "commodity_trends" not in visualizations:
+                        visualizations["commodity_trends"] = fig_b64
         
         # 3. Regional Comparison (if data available)
         if state.get("time_series_data_regional"):
@@ -741,6 +934,7 @@ def node_graph_designer(state: MarketReportState) -> dict:
         "visualizations": visualizations,
         "current_node": "graph_designer"
     }
+
 
 # ============================================================================
 # NODE: NEWS RETRIEVAL 
@@ -923,16 +1117,27 @@ def node_trend_analyst(state: MarketReportState) -> dict:
     stats = state.get("data_statistics", {})
     events = state.get("events", [])
     
-    prompt = f"""Analyze the market trend for {state['country']} based on these statistics and events.
+    prompt = f"""Analyze the market trend based on these inputs.
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
 
-STATISTICS:
+QUANTITATIVE DATA (use for specific claims about current status; do not invent metrics):
 {json.dumps(stats, indent=2)}
 
-EVENTS:
+CONTEXTUAL EVENTS (use for background only, NOT as primary drivers unless supported by quantitative data):
 {json.dumps(events, indent=2)}
+
+TERMINOLOGY THRESHOLDS (enforce in wording; do not use stronger terms unless thresholds are met):
+{json.dumps(TERMINOLOGY_THRESHOLDS, indent=2)}
+
+RULES:
+- Key market drivers MUST be supported by quantitative data above (prices/food basket/auxiliary where available).
+- Contextual events can explain *why* a quantitative trend might exist, but cannot replace the data.
+- If contextual documents mention issues (e.g., "currency pressure") but quantitative data shows stability,
+  note the discrepancy rather than asserting the contextual claim as current fact.
+- Distinguish between "historically X has been a problem" vs "currently X is occurring".
+- If quantitative coverage is missing/insufficient, explicitly say so and keep key_market_drivers empty or generic (e.g., "insufficient data").
 
 Return JSON:
 {{
@@ -950,11 +1155,12 @@ Return JSON:
     except Exception as e:
         logger.error(f"Trend analysis failed: {e}")
         trend_analysis = {
-            "trajectory": "volatile",
-            "key_market_drivers": ["Economic uncertainty", "Currency depreciation"],
+            "trajectory": "unknown",
+            "key_market_drivers": [],
+            "note": "Trend analysis failed - no drivers inferred",
             "commodity_analysis": {},
             "regional_analysis": {},
-            "outlook": "Continued price volatility expected."
+            "outlook": "Trend analysis unavailable due to an internal error."
         }
         llm_calls = 0
     
@@ -963,6 +1169,7 @@ Return JSON:
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "current_node": "trend_analyst"
     }
+
 
 # ============================================================================
 # NODE: MODULE ORCHESTRATOR
@@ -1049,7 +1256,16 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     llm = get_model()
     stats = state.get("data_statistics", {})
     trend = state.get("trend_analysis", {})
-    
+    exchange_data = state.get("exchange_rate_data", {}) or {}
+ 
+    validation_warnings: List[str] = []
+    if exchange_data and exchange_data.get("trend") == "stable":
+        drivers = (trend or {}).get("key_market_drivers") or []
+        if _has_currency_depreciation_driver(drivers):
+            validation_warnings.append(
+                "Exchange rate classification is 'stable' but trend_analysis.key_market_drivers references currency depreciation. Avoid asserting current depreciation; if mentioned, frame as context/discrepancy."
+            )
+     
     # Format statistics with arrows
     formatted_stats = {}
     if stats.get("food_basket"):
@@ -1075,14 +1291,28 @@ STYLE AND OUTPUT RULES (MANDATORY):
 DATA (with formatted MoM/YoY):
 {json.dumps(formatted_stats, indent=2)}
 
+EXCHANGE RATE (quantitative ground truth, if available):
+{json.dumps(exchange_data, indent=2) if exchange_data else "None"}
+
 TREND ANALYSIS:
 {json.dumps(trend, indent=2)}
+
+TERMINOLOGY THRESHOLDS (enforce in wording):
+{json.dumps(TERMINOLOGY_THRESHOLDS, indent=2)}
+
+VALIDATION WARNINGS (must obey):
+{json.dumps(validation_warnings, indent=2)}
 
 Include:
 1. Overview (1-2 sentences)
 2. Food Basket Cost with MoM% and YoY%
 3. Top 3 Commodities with changes
 4. Key Drivers (bullet list)
+
+RULES:
+- Key Drivers must be supported by the quantitative DATA above.
+- Do not treat contextual drivers (from TREND ANALYSIS) as current facts if they conflict with exchange-rate ground truth.
+- If exchange rate is stable, do not claim current currency depreciation as a key driver.
 
 Return JSON: {{"HIGHLIGHTS": "The complete formatted text block"}}"""
     
@@ -1103,12 +1333,15 @@ Return JSON: {{"HIGHLIGHTS": "The complete formatted text block"}}"""
     if state.get("skeptic_flags"):
         correction_attempts += 1
     
-    return {
+    updates: Dict[str, Any] = {
         "report_draft_sections": sections,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "correction_attempts": correction_attempts,
         "current_node": "highlights_drafter"
     }
+    if validation_warnings:
+        updates["warnings"] = validation_warnings
+    return updates
 
 
 # ============================================================================
@@ -1140,7 +1373,7 @@ MODULE SECTIONS TO REFERENCE:
 
 SECTIONS TO GENERATE:
 1. MARKET_OVERVIEW (200-250 words): Overall market conditions, price trajectory, key drivers.
-2. COMMODITY_ANALYSIS (200-300 words): Analysis of each commodity. Use [INSERT GRAPH: commodity_trends] placeholder.
+2. COMMODITY_ANALYSIS (200-300 words): Analysis of each commodity.
 3. REGIONAL_HIGHLIGHTS (150-200 words): Regional variations. Use [INSERT GRAPH: regional_comparison] placeholder.
 
 Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"""
@@ -1186,8 +1419,6 @@ Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"
         "current_node": "narrative_drafter"
     }
 
-
-# ============================================================================
 # NODE: RED TEAM (QA)
 # ============================================================================
 
@@ -1198,34 +1429,56 @@ def node_red_team(state: MarketReportState) -> dict:
     llm = get_model()
     sections = state.get("report_draft_sections", {})
     stats = state.get("data_statistics", {})
-    
+    trend = state.get("trend_analysis", {}) or {}
+    exchange_data = state.get("exchange_rate_data", {}) or {}
+     
     if not sections:
         return {"skeptic_flags": [], "current_node": "red_team"}
-    
+     
     draft_text = "\n\n".join([f"== {k} ==\n{v}" for k, v in sections.items()])
-    
-    prompt = f"""Fact-check this Market Monitor draft against the source data.
+     
+    prompt = f"""Fact-check this Market Monitor draft.
 
 STYLE AND OUTPUT RULES (MANDATORY):
 - Language: English only.
 
-GROUND TRUTH DATA:
-{json.dumps(stats, indent=2)}
+QUANTITATIVE GROUND TRUTH:
+- Price Statistics: {json.dumps(stats, indent=2)}
+- Exchange Rate: MoM={exchange_data.get('monthly_change_pct')}%, YoY={exchange_data.get('yearly_change_pct')}%, Classification={exchange_data.get('trend')}
+  Full Object: {json.dumps(exchange_data, indent=2) if exchange_data else "None"}
+
+TREND ANALYSIS (for cross-validation of drivers; treat as hypotheses unless supported by data):
+{json.dumps(trend, indent=2)}
+
+TERMINOLOGY THRESHOLDS (must be enforced):
+{json.dumps(TERMINOLOGY_THRESHOLDS, indent=2)}
 
 DRAFT:
 {draft_text}
+
+CROSS-VALIDATION RULES:
+1. If exchange rate classification is "stable", the report must NOT claim "severe currency depreciation" (or similar) as a current driver.
+2. Cross-check trend_analysis.key_market_drivers against exchange-rate classification and quantitative thresholds (do not allow drivers that contradict the ground truth).
+3. If the draft uses terms like "severe depreciation" or "rapid depreciation", they must satisfy TERMINOLOGY_THRESHOLDS.severe_depreciation using exchange-rate MoM/YoY.
+4. "Hyperinflation" requires monthly inflation > 50%. If no inflation metric exists in the ground truth data, any use of "hyperinflation" is a terminology misuse.
+5. Key drivers in HIGHLIGHTS must not contradict data in specialized sections (e.g., EXCHANGE_RATE_ANALYSIS).
+6. Distinguish between historical context and current data claims.
+7. Flag internal contradictions between sections (e.g., one section says stable while another says rapid depreciation).
 
 Check for:
 1. Numerical accuracy (prices, MoM%, YoY%)
 2. Formatting (arrows ↑/↓)
 3. Unsupported claims
+4. Context-data conflicts and terminology misuse
 
+ 
 Return JSON: {{"flags": [
-    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
 ]}}
-
+ 
 If no errors, return {{"flags": []}}"""
-    
+
+     
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)

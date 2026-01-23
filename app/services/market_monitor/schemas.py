@@ -115,8 +115,8 @@ class GenerateReportInput(BaseModel):
     )
 
     commodity_list: List[str] = Field(
-        default=["Sorghum", "Wheat flour", "Cooking oil", "Sugar"],
-        description="List of commodities to analyze"
+        default=[],
+        description="List of commodities to analyze. If empty, defaults will be inferred from available data."
     )
     admin1_list: List[str] = Field(
         default=[],

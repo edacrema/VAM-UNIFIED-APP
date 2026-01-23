@@ -140,6 +140,7 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     sections = result.get("report_draft_sections") or result.get("report_sections") or {}
     module_sections = result.get("module_sections") or {}
     document_references = result.get("document_references") or []
+    visualizations = result.get("visualizations") or {}
 
     blocks: List[ReportBlock] = [ReportBlock(type="heading", text=title, level=1)]
 
@@ -164,6 +165,50 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     if isinstance(commodity, str) and commodity.strip():
         blocks.append(ReportBlock(type="heading", text="Commodity Analysis", level=2))
         blocks.extend(_blocks_from_text_with_figures(commodity))
+
+        has_inline_commodity_figs = False
+        for m in _INSERT_FIGURE_RE.finditer(_sanitize_text(commodity)):
+            fig_id = (m.group(1) or "").strip()
+            if fig_id.lower().startswith("commodity_trends"):
+                has_inline_commodity_figs = True
+                break
+
+        if not has_inline_commodity_figs and isinstance(visualizations, dict) and visualizations:
+            ids = [
+                k
+                for k in visualizations.keys()
+                if isinstance(k, str) and k.startswith("commodity_trends_")
+            ]
+
+            if ids:
+                cat_order = [
+                    "cereals",
+                    "pulses",
+                    "oil",
+                    "sugar",
+                    "condiments",
+                    "vegetables",
+                    "livestock",
+                    "other",
+                ]
+
+                def sort_key(fig_id: str) -> tuple:
+                    m = re.match(r"^commodity_trends_([a-z0-9_]+)_p(\d+)$", fig_id)
+                    if not m:
+                        return (99, fig_id, 0)
+                    cat = m.group(1)
+                    try:
+                        page = int(m.group(2))
+                    except Exception:
+                        page = 0
+                    try:
+                        cat_rank = cat_order.index(cat)
+                    except ValueError:
+                        cat_rank = 50
+                    return (cat_rank, cat, page)
+
+                for fig_id in sorted(ids, key=sort_key):
+                    blocks.append(ReportBlock(type="figure", figure_id=fig_id))
 
     regional = sections.get("REGIONAL_HIGHLIGHTS")
     if isinstance(regional, str) and regional.strip():

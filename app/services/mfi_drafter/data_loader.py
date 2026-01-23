@@ -322,8 +322,8 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         trader_mean['VariableName'].str.contains('AvailabilityRunout_FCer', na=False)
     ]['OutputValue']
     sub_scores["Availability"] = {
-        "scarce_cereals_pct": round(max(0, 1 - safe_first(avail_scarcity)), 2),
-        "runout_cereals_pct": round(max(0, 1 - safe_first(avail_runout)), 2)
+        "scarce_cereals_pct": round(max(0, 1 - safe_mean(avail_scarcity)), 2),
+        "runout_cereals_pct": round(max(0, 1 - safe_mean(avail_runout)), 2)
     }
     
     # Price sub-scores
@@ -334,7 +334,7 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         trader_mean['VariableName'].str.contains('PriceStability', na=False)
     ]['OutputValue']
     sub_scores["Price"] = {
-        "increase_cereals_pct": round(max(0, 1 - safe_first(price_increase)), 2),
+        "increase_cereals_pct": round(max(0, 1 - safe_mean(price_increase)), 2),
         "unstable_cereals_pct": round(max(0, 1 - safe_mean(price_stability)), 2)
     }
     
@@ -349,11 +349,11 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         trader_mean['VariableName'].str.contains('VulnerabilityCriticality', na=False)
     ]['OutputValue']
     sub_scores["Resilience"] = {
-        "node_density": int(safe_mean(density) > 0.5),
-        "node_complexity": int(safe_mean(complexity) > 0.5),
-        "node_criticality": int(safe_mean(criticality) > 0.5)
+        "low_density_pct": round(max(0, 1 - safe_mean(density)), 2),
+        "high_complexity_pct": round(max(0, 1 - safe_mean(complexity)), 2),
+        "high_criticality_pct": round(max(0, 1 - safe_mean(criticality)), 2)
     }
-    
+
     # Competition sub-scores
     concentration = market_mean[
         market_mean['VariableName'].str.contains('CompetitionConcentration', na=False)
@@ -365,7 +365,7 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         "less_than_five_competitors": int(safe_first(concentration) < 3),
         "monopoly_risk": int(safe_first(monopoly) > 3)
     }
-    
+
     # Infrastructure sub-scores
     cond_good = trader_mean[trader_mean['VariableName'] == 'InfrastructureConditionGood']['OutputValue']
     cond_med = trader_mean[trader_mean['VariableName'] == 'InfrastructureConditionMedium']['OutputValue']
@@ -375,7 +375,7 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         "condition_medium": int(safe_first(cond_med) > 0.5),
         "condition_poor": int(safe_first(cond_poor) > 0.5)
     }
-    
+
     # Service sub-scores
     checkout = trader_mean[
         trader_mean['VariableName'].str.contains('ServiceCheckout', na=False)
@@ -387,7 +387,7 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         "checkout_score": round(safe_mean(checkout) * 10, 1),
         "shopping_experience_score": round(safe_mean(shopping) * 10, 1)
     }
-    
+
     # Food Quality sub-scores
     # Note: Variables are named Quality* (e.g., QualityPrepackaged, QualitySeparate)
     # NOT QualityFeatures - we filter by dimension + prefix to get all quality indicators
@@ -396,9 +396,10 @@ def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, An
         (trader_mean['VariableName'].str.startswith('Quality'))
     ]['OutputValue']
     sub_scores["Food Quality"] = {
-        "quality_features_pct": round(safe_mean(quality_vars), 2) if not quality_vars.empty else 0.75
+        "quality_standards_met_pct": round(safe_mean(quality_vars), 2) if not quality_vars.empty else 0.75,
+        "quality_problems_pct": round(max(0, 1 - safe_mean(quality_vars)), 2) if not quality_vars.empty else 0.25
     }
-    
+
     # Access & Protection sub-scores
     access = market_mean[
         market_mean['VariableName'].str.contains('AccessProtectionAccess', na=False)

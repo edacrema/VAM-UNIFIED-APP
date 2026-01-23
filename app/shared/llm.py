@@ -14,7 +14,7 @@ def get_model() -> BaseChatModel:
     global _model_instance
     if _model_instance is None:
         _model_instance = ChatGoogleGenerativeAI(
-            model=os.getenv("LLM_MODEL", "gemini-2.5-flash"),
+            model=os.getenv("LLM_MODEL", "gemini-2.5-pro"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             temperature=0,
             timeout=60,

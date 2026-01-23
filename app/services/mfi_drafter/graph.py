@@ -355,9 +355,9 @@ def generate_mock_mfi_data(
                 }
             elif dim == "Resilience":
                 sub_scores[dim] = {
-                    "node_complexity": random.choice([0, 1]),
-                    "node_criticality": random.choice([0, 1]),
-                    "node_density": random.choice([0, 1])
+                    "low_density_pct": round(random.uniform(0.05, 0.6), 2),
+                    "high_complexity_pct": round(random.uniform(0.05, 0.5), 2),
+                    "high_criticality_pct": round(random.uniform(0.05, 0.5), 2)
                 }
             elif dim == "Competition":
                 sub_scores[dim] = {
@@ -376,8 +376,10 @@ def generate_mock_mfi_data(
                     "shopping_experience_score": round(random.uniform(3, 8), 1)
                 }
             elif dim == "Food Quality":
+                standards_met = round(random.uniform(0.5, 0.95), 2)
                 sub_scores[dim] = {
-                    "quality_features_pct": round(random.uniform(0.5, 0.95), 2)
+                    "quality_standards_met_pct": standards_met,
+                    "quality_problems_pct": round(max(0, 1 - standards_met), 2)
                 }
             elif dim == "Access & Protection":
                 sub_scores[dim] = {
@@ -995,7 +997,20 @@ Data:
 - National Score: {dim_data['national_score']}/10
 - Regional: {json.dumps(dim_data['regional_scores'])}
 - Markets: {json.dumps(dim_data['market_scores'])}
-- Sub-scores: {json.dumps(sub_scores_avg)}
+- Sub-scores (0-1 fractions): {json.dumps(sub_scores_avg)}
+
+Sub-score interpretation rules (MANDATORY):
+- All values are 0-1 fractions. To write percentages, multiply by 100.
+- DO NOT INVERT these values.
+- Unless explicitly stated otherwise, higher *_pct means a higher rate of the named problem (worse).
+- Exception: quality_standards_met_pct is positive (higher = better). quality_problems_pct is negative (higher = worse).
+- For Availability and Price sub-scores in particular, treat them strictly as problem rates even if the National Score is high.
+
+Examples (do not contradict these):
+- scarce_cereals_pct=0.80 means 80% of traders report cereal SCARCITY (not 20%).
+- runout_cereals_pct=0.82 means 82% of traders report cereal STOCKOUTS (not 18%).
+- increase_cereals_pct=0.83 means 83% of traders report cereal PRICE INCREASES.
+- unstable_cereals_pct=0.58 means 58% of traders report cereal PRICE INSTABILITY.
 
 Description: {DIMENSION_DESCRIPTIONS.get(dimension, '')}
 
@@ -1172,7 +1187,8 @@ def node_executive_summary_drafter(state: MFIReportState) -> dict:
         risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
     
     sorted_dims = sorted(dimension_scores, key=lambda x: x["national_score"], reverse=True)
-    national_mfi = round(np.mean([d["national_score"] for d in dimension_scores]), 1)
+    market_mfis = [float(m.get("overall_mfi", 0) or 0) for m in markets_data if isinstance(m, dict)]
+    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
     
     collection_period = f"{state['data_collection_start']} to {state['data_collection_end']}"
     regions_covered = survey_meta.get("regions_covered", [])

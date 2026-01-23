@@ -105,10 +105,12 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
         )
         
         # Calculate national MFI
-        dimension_scores = result.get("dimension_scores", [])
-        national_mfi = round(
-            np.mean([d["national_score"] for d in dimension_scores]), 1
-        ) if dimension_scores else 0.0
+        market_mfis = [
+            float(m.get("overall_mfi", 0) or 0)
+            for m in (result.get("markets_data", []) or [])
+            if isinstance(m, dict)
+        ]
+        national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
         
         # Calculate risk distribution
         risk_dist = {}
@@ -196,10 +198,12 @@ async def generate_mfi_report_from_csv(
             csv_data=csv_data,
         )
 
-        dimension_scores = result.get("dimension_scores", [])
-        national_mfi = round(
-            np.mean([d["national_score"] for d in dimension_scores]), 1
-        ) if dimension_scores else 0.0
+        market_mfis = [
+            float(m.get("overall_mfi", 0) or 0)
+            for m in (result.get("markets_data", []) or [])
+            if isinstance(m, dict)
+        ]
+        national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
 
         risk_dist = {}
         for m in result.get("markets_data", []):
@@ -463,10 +467,12 @@ async def get_report_result(run_id: str):
     result_for_blocks["dimension_findings"] = normalized_dimension_findings
     result_for_blocks["market_recommendations"] = result.get("market_recommendations", {}) or {}
 
-    dimension_scores = result.get("dimension_scores", [])
-    national_mfi = round(
-        np.mean([d["national_score"] for d in dimension_scores]), 1
-    ) if dimension_scores else 0.0
+    market_mfis = [
+        float(m.get("overall_mfi", 0) or 0)
+        for m in (result.get("markets_data", []) or [])
+        if isinstance(m, dict)
+    ]
+    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
     
     risk_dist = {}
     for m in result.get("markets_data", []):
