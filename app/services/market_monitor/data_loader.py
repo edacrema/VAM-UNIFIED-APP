@@ -23,6 +23,9 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -34,6 +37,72 @@ logger = logging.getLogger(__name__)
 
 # Path to the data directory (relative to this file's location)
 DATA_DIR = Path(__file__).parent / "data"
+
+_GCS_CLIENT_LOCK = threading.Lock()
+_GCS_CLIENT: Any = None
+
+def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
+    uri = (uri or "").strip()
+    if not uri.startswith("gs://"):
+        raise ValueError("Invalid GCS URI")
+    path = uri[5:]
+    bucket, _, obj = path.partition("/")
+    return bucket, obj
+
+def _get_gcs_client() -> Any:
+    global _GCS_CLIENT
+    if _GCS_CLIENT is not None:
+        return _GCS_CLIENT
+    with _GCS_CLIENT_LOCK:
+        if _GCS_CLIENT is not None:
+            return _GCS_CLIENT
+        try:
+            from google.cloud import storage  # type: ignore
+
+            _GCS_CLIENT = storage.Client()
+        except Exception:
+            logger.exception("Failed to initialize GCS client")
+            _GCS_CLIENT = None
+        return _GCS_CLIENT
+
+def _get_price_data_gcs_uri() -> Optional[str]:
+    uri = (os.getenv("PRICE_DATA_GCS_URI") or "").strip()
+    if uri:
+        return uri
+    uri = (os.getenv("MARKET_MONITOR_PRICE_DATA_GCS_URI") or "").strip()
+    return uri or None
+
+def _get_price_data_cache_path() -> Path:
+    cache_dir = (os.getenv("PRICE_DATA_CACHE_DIR") or "").strip() or tempfile.gettempdir()
+    return Path(cache_dir) / "price_data.csv"
+
+def _download_gcs_to_file(gcs_uri: str, destination: Path) -> None:
+    client = _get_gcs_client()
+    if client is None:
+        raise FileNotFoundError("GCS client is not available")
+
+    bucket_name, object_name = _parse_gcs_uri(gcs_uri)
+    if not bucket_name or not object_name:
+        raise FileNotFoundError("Invalid GCS URI")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(object_name)
+    blob.download_to_filename(str(destination))
+
+def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
+    client = _get_gcs_client()
+    if client is None:
+        raise RuntimeError("GCS client is not available")
+
+    bucket_name, object_name = _parse_gcs_uri(gcs_uri)
+    if not bucket_name or not object_name:
+        raise RuntimeError("Invalid GCS URI")
+
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(object_name)
+    blob.upload_from_string(content, content_type="text/csv")
 
 
 # ============================================================================
@@ -129,17 +198,39 @@ def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
         FileNotFoundError: If CSV file doesn't exist
     """
     if csv_path is None:
-        csv_path = DATA_DIR / "price_data.csv"
-    
-    # Convert string to Path if needed
-    csv_path = Path(csv_path)
-    
+        gcs_uri = _get_price_data_gcs_uri()
+        if gcs_uri:
+            cache_path = _get_price_data_cache_path()
+            if not cache_path.exists():
+                try:
+                    _download_gcs_to_file(gcs_uri, cache_path)
+                except Exception as e:
+                    logger.exception("Failed to download price data from GCS")
+                    raise FileNotFoundError(f"Failed to load price data from GCS: {e}")
+            csv_path = cache_path
+        else:
+            csv_path = DATA_DIR / "price_data.csv"
+
+    csv_path_str = str(csv_path)
+    if csv_path_str.startswith("gs://"):
+        gcs_uri = csv_path_str
+        cache_path = _get_price_data_cache_path()
+        if not cache_path.exists():
+            try:
+                _download_gcs_to_file(gcs_uri, cache_path)
+            except Exception as e:
+                logger.exception("Failed to download price data from GCS")
+                raise FileNotFoundError(f"Failed to load price data from GCS: {e}")
+        csv_path = cache_path
+    else:
+        csv_path = Path(csv_path)
+
     if not csv_path.exists():
         raise FileNotFoundError(
             f"Price data file not found at {csv_path}. "
             f"Please ensure 'price_data.csv' exists in the 'data' folder."
         )
-    
+
     logger.info(f"Loading price data from {csv_path}")
     
     df = pd.read_csv(csv_path)

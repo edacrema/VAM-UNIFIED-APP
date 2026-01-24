@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import os
 
 from app.services.mfi_validator.router import router as mfi_validator_router
 from app.services.price_validator.router import router as price_validator_router
@@ -13,16 +14,30 @@ logging.basicConfig(
 )
 logging.getLogger().setLevel(logging.INFO)
 
+_fastapi_root_path = (os.getenv("FASTAPI_ROOT_PATH") or "").strip()
+
 app = FastAPI(
     title="WFP Data Tools API",
     description="Backend API per validazione dati e generazione report WFP",
-    version="1.0.0"
+    version="1.0.0",
+    root_path=_fastapi_root_path or "",
 )
+
+def _get_cors_allow_origins() -> list[str]:
+    raw = (os.getenv("CORS_ALLOW_ORIGINS") or os.getenv("ALLOW_ORIGINS") or "").strip()
+    if not raw:
+        return ["*"]
+    if raw == "*":
+        return ["*"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+_cors_allow_origins = _get_cors_allow_origins()
+_cors_allow_credentials = _cors_allow_origins != ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js
-    allow_credentials=True,
+    allow_origins=_cors_allow_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

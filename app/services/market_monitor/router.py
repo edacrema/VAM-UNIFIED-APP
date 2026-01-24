@@ -3,7 +3,7 @@ Market Monitor - Router
 =======================
 FastAPI endpoints for the Market Monitor service.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, UploadFile, File
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List
@@ -424,6 +424,88 @@ def get_service_info():
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "market-monitor"}
+
+
+@router.get("/dataset/status")
+def get_price_data_dataset_status():
+    from .data_loader import (
+        DATA_DIR,
+        _get_price_data_cache_path,
+        _get_price_data_gcs_uri,
+        _get_gcs_client,
+        _parse_gcs_uri,
+    )
+
+    gcs_uri = _get_price_data_gcs_uri()
+    cache_path = _get_price_data_cache_path()
+    local_path = DATA_DIR / "price_data.csv"
+
+    cache_exists = cache_path.exists()
+    local_exists = local_path.exists()
+ 
+    cache_stat = cache_path.stat() if cache_exists else None
+    local_stat = local_path.stat() if local_exists else None
+
+    gcs_exists = None
+    if gcs_uri:
+        try:
+            client = _get_gcs_client()
+            if client is not None:
+                bucket_name, object_name = _parse_gcs_uri(gcs_uri)
+                blob = client.bucket(bucket_name).blob(object_name)
+                gcs_exists = blob.exists()
+        except Exception:
+            gcs_exists = None
+
+    return {
+        "gcs_uri": gcs_uri,
+        "gcs_exists": gcs_exists,
+        "cache": {
+            "path": str(cache_path),
+            "exists": cache_exists,
+            "size_bytes": getattr(cache_stat, "st_size", None),
+            "updated_at": getattr(cache_stat, "st_mtime", None),
+        },
+        "local": {
+            "path": str(local_path),
+            "exists": local_exists,
+            "size_bytes": getattr(local_stat, "st_size", None),
+            "updated_at": getattr(local_stat, "st_mtime", None),
+        },
+    }
+
+
+@router.post("/dataset/upload")
+async def upload_price_data_dataset(file: UploadFile = File(..., description="price_data.csv")):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    content = await file.read()
+
+    from .data_loader import (
+        DATA_DIR,
+        _get_price_data_cache_path,
+        _get_price_data_gcs_uri,
+        _upload_file_to_gcs,
+    )
+
+    gcs_uri = _get_price_data_gcs_uri()
+    if gcs_uri:
+        try:
+            _upload_file_to_gcs(content, gcs_uri)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Upload to GCS failed: {str(e)}")
+
+        cache_path = _get_price_data_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(content)
+        return {"uploaded": True, "gcs_uri": gcs_uri}
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = DATA_DIR / "price_data.csv"
+    local_path.write_bytes(content)
+    return {"uploaded": True, "local_path": str(local_path)}
 
 
 @router.get("/countries")

@@ -13,3 +13,7 @@ beautifulsoup4
 lxml
 matplotlib
 python-docx
+google-cloud-firestore
+google-cloud-storage
+openpyxl
+streamlit
