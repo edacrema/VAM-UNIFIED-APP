@@ -13,3 +13,4 @@ beautifulsoup4
 lxml
 matplotlib
 python-docx
+streamlit

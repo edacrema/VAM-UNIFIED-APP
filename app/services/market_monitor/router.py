@@ -3,7 +3,7 @@ Market Monitor - Router
 =======================
 FastAPI endpoints for the Market Monitor service.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, File, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List
@@ -418,6 +418,41 @@ def get_service_info():
             }
         ]
     }
+
+
+@router.get("/dataset/status")
+def get_dataset_status():
+    from .data_loader import DATA_DIR
+
+    local_path = DATA_DIR / "price_data.csv"
+    local_exists = local_path.exists()
+    local_stat = local_path.stat() if local_exists else None
+
+    return {
+        "local": {
+            "path": str(local_path),
+            "exists": local_exists,
+            "size_bytes": getattr(local_stat, "st_size", None),
+            "updated_at": getattr(local_stat, "st_mtime", None),
+        }
+    }
+
+
+@router.post("/dataset/upload")
+async def upload_price_data_dataset(file: UploadFile = File(..., description="price_data.csv")):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    content = await file.read()
+
+    from .data_loader import DATA_DIR
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = DATA_DIR / "price_data.csv"
+    local_path.write_bytes(content)
+
+    return {"uploaded": True, "local_path": str(local_path), "size_bytes": len(content)}
 
 
 @router.get("/health")
