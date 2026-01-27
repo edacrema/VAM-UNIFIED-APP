@@ -1,9 +1,11 @@
 import streamlit as st
 
 from streamlit_shared import (
+    apply_wfp_theme,
     get_backend_base_url,
     render_report_blocks,
     render_results_tabs,
+    render_wfp_sidebar_logo,
     request_bytes,
     request_json,
     run_async_and_poll,
@@ -12,143 +14,80 @@ from streamlit_shared import (
 )
 
 st.set_page_config(page_title="MFI Drafter", layout="wide")
+apply_wfp_theme()
 
 with st.sidebar:
+    render_wfp_sidebar_logo()
     backend_url = st.text_input("Backend Base URL", value=get_backend_base_url())
     set_backend_base_url(backend_url)
 
 st.title("MFI Report Generator")
 
-mode = st.radio("Input Mode", ["Manual", "Upload CSV"], horizontal=True)
-run_mode = st.radio("Run Mode", ["Synchronous", "Asynchronous"], horizontal=True)
+with st.form("mfi_drafter_csv"):
+    uploaded = st.file_uploader("Processed MFI CSV", type=["csv"], key="mfi_csv_file")
+    country_override = st.text_input("Country Override (optional)")
+    start_override = st.text_input("Start Override (optional)")
+    end_override = st.text_input("End Override (optional)")
 
-sample_markets = {}
-try:
-    sample_markets = request_json("GET", "/mfi-drafter/sample-markets", timeout=20)
-except Exception:
-    sample_markets = {}
+    validate = st.form_submit_button("Validate CSV")
+    run = st.form_submit_button("Run")
 
-if mode == "Manual":
-    with st.form("mfi_drafter_manual"):
-        country = st.text_input("Country")
-        data_collection_start = st.text_input("Data Collection Start (YYYY-MM-DD)")
-        data_collection_end = st.text_input("Data Collection End (YYYY-MM-DD)")
+if validate:
+    try:
+        if uploaded is None:
+            st.error("Please upload a CSV")
+        else:
+            files = {
+                "file": (
+                    uploaded.name,
+                    uploaded.getvalue(),
+                    uploaded.type or "text/csv",
+                )
+            }
+            resp = request_json("POST", "/mfi-drafter/validate-csv", files=files, timeout=120)
+            st.json(resp)
+    except Exception as e:
+        safe_show_error(e)
 
-        defaults = []
-        if isinstance(sample_markets, dict) and country in sample_markets:
-            payload = sample_markets.get(country)
-            if isinstance(payload, dict):
-                defaults = payload.get("markets") or []
-
-        markets_text = st.text_area(
-            "Markets (one per line)",
-            value="\n".join([m for m in defaults if isinstance(m, str)]),
-            height=150,
-        )
-
-        submitted = st.form_submit_button("Run")
-
-    if submitted:
-        try:
-            markets = [m.strip() for m in markets_text.splitlines() if m.strip()]
-            payload = {
-                "country": country,
-                "data_collection_start": data_collection_start,
-                "data_collection_end": data_collection_end,
-                "markets": markets,
+if run:
+    try:
+        if uploaded is None:
+            st.error("Please upload a CSV")
+        else:
+            files = {
+                "file": (
+                    uploaded.name,
+                    uploaded.getvalue(),
+                    uploaded.type or "text/csv",
+                )
+            }
+            data = {
+                "country_override": country_override or "",
+                "data_collection_start_override": start_override or "",
+                "data_collection_end_override": end_override or "",
             }
 
-            if run_mode == "Synchronous":
-                result = request_json("POST", "/mfi-drafter/generate", json_body=payload, timeout=1800)
-                st.session_state["mfi_last_result"] = result
-                st.session_state["mfi_last_run_id"] = None
-            else:
-                run_id, final_status, result = run_async_and_poll(
-                    start_method="POST",
-                    start_path="/mfi-drafter/generate-async",
-                    status_path_template="/mfi-drafter/status/{run_id}",
-                    result_path_template="/mfi-drafter/result/{run_id}",
-                    start_json=payload,
-                    poll_interval_seconds=2.0,
-                    timeout_seconds=3600,
-                )
-                st.session_state["mfi_last_result"] = result
-                st.session_state["mfi_last_run_id"] = run_id
+            run_id, final_status, result = run_async_and_poll(
+                start_method="POST",
+                start_path="/mfi-drafter/generate-from-csv-async",
+                status_path_template="/mfi-drafter/status/{run_id}",
+                result_path_template="/mfi-drafter/result/{run_id}",
+                start_data=data,
+                start_files=files,
+                poll_interval_seconds=2.0,
+                timeout_seconds=3600,
+            )
+            st.session_state["mfi_last_result"] = result
+            st.session_state["mfi_last_run_id"] = run_id
 
-        except Exception as e:
-            safe_show_error(e)
+            st.session_state.pop("mfi_docx_bytes", None)
+            st.session_state.pop("mfi_docx_run_id", None)
 
-else:
-    with st.form("mfi_drafter_csv"):
-        uploaded = st.file_uploader("Processed MFI CSV", type=["csv"], key="mfi_csv_file")
-        country_override = st.text_input("Country Override (optional)")
-        start_override = st.text_input("Start Override (optional)")
-        end_override = st.text_input("End Override (optional)")
+            if isinstance(final_status, dict) and final_status.get("status") == "failed":
+                st.error(final_status.get("error") or "failed")
 
-        validate = st.form_submit_button("Validate CSV")
-        run = st.form_submit_button("Run")
-
-    if validate:
-        try:
-            if uploaded is None:
-                st.error("Please upload a CSV")
-            else:
-                files = {
-                    "file": (
-                        uploaded.name,
-                        uploaded.getvalue(),
-                        uploaded.type or "text/csv",
-                    )
-                }
-                resp = request_json("POST", "/mfi-drafter/validate-csv", files=files, timeout=120)
-                st.json(resp)
-        except Exception as e:
-            safe_show_error(e)
-
-    if run:
-        try:
-            if uploaded is None:
-                st.error("Please upload a CSV")
-            else:
-                files = {
-                    "file": (
-                        uploaded.name,
-                        uploaded.getvalue(),
-                        uploaded.type or "text/csv",
-                    )
-                }
-                data = {
-                    "country_override": country_override or "",
-                    "data_collection_start_override": start_override or "",
-                    "data_collection_end_override": end_override or "",
-                }
-
-                if run_mode == "Synchronous":
-                    result = request_json(
-                        "POST",
-                        "/mfi-drafter/generate-from-csv",
-                        data=data,
-                        files=files,
-                        timeout=1800,
-                    )
-                    st.session_state["mfi_last_result"] = result
-                    st.session_state["mfi_last_run_id"] = None
-                else:
-                    run_id, final_status, result = run_async_and_poll(
-                        start_method="POST",
-                        start_path="/mfi-drafter/generate-from-csv-async",
-                        status_path_template="/mfi-drafter/status/{run_id}",
-                        result_path_template="/mfi-drafter/result/{run_id}",
-                        start_data=data,
-                        start_files=files,
-                        poll_interval_seconds=2.0,
-                        timeout_seconds=3600,
-                    )
-                    st.session_state["mfi_last_result"] = result
-                    st.session_state["mfi_last_run_id"] = run_id
-
-        except Exception as e:
-            safe_show_error(e)
+    except Exception as e:
+        safe_show_error(e)
 
 result = st.session_state.get("mfi_last_result")
 run_id = st.session_state.get("mfi_last_run_id")
@@ -178,27 +117,29 @@ if isinstance(result, dict):
             st.info("Export is available for asynchronous runs only.")
             return
 
-        if st.button("Build DOCX", key=f"mfi_build_docx_{run_id}"):
-            try:
-                docx_bytes = request_bytes(
-                    "POST",
-                    f"/mfi-drafter/export-docx/{run_id}",
-                    json_body={},
-                    timeout=300,
-                )
-                st.session_state["mfi_docx_bytes"] = docx_bytes
-                st.session_state["mfi_docx_run_id"] = run_id
-            except Exception as e:
-                safe_show_error(e)
-                return
-
         docx_bytes = None
         if st.session_state.get("mfi_docx_run_id") == run_id:
             docx_bytes = st.session_state.get("mfi_docx_bytes")
 
+        if docx_bytes is None:
+            with st.spinner("Preparing DOCX..."):
+                try:
+                    docx_bytes = request_bytes(
+                        "POST",
+                        f"/mfi-drafter/export-docx/{run_id}",
+                        json_body={},
+                        timeout=300,
+                    )
+                except Exception as e:
+                    safe_show_error(e)
+                    return
+
+            st.session_state["mfi_docx_bytes"] = docx_bytes
+            st.session_state["mfi_docx_run_id"] = run_id
+
         if docx_bytes:
             st.download_button(
-                "Download DOCX",
+                "Generate & Download DOCX",
                 data=docx_bytes,
                 file_name=f"mfi-drafter-{run_id}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
