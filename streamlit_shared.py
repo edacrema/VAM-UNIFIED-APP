@@ -67,9 +67,9 @@ def apply_wfp_theme() -> None:
         }
         div[data-testid="stMetricLabel"],
         div[data-testid="stMetricLabel"] * {
-            color: var(--wfp-muted) !important;
+            color: rgba(0, 58, 93, 0.9) !important;
             opacity: 1 !important;
-            font-weight: 600 !important;
+            font-weight: 700 !important;
         }
         div[data-testid="stMetricValue"],
         div[data-testid="stMetricValue"] * {
