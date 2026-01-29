@@ -4,6 +4,8 @@ python-multipart
 python-dotenv
 langchain-core
 langchain-google-genai
+langchain-google-vertexai
+google-cloud-aiplatform
 langgraph
 pandas
 numpy
