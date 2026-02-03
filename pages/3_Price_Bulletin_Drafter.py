@@ -5,7 +5,6 @@ import streamlit as st
 from streamlit_shared import (
     apply_wfp_theme,
     quote_path_param,
-    get_backend_base_url,
     render_results_tabs,
     render_report_blocks,
     render_report_sections,
@@ -15,7 +14,6 @@ from streamlit_shared import (
     request_json,
     run_async_and_poll,
     safe_show_error,
-    set_backend_base_url,
 )
 
 st.set_page_config(page_title="Price Bulletin Drafter", layout="wide")
@@ -23,8 +21,6 @@ apply_wfp_theme()
 
 with st.sidebar:
     render_wfp_sidebar_logo()
-    backend_url = st.text_input("Backend Base URL", value=get_backend_base_url())
-    set_backend_base_url(backend_url)
 
 st.title("Price Bulletin Drafter")
 st.subheader("Generate Report")

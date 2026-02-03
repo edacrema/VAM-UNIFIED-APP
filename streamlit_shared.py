@@ -1,16 +1,14 @@
 import base64
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import pandas as pd
-import requests
 import streamlit as st
 
-_SESSION = requests.Session()
+from app.streamlit_backend.dispatcher import dispatch_request
 
 WFP_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5f/WFP_Logo.svg/512px-WFP_Logo.svg.png"
 WFP_PRIMARY = "#0072BC"
@@ -265,28 +263,6 @@ def quote_path_param(value: Any) -> str:
     return quote(str(value), safe="")
 
 
-def set_backend_base_url(value: str) -> None:
-    st.session_state["_backend_base_url"] = (value or "").strip().rstrip("/")
-
-
-def get_backend_base_url() -> str:
-    override = st.session_state.get("_backend_base_url")
-    base = (
-        (override or "").strip()
-        or (os.getenv("BACKEND_BASE_URL") or "").strip()
-        or (os.getenv("FASTAPI_BASE_URL") or "").strip()
-        or "http://localhost:8000"
-    )
-    return base.rstrip("/")
-
-
-def build_url(path: str) -> str:
-    base = get_backend_base_url()
-    if not path.startswith("/"):
-        path = "/" + path
-    return base + path
-
-
 def request_json(
     method: str,
     path: str,
@@ -297,22 +273,13 @@ def request_json(
     files: Optional[dict] = None,
     timeout: int = 60,
 ) -> Any:
-    url = build_url(path)
-    resp = _SESSION.request(
-        method,
-        url,
-        params=params,
-        json=json_body,
-        data=data,
-        files=files,
-        timeout=timeout,
-    )
+    resp = dispatch_request(method, path, params=params, json_body=json_body, data=data, files=files)
     if resp.status_code >= 400:
         try:
             detail = resp.json()
         except Exception:
             detail = resp.text
-        raise RuntimeError(f"{method} {url} failed ({resp.status_code}): {detail}")
+        raise RuntimeError(f"{method} {path} failed ({resp.status_code}): {detail}")
 
     if not resp.content:
         return None
@@ -324,14 +291,13 @@ def request_json(
 
 
 def request_bytes(method: str, path: str, *, json_body: Any = None, timeout: int = 120) -> bytes:
-    url = build_url(path)
-    resp = _SESSION.request(method, url, json=json_body, timeout=timeout)
+    resp = dispatch_request(method, path, json_body=json_body)
     if resp.status_code >= 400:
         try:
             detail = resp.json()
         except Exception:
             detail = resp.text
-        raise RuntimeError(f"{method} {url} failed ({resp.status_code}): {detail}")
+        raise RuntimeError(f"{method} {path} failed ({resp.status_code}): {detail}")
     return resp.content
 
 

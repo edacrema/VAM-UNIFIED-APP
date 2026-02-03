@@ -4,3 +4,5 @@ __pycache__/
 .env
 
 app/services/market_monitor/data/
+
+app/docker.env

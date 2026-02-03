@@ -2,9 +2,7 @@ import streamlit as st
 
 from streamlit_shared import (
     apply_wfp_theme,
-    get_backend_base_url,
     render_wfp_sidebar_logo,
-    set_backend_base_url,
 )
 
 st.set_page_config(page_title="VAM LLM Testing App", layout="wide")
@@ -13,8 +11,6 @@ apply_wfp_theme()
 with st.sidebar:
     st.markdown("## VAM LLM Testing App")
     render_wfp_sidebar_logo()
-    backend_url = st.text_input("Backend Base URL", value=get_backend_base_url())
-    set_backend_base_url(backend_url)
 
 st.title("VAM LLM Testing App")
 
