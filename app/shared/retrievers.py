@@ -104,12 +104,9 @@ class GDELTRetriever:
             token_safe = cls._escape_query_value(token)
             return f'repeat2:"{token_safe}"'
 
-        near = " ".join(tokens)
-        near_safe = cls._escape_query_value(near)
         phrase = f'"{safe}"'
-        near_clause = f'near5:"{near_safe}"'
         and_clause = "(" + " AND ".join(tokens) + ")"
-        return f"({phrase} OR {near_clause} OR {and_clause})"
+        return f"({phrase} OR {and_clause})"
 
     @classmethod
     def build_economy_query(
@@ -140,9 +137,9 @@ class GDELTRetriever:
             focus_clause = theme_clause
 
         if country_clause and focus_clause:
-            return f"{country_clause} {focus_clause}".strip()
+            return f"({country_clause}) AND ({focus_clause})".strip()
         if country_clause:
-            return country_clause
+            return f"({country_clause})"
         return focus_clause
 
 
@@ -201,7 +198,13 @@ class GDELTRetriever:
                 logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
             return []
 
-        base_query = f"{query} sourcelang:english"
+        q = (query or "").strip()
+        if re.search(r"\bsourcelang:", q, flags=re.IGNORECASE):
+            base_query = q
+        elif q:
+            base_query = f"({q}) AND sourcelang:english"
+        else:
+            base_query = "sourcelang:english"
 
         params = {
             "query": base_query,
@@ -224,6 +227,12 @@ class GDELTRetriever:
                 snippet = (resp.text or "").strip()
                 trace["response_snippet"] = (snippet[:2000] if snippet else "")
                 return [], (snippet[:2000] if snippet else f"HTTP {resp.status_code}")
+
+            ctype = (resp.headers or {}).get("Content-Type") or ""
+            if ctype and "json" not in ctype.lower():
+                snippet = (resp.text or "").strip()
+                trace["response_snippet"] = (snippet[:2000] if snippet else "")
+                return [], (snippet[:2000] if snippet else f"Non-JSON response (Content-Type={ctype})")
 
             try:
                 data = resp.json() if resp.text.strip() else {}
@@ -273,6 +282,13 @@ class GDELTRetriever:
                     last_error = (snippet[:2000] if snippet else f"HTTP {resp.status_code}")
                     break
 
+                ctype = (resp.headers or {}).get("Content-Type") or ""
+                if ctype and "json" not in ctype.lower():
+                    snippet = (resp.text or "").strip()
+                    trace["response_snippet"] = (snippet[:2000] if snippet else "")
+                    last_error = (snippet[:2000] if snippet else f"Non-JSON response (Content-Type={ctype})")
+                    break
+
                 try:
                     data = resp.json() if resp.text.strip() else {}
                 except Exception as e:
@@ -315,6 +331,34 @@ class GDELTRetriever:
                 fallback_params = dict(params)
                 fallback_params["query"] = relaxed_q
                 documents, last_error = run_once(fallback_params)
+
+        if not documents and last_error and "too short or too long" in last_error.lower():
+            hint: Optional[str] = None
+            m = re.search(r'repeat\d+:"([^"]+)"', base_query, flags=re.IGNORECASE)
+            if m:
+                hint = m.group(1)
+            if not hint:
+                m = re.search(r'"([^"]{2,})"', base_query)
+                if m:
+                    hint = m.group(1)
+
+            if hint:
+                safe_hint = self._escape_query_value(hint)
+                minimal_terms: Sequence[str] = (
+                    "market",
+                    "prices",
+                    "inflation",
+                    "currency",
+                    "exchange rate",
+                )
+                minimal_topic_clause = self._format_or_group(minimal_terms)
+                if minimal_topic_clause:
+                    relaxed_q = f'"{safe_hint}" AND {minimal_topic_clause} AND sourcelang:english'
+                    trace["fallback_used"] = True
+                    trace["fallback_query"] = relaxed_q
+                    fallback_params = dict(params)
+                    fallback_params["query"] = relaxed_q
+                    documents, last_error = run_once(fallback_params)
 
         trace["num_documents"] = len(documents)
         trace["samples"] = [

@@ -125,6 +125,12 @@ def _select_backend() -> str:
 def _use_durable_store() -> bool:
     return _select_backend() == "firestore_gcs"
 
+def _get_firestore_database() -> Optional[str]:
+    value = (os.getenv("RUNS_FIRESTORE_DATABASE") or "").strip()
+    if value:
+        return value
+    return "vam-llm-async"
+
 def _get_firestore_client() -> Any:
     global _FIRESTORE_CLIENT
     if _FIRESTORE_CLIENT is not None:
@@ -135,7 +141,14 @@ def _get_firestore_client() -> Any:
         try:
             from google.cloud import firestore  # type: ignore
 
-            _FIRESTORE_CLIENT = firestore.Client()
+            database = _get_firestore_database()
+            if database:
+                try:
+                    _FIRESTORE_CLIENT = firestore.Client(database=database)
+                except TypeError:
+                    _FIRESTORE_CLIENT = firestore.Client()
+            else:
+                _FIRESTORE_CLIENT = firestore.Client()
         except Exception:
             logger.exception("Failed to initialize Firestore client")
             _FIRESTORE_CLIENT = None
