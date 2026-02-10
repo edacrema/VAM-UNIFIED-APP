@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import threading
+
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -40,6 +42,11 @@ DATA_DIR = Path(__file__).parent / "data"
 
 _GCS_CLIENT_LOCK = threading.Lock()
 _GCS_CLIENT: Any = None
+_PRICE_DATA_CACHE_LOCK = threading.Lock()
+_PRICE_DATA_CACHE_PATH: Optional[str] = None
+_PRICE_DATA_CACHE_MTIME: Optional[float] = None
+_PRICE_DATA_CACHE_DF: Optional[pd.DataFrame] = None
+
 
 def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
     uri = (uri or "").strip()
@@ -48,6 +55,7 @@ def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
     path = uri[5:]
     bucket, _, obj = path.partition("/")
     return bucket, obj
+
 
 def _get_gcs_client() -> Any:
     global _GCS_CLIENT
@@ -65,6 +73,7 @@ def _get_gcs_client() -> Any:
             _GCS_CLIENT = None
         return _GCS_CLIENT
 
+
 def _get_price_data_gcs_uri() -> Optional[str]:
     uri = (os.getenv("PRICE_DATA_GCS_URI") or "").strip()
     if uri:
@@ -72,9 +81,11 @@ def _get_price_data_gcs_uri() -> Optional[str]:
     uri = (os.getenv("MARKET_MONITOR_PRICE_DATA_GCS_URI") or "").strip()
     return uri or None
 
+
 def _get_price_data_cache_path() -> Path:
     cache_dir = (os.getenv("PRICE_DATA_CACHE_DIR") or "").strip() or tempfile.gettempdir()
     return Path(cache_dir) / "price_data.csv"
+
 
 def _download_gcs_to_file(gcs_uri: str, destination: Path) -> None:
     client = _get_gcs_client()
@@ -91,6 +102,7 @@ def _download_gcs_to_file(gcs_uri: str, destination: Path) -> None:
     blob = bucket.blob(object_name)
     blob.download_to_filename(str(destination))
 
+
 def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
     client = _get_gcs_client()
     if client is None:
@@ -103,6 +115,160 @@ def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_name)
     blob.upload_from_string(content, content_type="text/csv")
+
+
+def _read_price_csv(csv_path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(csv_path)
+    except pd.errors.ParserError as exc:
+        logger.warning(
+            "CSV parse error; retrying with python engine and best-effort settings.",
+            exc_info=exc,
+        )
+        try:
+            return pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
+        except TypeError:
+            return pd.read_csv(csv_path, engine="python")
+        except Exception as exc2:
+            raise ValueError(
+                "Failed to parse price_data.csv. Ensure fields with commas are properly quoted."
+            ) from exc2
+
+
+def _normalize_column_key(column: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", column.lower().strip())
+
+
+def _normalize_price_data_columns(df: pd.DataFrame) -> pd.DataFrame:
+    column_map = {
+        "admin1": "Admin 1",
+        "admin2": "Admin 2",
+        "marketname": "Market Name",
+        "pricetype": "Price Type",
+        "pricedate": "Price Date",
+        "date": "Price Date",
+        "dateprice": "Price Date",
+        "collectionfrequency": "Collection Frequency",
+        "datasource": "Data Source",
+        "datatype": "Data Type",
+        "trend": "Trend",
+        "analysisvaluepewi": "ValuePewi",
+        "valuepewi": "ValuePewi",
+        "alpsphase": "ALPS Phase",
+        "upper95ci": "Upper (95%) CI",
+        "lower95ci": "Lower (95%) CI",
+        "forecastmethodology": "Forecast Methodology",
+        "country": "Country",
+        "commodity": "Commodity",
+        "price": "Price",
+        "unit": "Unit",
+    }
+
+    rename_map: Dict[str, str] = {}
+    for column in df.columns:
+        key = _normalize_column_key(column)
+        rename_map[column] = column_map.get(key, column.strip())
+
+    df = df.rename(columns=rename_map)
+
+    if df.columns.duplicated().any():
+        duplicates = df.columns[df.columns.duplicated()].unique().tolist()
+        logger.warning(
+            "Duplicate columns after normalization: %s. Keeping first occurrence.",
+            duplicates,
+        )
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    return df
+
+
+def _normalize_price_dates(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, format="%d/%m/%Y", errors="coerce")
+    missing = parsed.isna()
+    if missing.any():
+        parsed_alt = pd.to_datetime(series[missing], errors="coerce", dayfirst=True)
+        parsed.loc[missing] = parsed_alt
+    return parsed
+
+
+def _strip_string_columns(df: pd.DataFrame, columns: List[str]) -> None:
+    for column in columns:
+        if column in df.columns:
+            df[column] = df[column].astype("string").str.strip()
+
+
+def _normalize_price_data_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = _normalize_price_data_columns(df)
+
+    for required_column in [
+        "Upper (95%) CI",
+        "Lower (95%) CI",
+        "Forecast Methodology",
+    ]:
+        if required_column not in df.columns:
+            df[required_column] = pd.NA
+
+    required_columns = ["Country", "Commodity", "Price Date", "Price", "Admin 1", "Market Name"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(
+            "Price data missing required columns after normalization: "
+            f"{', '.join(missing_columns)}"
+        )
+
+    _strip_string_columns(
+        df,
+        [
+            "Country",
+            "Commodity",
+            "Admin 1",
+            "Admin 2",
+            "Market Name",
+            "Data Source",
+            "Collection Frequency",
+            "Data Type",
+            "Price Type",
+            "Unit",
+        ],
+    )
+
+    df["Price Date"] = _normalize_price_dates(df["Price Date"])
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+
+    if "Data Type" in df.columns:
+        data_type = df["Data Type"].astype("string").str.strip().str.lower()
+        data_type = data_type.replace({"": pd.NA, "aggregate": "aggregated"})
+        df["Data Type"] = data_type.str.title()
+        before_filter = len(df)
+        df = df[(df["Data Type"].isna()) | (df["Data Type"] == "Aggregated")]
+        filtered = before_filter - len(df)
+        if filtered:
+            logger.info("Filtered %s non-aggregated rows (e.g., Forecast).", filtered)
+
+    if "Unit" in df.columns:
+        nonstandard_units = df["Unit"].astype("string").str.contains(r"\d", na=False)
+        if nonstandard_units.any():
+            sample_units = sorted(
+                df.loc[nonstandard_units, "Unit"].dropna().unique().tolist()
+            )
+            logger.warning(
+                "Found %s rows with nonstandard Unit values (sample: %s). Keeping as-is.",
+                int(nonstandard_units.sum()),
+                sample_units[:5],
+            )
+
+    initial_len = len(df)
+    df = df.drop_duplicates()
+    if len(df) < initial_len:
+        logger.info("Dropped %s duplicate rows.", initial_len - len(df))
+
+    # Remove rows with invalid dates or prices
+    initial_len = len(df)
+    df = df.dropna(subset=["Price Date", "Price"])
+    if len(df) < initial_len:
+        logger.warning(f"Dropped {initial_len - len(df)} rows with invalid date/price")
+
+    return df
 
 
 # ============================================================================
@@ -184,6 +350,7 @@ def normalize_country_name(country: str) -> str:
 # CSV DATA LOADER
 # ============================================================================
 
+
 def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
     """
     Load the price data CSV file.
@@ -197,6 +364,8 @@ def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
     Raises:
         FileNotFoundError: If CSV file doesn't exist
     """
+    global _PRICE_DATA_CACHE_PATH, _PRICE_DATA_CACHE_MTIME, _PRICE_DATA_CACHE_DF
+
     if csv_path is None:
         gcs_uri = _get_price_data_gcs_uri()
         if gcs_uri:
@@ -231,24 +400,32 @@ def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
             f"Please ensure 'price_data.csv' exists in the 'data' folder."
         )
 
+    resolved_path = str(csv_path.resolve())
+    try:
+        mtime = csv_path.stat().st_mtime
+    except OSError:
+        mtime = None
+
+    with _PRICE_DATA_CACHE_LOCK:
+        if (
+            _PRICE_DATA_CACHE_DF is not None
+            and _PRICE_DATA_CACHE_PATH == resolved_path
+            and _PRICE_DATA_CACHE_MTIME == mtime
+        ):
+            return _PRICE_DATA_CACHE_DF.copy()
+
     logger.info(f"Loading price data from {csv_path}")
-    
-    df = pd.read_csv(csv_path)
-    
-    # Parse dates (format: DD/MM/YYYY)
-    df['Price Date'] = pd.to_datetime(df['Price Date'], format='%d/%m/%Y', errors='coerce')
-    
-    # Ensure Price is numeric
-    df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
-    
-    # Remove rows with invalid dates or prices
-    initial_len = len(df)
-    df = df.dropna(subset=['Price Date', 'Price'])
-    if len(df) < initial_len:
-        logger.warning(f"Dropped {initial_len - len(df)} rows with invalid date/price")
-    
+
+    df = _read_price_csv(csv_path)
+    df = _normalize_price_data_df(df)
+
     logger.info(f"Loaded {len(df)} price records")
-    
+
+    with _PRICE_DATA_CACHE_LOCK:
+        _PRICE_DATA_CACHE_PATH = resolved_path
+        _PRICE_DATA_CACHE_MTIME = mtime
+        _PRICE_DATA_CACHE_DF = df.copy()
+
     return df
 
 

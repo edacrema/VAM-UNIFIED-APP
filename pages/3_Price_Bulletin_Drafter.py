@@ -28,19 +28,24 @@ st.subheader("Generate Report")
 countries = []
 country_currency = {}
 
-try:
-    countries_resp = request_json("GET", "/market-monitor/countries", timeout=30)
-    if isinstance(countries_resp, dict):
-        countries_list = countries_resp.get("countries") or []
-        if isinstance(countries_list, list):
-            for c in countries_list:
-                if isinstance(c, dict) and c.get("has_data"):
-                    name = c.get("name")
-                    if isinstance(name, str):
-                        countries.append(name)
-                        country_currency[name] = c.get("currency_code")
-except Exception:
-    countries = []
+countries_resp = st.session_state.get("mm_countries_resp")
+if countries_resp is None:
+    try:
+        countries_resp = request_json("GET", "/market-monitor/countries", timeout=30)
+        st.session_state["mm_countries_resp"] = countries_resp
+    except Exception:
+        countries_resp = None
+        st.session_state.pop("mm_countries_resp", None)
+
+if isinstance(countries_resp, dict):
+    countries_list = countries_resp.get("countries") or []
+    if isinstance(countries_list, list):
+        for c in countries_list:
+            if isinstance(c, dict) and c.get("has_data"):
+                name = c.get("name")
+                if isinstance(name, str):
+                    countries.append(name)
+                    country_currency[name] = c.get("currency_code")
 
 if countries:
     country = st.selectbox("Country", countries, index=0, key="mm_country")
@@ -55,14 +60,18 @@ time_period_options = []
 default_time_period = None
 
 if country:
-    try:
-        metadata = request_json(
-            "GET",
-            f"/market-monitor/countries/{quote_path_param(country)}/metadata",
-            timeout=30,
-        )
-    except Exception:
-        metadata = None
+    metadata_cache = st.session_state.setdefault("mm_country_metadata", {})
+    metadata = metadata_cache.get(country)
+    if metadata is None:
+        try:
+            metadata = request_json(
+                "GET",
+                f"/market-monitor/countries/{quote_path_param(country)}/metadata",
+                timeout=30,
+            )
+            metadata_cache[country] = metadata
+        except Exception:
+            metadata = None
 
 if isinstance(metadata, dict):
     regions = metadata.get("regions") or []
@@ -135,10 +144,12 @@ with st.form("market_monitor_form"):
 
     use_mock_data = st.checkbox("Use Mock Data", value=False)
 
+    valid_commodities = [c for c in commodities if isinstance(c, str)]
+    default_candidates = [c for c in default_commodities if c in valid_commodities]
     commodity_list = st.multiselect(
         "Commodities",
-        options=[c for c in commodities if isinstance(c, str)],
-        default=[c for c in commodities if isinstance(c, str)],
+        options=valid_commodities,
+        default=default_candidates or valid_commodities,
         key=f"mm_commodities_{country}" if isinstance(country, str) and country else "mm_commodities",
     )
 
