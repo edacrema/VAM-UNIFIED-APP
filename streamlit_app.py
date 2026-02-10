@@ -44,6 +44,27 @@ st.markdown(
         justify-content: center !important;
         margin-bottom: 1rem !important;
     }
+    .instructions-menu {
+        max-width: 520px;
+        margin: 1.5rem auto 0 auto;
+    }
+    .instructions-menu .stButton > button,
+    .instructions-menu div[data-testid^="baseButton-"] button {
+        width: 100% !important;
+        height: 62px !important;
+        font-size: 0.98rem !important;
+        background: #FFFFFF !important;
+        color: var(--wfp-primary) !important;
+        border: 2px solid var(--wfp-primary) !important;
+        border-radius: 999px !important;
+        margin-bottom: 0.5rem !important;
+    }
+    .instructions-menu .stButton > button:hover,
+    .instructions-menu div[data-testid^="baseButton-"] button:hover {
+        background: var(--wfp-light) !important;
+        color: var(--wfp-primary-dark) !important;
+        border-color: var(--wfp-primary-dark) !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -88,4 +109,15 @@ with right:
     ):
         _go_to("pages/4_MFI_Drafter.py")
 
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown('<div class="instructions-menu">', unsafe_allow_html=True)
+st.markdown("#### Need guidance?")
+if st.button(
+    "How to use the tools",
+    key="nav_instructions",
+    use_container_width=True,
+):
+    _go_to("pages/0_How_To_Use_The_Tools.py")
 st.markdown("</div>", unsafe_allow_html=True)

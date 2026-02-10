@@ -4,6 +4,7 @@ import streamlit as st
 
 from streamlit_shared import (
     apply_wfp_theme,
+    render_instructions_sidebar_button,
     quote_path_param,
     render_results_tabs,
     render_report_blocks,
@@ -21,6 +22,7 @@ apply_wfp_theme()
 
 with st.sidebar:
     render_wfp_sidebar_logo()
+    render_instructions_sidebar_button(key="sidebar_instructions_price_bulletin")
 
 st.title("Price Bulletin Drafter")
 st.subheader("Generate Report")

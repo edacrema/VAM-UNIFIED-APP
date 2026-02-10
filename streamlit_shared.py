@@ -259,6 +259,20 @@ def render_wfp_sidebar_logo() -> None:
     st.markdown("---")
 
 
+def render_instructions_sidebar_button(
+    *,
+    key: str,
+    label: str = "How to use the tools",
+    page_path: str = "pages/0_How_To_Use_The_Tools.py",
+) -> None:
+    st.markdown("### Help")
+    if st.button(label, key=key, type="secondary", use_container_width=True):
+        if hasattr(st, "switch_page"):
+            st.switch_page(page_path)
+            return
+        st.info("Use the pages in the left sidebar to access each service.")
+
+
 def quote_path_param(value: Any) -> str:
     return quote(str(value), safe="")
 

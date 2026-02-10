@@ -2,6 +2,7 @@ import streamlit as st
 
 from streamlit_shared import (
     apply_wfp_theme,
+    render_instructions_sidebar_button,
     render_results_tabs,
     render_wfp_sidebar_logo,
     run_async_and_poll,
@@ -13,6 +14,7 @@ apply_wfp_theme()
 
 with st.sidebar:
     render_wfp_sidebar_logo()
+    render_instructions_sidebar_button(key="sidebar_instructions_mfi_validator")
 
 st.title("MFI Dataset Validator")
 
