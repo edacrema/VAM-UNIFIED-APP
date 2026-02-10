@@ -1,7 +1,12 @@
 import streamlit as st
 
 from streamlit_shared import (
+    INSTRUCTIONS_PAGE_PATH,
+    ONBOARDING_PAGE_PATH,
     apply_wfp_theme,
+    render_bug_report_sidebar_link,
+    render_instructions_sidebar_button,
+    render_onboarding_sidebar_button,
     render_wfp_sidebar_logo,
 )
 
@@ -11,6 +16,9 @@ apply_wfp_theme()
 with st.sidebar:
     st.markdown("## VAM LLM Testing App")
     render_wfp_sidebar_logo()
+    render_onboarding_sidebar_button(key="sidebar_onboarding_home")
+    render_instructions_sidebar_button(key="sidebar_instructions_home")
+    render_bug_report_sidebar_link()
 
 st.title("VAM LLM Testing App")
 
@@ -32,6 +40,18 @@ st.markdown(
     .landing-menu [data-testid="stMarkdownContainer"] h3 {
         text-align: center;
         margin-bottom: 1.5rem;
+    }
+    .onboarding-cta {
+        max-width: 720px;
+        margin: 0.5rem auto 0 auto;
+        text-align: center;
+    }
+    .onboarding-cta .stButton > button,
+    .onboarding-cta div[data-testid^="baseButton-"] button {
+        width: 100% !important;
+        height: 84px !important;
+        font-size: 1.08rem !important;
+        margin-top: 0.5rem !important;
     }
     .landing-menu .stButton > button,
     .landing-menu div[data-testid^="baseButton-"] button,
@@ -69,6 +89,17 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+st.markdown('<div class="onboarding-cta">', unsafe_allow_html=True)
+st.markdown("### Tester Onboarding")
+st.markdown("Start here before using the tools.")
+if st.button(
+    "Tester Onboarding",
+    key="nav_onboarding",
+    use_container_width=True,
+):
+    _go_to(ONBOARDING_PAGE_PATH)
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown('<div class="landing-menu">', unsafe_allow_html=True)
 
@@ -119,5 +150,5 @@ if st.button(
     key="nav_instructions",
     use_container_width=True,
 ):
-    _go_to("pages/0_How_To_Use_The_Tools.py")
+    _go_to(INSTRUCTIONS_PAGE_PATH)
 st.markdown("</div>", unsafe_allow_html=True)

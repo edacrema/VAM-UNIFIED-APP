@@ -17,6 +17,12 @@ WFP_NAVY = "#003A5D"
 WFP_LIGHT = "#E6F1FA"
 WFP_BG = "#EEF4FA"
 WFP_TEXT = "#0C1E2E"
+INSTRUCTIONS_PAGE_URL = "https://vam-llm-marketaissist-977145147401.europe-west1.run.app/How_To_Use_The_Tools"
+BUG_REPORT_URL = (
+    "https://forms.office.com/Pages/ResponsePage.aspx?id=rtkqRtnXBkK4dHGx4Hl3b3uHHV05qUNErdnrYmKEQzNUNzhUMEFQOEZKNElTQk9XTFFLNjlSNjNEOS4u"
+)
+INSTRUCTIONS_PAGE_PATH = "pages/1_How_To_Use_The_Tools.py"
+ONBOARDING_PAGE_PATH = "pages/0_Tester_Onboarding.py"
 
 
 def apply_wfp_theme() -> None:
@@ -239,6 +245,48 @@ def apply_wfp_theme() -> None:
             margin: 0.5rem auto 1rem auto;
             max-width: 180px;
         }
+        button[aria-label="Tester Onboarding"] {
+            height: 84px !important;
+            font-size: 1.08rem !important;
+            background: #1C92E6 !important;
+            box-shadow: 0 18px 32px rgba(0, 58, 93, 0.28) !important;
+        }
+        button[aria-label="Tester Onboarding"]:hover {
+            background: #007BD6 !important;
+        }
+        .bug-report-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.45rem 1.1rem;
+            border-radius: 999px;
+            background: #2BA8FF;
+            color: #FFFFFF !important;
+            font-weight: 600;
+            text-decoration: none;
+            box-shadow: 0 10px 18px rgba(0, 58, 93, 0.18);
+            white-space: nowrap;
+        }
+        .bug-report-button:hover {
+            background: #1C92E6;
+            color: #FFFFFF !important;
+        }
+        .sidebar-bug-link {
+            display: block;
+            text-align: center;
+            background: #2BA8FF;
+            color: #FFFFFF !important;
+            padding: 0.55rem 1rem;
+            border-radius: 999px;
+            font-weight: 700;
+            text-decoration: none;
+            margin-top: 0.85rem;
+            box-shadow: 0 10px 20px rgba(0, 58, 93, 0.22);
+        }
+        .sidebar-bug-link:hover {
+            background: #1C92E6;
+            color: #FFFFFF !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -263,7 +311,7 @@ def render_instructions_sidebar_button(
     *,
     key: str,
     label: str = "How to use the tools",
-    page_path: str = "pages/0_How_To_Use_The_Tools.py",
+    page_path: str = INSTRUCTIONS_PAGE_PATH,
 ) -> None:
     st.markdown("### Help")
     if st.button(label, key=key, type="secondary", use_container_width=True):
@@ -271,6 +319,42 @@ def render_instructions_sidebar_button(
             st.switch_page(page_path)
             return
         st.info("Use the pages in the left sidebar to access each service.")
+
+
+def render_onboarding_sidebar_button(
+    *,
+    key: str,
+    label: str = "Tester Onboarding",
+    page_path: str = ONBOARDING_PAGE_PATH,
+) -> None:
+    st.markdown("### Start here")
+    if st.button(label, key=key, type="primary", use_container_width=True):
+        if hasattr(st, "switch_page"):
+            st.switch_page(page_path)
+            return
+        st.info("Use the pages in the left sidebar to access each section.")
+
+
+def render_bug_report_header_link(
+    *,
+    label: str = "Report a bug",
+    url: str = BUG_REPORT_URL,
+) -> None:
+    st.markdown(
+        f'<div style="text-align: right;"><a class="bug-report-button" href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_bug_report_sidebar_link(
+    *,
+    label: str = "Report a bug",
+    url: str = BUG_REPORT_URL,
+) -> None:
+    st.markdown(
+        f'<a class="sidebar-bug-link" href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>',
+        unsafe_allow_html=True,
+    )
 
 
 def quote_path_param(value: Any) -> str:

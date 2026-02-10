@@ -2,7 +2,10 @@ import streamlit as st
 
 from streamlit_shared import (
     apply_wfp_theme,
+    render_bug_report_header_link,
+    render_bug_report_sidebar_link,
     render_instructions_sidebar_button,
+    render_onboarding_sidebar_button,
     render_results_tabs,
     render_wfp_sidebar_logo,
     run_async_and_poll,
@@ -14,9 +17,15 @@ apply_wfp_theme()
 
 with st.sidebar:
     render_wfp_sidebar_logo()
+    render_onboarding_sidebar_button(key="sidebar_onboarding_price_validator")
     render_instructions_sidebar_button(key="sidebar_instructions_price_validator")
+    render_bug_report_sidebar_link()
 
-st.title("Price Data Validator")
+title_col, bug_col = st.columns([3, 1])
+with title_col:
+    st.title("Price Data Validator")
+with bug_col:
+    render_bug_report_header_link()
 
 with st.form("price_validator_async"):
     uploaded = st.file_uploader("Price Data (CSV/XLSX)", type=["csv", "xlsx", "xls"], key="price_val_file_async")

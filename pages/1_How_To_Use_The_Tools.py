@@ -5,7 +5,9 @@ import streamlit as st
 
 from streamlit_shared import (
     apply_wfp_theme,
+    render_bug_report_sidebar_link,
     render_instructions_sidebar_button,
+    render_onboarding_sidebar_button,
     render_wfp_sidebar_logo,
 )
 
@@ -14,7 +16,9 @@ apply_wfp_theme()
 
 with st.sidebar:
     render_wfp_sidebar_logo()
+    render_onboarding_sidebar_button(key="sidebar_onboarding_instructions")
     render_instructions_sidebar_button(key="sidebar_instructions_page")
+    render_bug_report_sidebar_link()
 
 
 st.markdown(
