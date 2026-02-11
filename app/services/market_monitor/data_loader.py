@@ -240,7 +240,8 @@ def _normalize_price_data_df(df: pd.DataFrame) -> pd.DataFrame:
         data_type = data_type.replace({"": pd.NA, "aggregate": "aggregated"})
         df["Data Type"] = data_type.str.title()
         before_filter = len(df)
-        df = df[(df["Data Type"].isna()) | (df["Data Type"] == "Aggregated")]
+        allowed_types = {"Aggregated", "Actual"}
+        df = df[(df["Data Type"].isna()) | (df["Data Type"].isin(allowed_types))]
         filtered = before_filter - len(df)
         if filtered:
             logger.info("Filtered %s non-aggregated rows (e.g., Forecast).", filtered)
