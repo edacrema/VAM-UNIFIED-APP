@@ -41,7 +41,7 @@ async def validate_mfi_file(
     Validates a RAW MFI CSV dataset.
     
     The file must be a RAW MFI dataset containing the following required columns:
-    SVY_MOD, SURVEY_TYPE, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR,
+    SVYMOD, MARKETID, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR,
     ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME
     
     Runs 5 validation layers:
@@ -336,9 +336,9 @@ def get_service_info():
                 "required": True,
                 "accept": ".csv",
                 "label": "RAW MFI Dataset",
-                "description": "CSV file containing RAW MFI data. Must include all required columns: "
-                               "SVY_MOD, SURVEY_TYPE, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR, "
-                               "ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME"
+                "description": "CSV file containing RAW MFI data. Must include all required columns (or accepted aliases): {}".format(
+                    ", ".join(sorted(RAW_FILE_INDICATORS))
+                )
             },
             {
                 "name": "survey_type",

@@ -58,7 +58,32 @@ DEFAULT_VALID_LEVELS = {
 
 
 RAW_FILE_INDICATORS = {
-    'SVYMOD', 'MARKETID'
+    'SVYMOD',
+    'MARKETID',
+    'RESPONSEID',
+    'SUBMISSIONDATE',
+    '_UUID',
+    'ENUMERATOR',
+    'ENUMERATORID',
+    'TRADER_NAME',
+    'INTERVIEW_DATE',
+    'DEVICEID',
+    '_SUBMISSION_TIME',
+}
+
+
+RAW_REQUIRED_COLUMN_ALIASES: dict[str, set[str]] = {
+    'SVYMOD': {'SVYMOD', 'SVY_MOD', 'SURVEYTYPE', 'SURVEY_TYPE'},
+    'MARKETID': {'MARKETID', 'MARKET_ID'},
+    'RESPONSEID': {'RESPONSEID', 'RESPONSE_ID', 'INSTANCEID', 'INSTANCE_ID', '_ID'},
+    'SUBMISSIONDATE': {'SUBMISSIONDATE', 'SUBMISSION_DATE'},
+    '_UUID': {'_UUID', 'UUID'},
+    'ENUMERATOR': {'ENUMERATOR'},
+    'ENUMERATORID': {'ENUMERATORID', 'ENUMERATOR_ID'},
+    'TRADER_NAME': {'TRADER_NAME', 'TRADERNAME'},
+    'INTERVIEW_DATE': {'INTERVIEW_DATE', 'INTERVIEWDATE'},
+    'DEVICEID': {'DEVICEID', 'DEVICE_ID'},
+    '_SUBMISSION_TIME': {'_SUBMISSION_TIME', 'SUBMISSION_TIME'},
 }
 
 
@@ -308,13 +333,28 @@ def layer0_file_validation(state: MFIState) -> dict:
             
             file_columns_upper = set(header_cols)
             
-            # Check for ALL required RAW indicators
-            missing_indicators = RAW_FILE_INDICATORS - file_columns_upper
-            found_indicators = RAW_FILE_INDICATORS & file_columns_upper
+            # Check for ALL required RAW indicators (supporting aliases)
+            missing_indicators = []
+            found_indicators = []
+            matched_columns: dict[str, str] = {}
+
+            for required_col in sorted(RAW_FILE_INDICATORS):
+                aliases = RAW_REQUIRED_COLUMN_ALIASES.get(required_col, {required_col})
+                matched = next((a for a in sorted(aliases) if a in file_columns_upper), None)
+                if matched is None:
+                    missing_indicators.append(required_col)
+                else:
+                    found_indicators.append(required_col)
+                    matched_columns[required_col] = matched
             
             metadata['raw_indicators_found'] = sorted(list(found_indicators))
             metadata['raw_indicators_missing'] = sorted(list(missing_indicators))
             metadata['raw_indicators_required'] = sorted(list(RAW_FILE_INDICATORS))
+            metadata['raw_indicators_matched_columns'] = matched_columns
+            metadata['raw_indicators_aliases'] = {
+                k: sorted(list(RAW_REQUIRED_COLUMN_ALIASES.get(k, {k})))
+                for k in sorted(list(RAW_FILE_INDICATORS))
+            }
             
             if missing_indicators:
                 errors.append(ValidationError(
@@ -326,10 +366,15 @@ def layer0_file_validation(state: MFIState) -> dict:
                     details={
                         'missing_columns': sorted(list(missing_indicators)),
                         'found_columns': sorted(list(found_indicators)),
-                        'required_columns': sorted(list(RAW_FILE_INDICATORS))
+                        'required_columns': sorted(list(RAW_FILE_INDICATORS)),
+                        'matched_columns': matched_columns,
+                        'aliases': {
+                            k: sorted(list(RAW_REQUIRED_COLUMN_ALIASES.get(k, {k})))
+                            for k in sorted(list(RAW_FILE_INDICATORS))
+                        },
                     },
-                    suggestion="Ensure the file is a RAW MFI dataset containing ALL required columns: {}".format(
-                        ", ".join(sorted(RAW_FILE_INDICATORS))
+                    suggestion="Ensure the file is a RAW MFI dataset containing ALL required columns (or accepted aliases). Missing: {}".format(
+                        ", ".join(sorted(missing_indicators))
                     )
                 ))
         

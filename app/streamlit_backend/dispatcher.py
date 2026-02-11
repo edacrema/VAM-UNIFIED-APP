@@ -574,9 +574,9 @@ def _mfi_validator_info() -> Dict[str, Any]:
                 "required": True,
                 "accept": ".csv",
                 "label": "RAW MFI Dataset",
-                "description": "CSV file containing RAW MFI data. Must include all required columns: "
-                "SVY_MOD, SURVEY_TYPE, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR, "
-                "ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME",
+                "description": "CSV file containing RAW MFI data. Must include all required columns (or accepted aliases): {}".format(
+                    ", ".join(sorted(RAW_FILE_INDICATORS))
+                ),
             },
             {
                 "name": "survey_type",

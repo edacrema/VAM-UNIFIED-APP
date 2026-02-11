@@ -179,9 +179,17 @@ class MFITemplate:
         """
         # Import here to avoid circular dependency
         raw_indicators = [
-            'SVY_MOD', 'SURVEY_TYPE', 'RESPONSEID', 'SUBMISSIONDATE',
-            '_UUID', 'ENUMERATOR', 'ENUMERATORID', 'TRADER_NAME',
-            'INTERVIEW_DATE', 'DEVICEID', '_SUBMISSION_TIME'
+            'SVYMOD',
+            'MARKETID',
+            'RESPONSEID',
+            'SUBMISSIONDATE',
+            '_UUID',
+            'ENUMERATOR',
+            'ENUMERATORID',
+            'TRADER_NAME',
+            'INTERVIEW_DATE',
+            'DEVICEID',
+            '_SUBMISSION_TIME',
         ]
         
         return cls(
