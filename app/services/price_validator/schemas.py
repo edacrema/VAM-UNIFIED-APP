@@ -136,6 +136,7 @@ class ValidateFileOutput(BaseModel):
     detected_language: Optional[str] = None
     llm_calls: int = 0
     layer_results: List[Dict[str, Any]]
+    column_roles: Optional[Dict[str, List[str]]] = None
     product_classifications: List[Dict[str, Any]] = []
     final_report: str
     success: bool

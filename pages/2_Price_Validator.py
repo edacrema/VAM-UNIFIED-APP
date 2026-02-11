@@ -28,14 +28,14 @@ with bug_col:
     render_bug_report_header_link()
 
 with st.form("price_validator_async"):
-    uploaded = st.file_uploader("Price Data (CSV/XLSX)", type=["csv", "xlsx", "xls"], key="price_val_file_async")
-    template = st.file_uploader("Template (optional)", type=["csv", "xlsx", "xls"], key="price_val_template_async")
+    uploaded = st.file_uploader("Price Data (.xlsx)", type=["xlsx"], key="price_val_file_async")
+    template = st.file_uploader("Template (.xlsx)", type=["xlsx"], key="price_val_template_async")
     submitted = st.form_submit_button("Validate")
 
 if submitted:
     try:
-        if uploaded is None:
-            st.error("Please upload a file")
+        if uploaded is None or template is None:
+            st.error("Please upload both the dataset and template")
         else:
             files = {
                 "file": (
@@ -44,12 +44,11 @@ if submitted:
                     uploaded.type or "application/octet-stream",
                 )
             }
-            if template is not None:
-                files["template"] = (
-                    template.name,
-                    template.getvalue(),
-                    template.type or "application/octet-stream",
-                )
+            files["template"] = (
+                template.name,
+                template.getvalue(),
+                template.type or "application/octet-stream",
+            )
 
             run_id, final_status, result = run_async_and_poll(
                 start_method="POST",
@@ -68,12 +67,16 @@ if submitted:
                 display_run_id = str(run_id or result.get("run_id") or "")
 
                 def _summary() -> None:
-                    cols = st.columns(5)
+                    cols = st.columns(6)
                     cols[0].metric("Run ID", display_run_id)
                     cols[1].metric("Success", str(result.get("success")))
                     cols[2].metric("Country", str(result.get("country") or ""))
                     cols[3].metric("File Type", str(result.get("file_type") or ""))
                     cols[4].metric("LLM Calls", str(result.get("llm_calls") or 0))
+                    cols[5].metric(
+                        "Commodity Suggestions",
+                        str(len(result.get("product_classifications") or [])),
+                    )
 
                     st.subheader("Final Report")
                     st.markdown(result.get("final_report") or "")
@@ -81,7 +84,10 @@ if submitted:
                     with st.expander("Layer Results", expanded=False):
                         st.json(result.get("layer_results"))
 
-                    with st.expander("Product Classifications", expanded=False):
+                    with st.expander("Detected Columns", expanded=False):
+                        st.json(result.get("column_roles"))
+
+                    with st.expander("Commodity Suggestions", expanded=False):
                         st.json(result.get("product_classifications"))
 
                 render_results_tabs(summary=_summary, json_data=result)

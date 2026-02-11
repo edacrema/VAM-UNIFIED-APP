@@ -1,40 +1,43 @@
 """
 Price Validator - Graph
 =======================
-Logica di validazione Price Data con LangGraph (Layer 0-4).
+Validation logic for Price Data XLSX with template comparison and LLM-assisted checks.
 
-Layer:
-- Layer 0: File Validation (deterministic)
-- Layer 1: Structural Parsing (deterministic)
-- Layer 2: Schema Validation (deterministic)
-- Layer 3: Product Classification (deterministic + LLM)
-- Layer 4: Diagnosis & Reporting (LLM)
+Layers:
+- Layer 1: XLSX Validation (file integrity + load)
+- Layer 2: Template Comparison (required, strict order + extra rules)
+- Layer 3: Content Validation (LLM column detection + commodity/market/date checks)
+- Layer 4: Deterministic Report (errors, locations, suggestions)
 """
+
 from __future__ import annotations
 
-import csv
 import io
-import re
 import json
 import logging
+import os
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import TypedDict, Annotated, Literal, Dict, Any, Optional, Callable
-from collections import Counter
 import operator
-
 import pandas as pd
-import chardet
 
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.shared.llm import get_model
+from app.services.market_monitor.data_loader import (
+    _download_gcs_to_file,
+    _get_price_data_cache_path,
+    _get_price_data_gcs_uri,
+    _parse_gcs_uri,
+)
 from .schemas import ValidationError, LayerResult, PriceDataTemplate, Severity
 
 logger = logging.getLogger(__name__)
 
 OnStepCallback = Callable[[str, Dict[str, Any]], None]
-
 
 # ============================================================================
 # WFP PRODUCTS DICTIONARY
@@ -93,130 +96,58 @@ WFP_PRODUCTS = {
     "Pineapple": 161, "Grapes": 196, "Dates": 197,
     "Tea": 187, "Coffee": 183, "Cocoa": 184,
     "Soap": 449, "Soap (bar)": 450, "Soap (washing)": 451,
-    "Water (bottled)": 452, "Water (mineral)": 453
+    "Water (bottled)": 452, "Water (mineral)": 453,
 }
-
-# Lista come stringa per i prompt LLM
-WFP_PRODUCT_LIST_STR = "\n".join([f"{name}\t{id}" for name, id in WFP_PRODUCTS.items()])
-
 
 # ============================================================================
-# EXPECTED COLUMNS AND CONSTANTS
-# ============================================================================
-
-EXPECTED_PRICE_DATA_COLUMNS = {
-    'commodity', 'product', 'item', 'commodity_name', 'product_name',
-    'price', 'value', 'cost', 'unit_price',
-    'market', 'market_name', 'location',
-    'date', 'month', 'year', 'period',
-    'unit', 'unit_of_measure', 'uom',
-    'currency', 'curr',
-    'adm0', 'adm1', 'adm2', 'country', 'region', 'district'
-}
-
-REQUIRED_COLUMN_CATEGORIES = {
-    'product': {'commodity', 'product', 'item', 'commodity_name', 'product_name'},
-    'price': {'price', 'value', 'cost', 'unit_price'},
-    'date': {'date', 'month', 'year', 'period'}
-}
-
-MONTHS_EN = ['january', 'february', 'march', 'april', 'may', 'june',
-             'july', 'august', 'september', 'october', 'november', 'december',
-             'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-
-MONTHS_FR = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin',
-             'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
-             'janv', 'févr', 'avr', 'juil', 'sept', 'déc']
-
-MONTHS_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-             'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
-             'ene', 'feb', 'mar', 'abr', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
-
-MONTHS_AR = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
-             'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر']
-
-ALL_MONTHS = {
-    'en': MONTHS_EN,
-    'fr': MONTHS_FR,
-    'es': MONTHS_ES,
-    'ar': MONTHS_AR
-}
-
-
-# ============================================================================
-# PROMPTS
+# LLM PROMPTS
 # ============================================================================
 
 PROMPTS = {
-    "batch_product_classification": {
-        "system": """You are a food product classification expert for WFP.
-You will classify multiple products at once against the WFP standard product list.
+    "column_detection": {
+        "system": """You are a data quality analyst. Identify which columns contain:
+1) commodity names
+2) market names
+3) date values
 
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Keep "original_name" exactly as provided (it may be non-English). Do not translate it.
-- All other text values (e.g., "matched_name") must be in English.
-
-For each product, find the best matching WFP standard product.
-Consider common variations, typos, abbreviations, and language differences.
-
-Respond ONLY with valid JSON array:
-[
-    {
-        "original_name": "input name",
-        "matched_name": "WFP standard name or null",
-        "product_id": id_or_null,
-        "confidence": 0.0-1.0
-    },
-    ...
-]""",
-        "user": """Classify these products:
-{products_to_classify}
-
-Against this WFP product list:
-{product_list}"""
-    },
-    
-    "diagnosis_report": {
-        "system": """You are a WFP data quality analyst producing a formal technical report for a Price Data dataset validation.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Tone: formal, technical, concise.
-- Do NOT include greetings, salutations, or sign-offs.
-- Do NOT address the reader directly.
-- Do NOT mention being an AI, a model, or the prompt.
-- Do NOT add filler such as "Certainly", "Here is", "I have analyzed".
-- Output ONLY the report text (no markdown code fences).
-
-REPORT STRUCTURE (MANDATORY):
-1) Title
-2) Dataset Metadata
-3) Executive Summary
-4) Critical Issues (Blocking)
-5) Non-Blocking Findings / Warnings
-6) Product Classification Summary
-7) Recommended Actions (prioritized, step-by-step)
-8) Final Checklist
-
-Use only the validation results provided. Do not invent issues not supported by the validation results.""",
-        "user": """Generate a formal technical validation report for this Price Data dataset.
-
-File: {file_name}
-Country: {country}
-Number of products: {num_products}
-Number of markets: {num_markets}
-File type: {file_type}
-Detected language: {detected_language}
-
-VALIDATION RESULTS (by layer):
-{validation_results}
-
-PRODUCT CLASSIFICATIONS:
-{product_classifications}
-"""
-    }
+Return ONLY valid JSON with keys:
+{
+  "commodity_columns": [..],
+  "market_columns": [..],
+  "date_columns": [..]
 }
+
+Rules:
+- Use column names exactly as provided.
+- If unsure, leave the list empty.
+- Do NOT include explanations or extra keys.""",
+        "user": """Columns with samples (JSON):
+{columns_with_samples}
+""",
+    },
+    "commodity_suggestions": {
+        "system": """You are a WFP commodity nomenclature expert.
+Given a list of invalid commodity values, suggest the best matching approved commodity name.
+Only suggest if similarity is high; otherwise return null.
+
+Return ONLY valid JSON array:
+[
+  {"invalid": "...", "suggested": "..."|null, "confidence": 0.0-1.0},
+  ...
+]""",
+        "user": """Invalid commodity values:
+{invalid_values}
+
+Approved commodity list:
+{approved_list}
+""",
+    },
+}
+
+MAX_SAMPLE_VALUES = 3
+MAX_SUGGESTION_BATCH = 20
+MAX_SUGGESTION_VALUES = 80
+SUGGESTION_CONFIDENCE_THRESHOLD = 0.8
 
 
 # ============================================================================
@@ -231,12 +162,10 @@ class PriceDataState(TypedDict):
     template: dict | None
     
     # Computed during execution
-    encoding: str | None
-    delimiter: str | None
     file_type: str | None
     dataframe_json: str | None
-    detected_language: str | None
-    template_df_json: str | None
+    template_columns: list[str] | None
+    column_roles: dict | None
     product_classifications: list
     
     # Results accumulator
@@ -265,25 +194,22 @@ def create_initial_state(
     
     template_dict = None
     if template_path:
-        if template_path.endswith('.xlsx') or template_path.endswith('.xls'):
+        if template_path.endswith('.xlsx'):
             template_dict = PriceDataTemplate.from_excel(template_path).to_dict()
-        elif template_path.endswith('.csv'):
-            template_dict = PriceDataTemplate.from_csv(template_path).to_dict()
     
     return PriceDataState(
         file_path=file_path,
         template_path=template_path,
         template=template_dict,
-        encoding=None,
-        delimiter=None,
         file_type=None,
+
         dataframe_json=None,
-        detected_language=None,
-        template_df_json=None,
+        template_columns=None,
+        column_roles=None,
         product_classifications=[],
         layer_results=[],
         can_continue=True,
-        current_layer=0,
+        current_layer=1,
         llm_calls=0,
         final_report=None,
         file_name=Path(file_path).name,
@@ -294,681 +220,562 @@ def create_initial_state(
 
 
 # ============================================================================
-# LAYER 0: FILE VALIDATION (DETERMINISTIC)
+# HELPERS
 # ============================================================================
 
-def layer0_file_validation(state: PriceDataState) -> dict:
-    """
-    Layer 0: Validazione file base.
-    Supporta sia CSV che Excel.
-    """
-    errors = []
-    warnings = []
-    metadata = {}
-    
+def _trim_value(value: Any) -> str:
+    return str(value).strip()
+
+
+def _parse_llm_json(payload: str) -> Any:
+    cleaned = payload.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
+
+
+def _chunk_list(values: list[str], size: int) -> list[list[str]]:
+    return [values[i:i + size] for i in range(0, len(values), size)]
+
+
+def _df_from_state(state: PriceDataState) -> pd.DataFrame:
+    if not state.get("dataframe_json"):
+        return pd.DataFrame()
+    return pd.read_json(io.StringIO(state["dataframe_json"]), orient="split")
+
+
+def _get_market_names_gcs_uri() -> str | None:
+    uri = (os.getenv("MARKET_NAMES_GCS_URI") or "").strip()
+    if uri:
+        return uri
+    price_uri = _get_price_data_gcs_uri()
+    if not price_uri:
+        return None
+    bucket, obj = _parse_gcs_uri(price_uri)
+    parent = Path(obj).parent.as_posix()
+    if parent == ".":
+        return f"gs://{bucket}/market_names.csv"
+    return f"gs://{bucket}/{parent}/market_names.csv"
+
+
+def _load_market_names() -> set[str]:
+    gcs_uri = _get_market_names_gcs_uri()
+    if not gcs_uri:
+        raise FileNotFoundError("Market names GCS URI not configured")
+
+    destination = _get_price_data_cache_path().with_name("market_names.csv")
+    if not destination.exists():
+        _download_gcs_to_file(gcs_uri, destination)
+
+    df = pd.read_csv(destination)
+    if df.empty:
+        raise ValueError("market_names.csv is empty")
+
+    lower_map = {c.lower().strip(): c for c in df.columns}
+    column = None
+    for candidate in ["market_name", "market", "name"]:
+        if candidate in lower_map:
+            column = lower_map[candidate]
+            break
+    if column is None:
+        column = df.columns[0]
+
+    values = df[column].dropna().astype(str).map(_trim_value)
+    return {value for value in values if value}
+
+
+def _build_affected_rows(indices: list[tuple[int, str]], column: str) -> list[dict]:
+    affected = []
+    for idx, value in indices:
+        affected.append({
+            "row": int(idx) + 2,
+            "column": column,
+            "value": value,
+        })
+        if len(affected) >= 50:
+            break
+    return affected
+
+
+def _detect_columns_with_llm(df: pd.DataFrame) -> tuple[dict, list[ValidationError], int]:
+    errors: list[ValidationError] = []
+    llm_calls = 0
+    if df.empty:
+        errors.append(ValidationError(
+            code="L3.0",
+            severity=Severity.CRITICAL,
+            message="No data available for column detection",
+        ))
+        return {}, errors, llm_calls
+
+    columns_with_samples: dict[str, list[str]] = {}
+    for column in df.columns:
+        samples = (
+            df[column]
+            .dropna()
+            .astype(str)
+            .map(_trim_value)
+            .unique()
+            .tolist()
+        )
+        columns_with_samples[str(column)] = [value for value in samples if value][:MAX_SAMPLE_VALUES]
+
+    model = get_model()
+    try:
+        response = model.invoke([
+            SystemMessage(content=PROMPTS["column_detection"]["system"]),
+            HumanMessage(content=PROMPTS["column_detection"]["user"].format(
+                columns_with_samples=json.dumps(columns_with_samples, ensure_ascii=True)
+            )),
+        ])
+        llm_calls += 1
+        payload = _parse_llm_json(response.content)
+        roles = {
+            "commodity_columns": payload.get("commodity_columns", []) or [],
+            "market_columns": payload.get("market_columns", []) or [],
+            "date_columns": payload.get("date_columns", []) or [],
+        }
+        available = set(df.columns)
+        for key, cols in roles.items():
+            roles[key] = [col for col in cols if col in available]
+        return roles, errors, llm_calls
+    except Exception as exc:
+        logger.warning("Column detection failed: %s", exc)
+        errors.append(ValidationError(
+            code="L3.0",
+            severity=Severity.CRITICAL,
+            message="LLM column detection failed",
+            suggestion="Ensure the dataset has clear commodity, market, and date columns",
+        ))
+        return {}, errors, llm_calls
+
+
+def _suggest_commodities(values: list[str]) -> tuple[list[dict], int]:
+    if not values:
+        return [], 0
+
+    model = get_model()
+    llm_calls = 0
+    suggestions: list[dict] = []
+    approved_list = "\n".join(sorted(WFP_PRODUCTS.keys()))
+
+    for batch in _chunk_list(values, MAX_SUGGESTION_BATCH):
+        try:
+            response = model.invoke([
+                SystemMessage(content=PROMPTS["commodity_suggestions"]["system"]),
+                HumanMessage(content=PROMPTS["commodity_suggestions"]["user"].format(
+                    invalid_values=json.dumps(batch, ensure_ascii=True),
+                    approved_list=approved_list,
+                )),
+            ])
+            llm_calls += 1
+            parsed = _parse_llm_json(response.content)
+            for item in parsed:
+                confidence = float(item.get("confidence", 0))
+                suggested = item.get("suggested")
+                if suggested and confidence >= SUGGESTION_CONFIDENCE_THRESHOLD:
+                    suggestions.append({
+                        "invalid": item.get("invalid"),
+                        "suggested": suggested,
+                        "confidence": confidence,
+                    })
+        except Exception as exc:
+            logger.warning("Commodity suggestion failed: %s", exc)
+            continue
+
+    return suggestions, llm_calls
+
+
+# ============================================================================
+# LAYER 1: XLSX VALIDATION
+# ============================================================================
+
+def layer1_xlsx_validation(state: PriceDataState) -> dict:
+    errors: list[ValidationError] = []
+    warnings: list[ValidationError] = []
+    metadata: dict[str, Any] = {}
+
     file_path = Path(state["file_path"])
-    
-    # F0.0: File exists
     if not file_path.exists():
         errors.append(ValidationError(
-            code="F0.0",
+            code="L1.0",
             severity=Severity.CRITICAL,
-            message="File not found"
+            message="File not found",
         ))
-        result = LayerResult(
-            layer_id=0,
-            layer_name="File Validation",
-            passed=False,
-            can_continue=False,
-            errors=errors,
-            metadata=metadata
-        )
-        return {
-            "layer_results": [result.to_dict()],
-            "can_continue": False,
-            "current_layer": 0
-        }
-    
-    # F0.1: Extension check
-    suffix = file_path.suffix.lower()
-    detected_file_type = None
-    
-    if suffix in ['.xlsx', '.xls']:
-        detected_file_type = "EXCEL"
-        metadata['file_type'] = 'EXCEL'
-    elif suffix == '.csv':
-        detected_file_type = "CSV"
-        metadata['file_type'] = 'CSV'
-    else:
+
+    if file_path.suffix.lower() != ".xlsx":
         errors.append(ValidationError(
-            code="F0.1",
+            code="L1.1",
             severity=Severity.CRITICAL,
-            message="Unsupported file format: {}".format(suffix),
-            suggestion="Use an Excel (.xlsx) or CSV (.csv) file"
+            message="Unsupported file format",
+            suggestion="Upload an Excel .xlsx file",
         ))
-    
-    # F0.2: Binary file detection (for CSV)
-    detected_encoding = None
-    if suffix == '.csv':
-        try:
-            with open(file_path, 'rb') as f:
-                header = f.read(8)
-            
-            if header[:4] == b'PK\x03\x04':  # XLSX
-                errors.append(ValidationError(
-                    code="F0.2",
-                    severity=Severity.CRITICAL,
-                    message="File is Excel (.xlsx), not CSV",
-                    suggestion="Rename to .xlsx or export as CSV"
-                ))
-            elif header[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':  # XLS
-                errors.append(ValidationError(
-                    code="F0.2",
-                    severity=Severity.CRITICAL,
-                    message="File is Excel (.xls), not CSV",
-                    suggestion="Rename to .xls or export as CSV"
-                ))
-        except Exception as e:
-            logger.warning("Binary detection failed: {}".format(e))
-        
-        # F0.3: Encoding detection
-        try:
-            with open(file_path, 'rb') as f:
-                raw = f.read(100000)
-            
-            if raw.startswith(b'\xef\xbb\xbf'):
-                detected_encoding = 'utf-8-sig'
-                metadata['bom_detected'] = 'UTF-8 BOM'
-            elif raw.startswith(b'\xff\xfe'):
-                detected_encoding = 'utf-16-le'
-                metadata['bom_detected'] = 'UTF-16 LE BOM'
-            else:
-                result = chardet.detect(raw)
-                detected_encoding = result.get('encoding', 'utf-8')
-                metadata['chardet_confidence'] = result.get('confidence', 0)
-            
-            metadata['detected_encoding'] = detected_encoding
-            
-        except Exception as e:
-            warnings.append(ValidationError(
-                code="F0.3",
-                severity=Severity.WARNING,
-                message="Unable to detect encoding: {}".format(e)
-            ))
-            detected_encoding = 'utf-8'
-    
-    has_critical = any(e.severity == Severity.CRITICAL for e in errors)
-    
-    result = LayerResult(
-        layer_id=0,
-        layer_name="File Validation",
-        passed=len(errors) == 0,
-        can_continue=not has_critical,
-        errors=errors,
-        warnings=warnings,
-        metadata=metadata
-    )
-    
-    return {
-        "layer_results": [result.to_dict()],
-        "can_continue": not has_critical,
-        "current_layer": 0,
-        "encoding": detected_encoding,
-        "file_type": detected_file_type
-    }
 
-
-# ============================================================================
-# LAYER 1: STRUCTURAL PARSING (DETERMINISTIC)
-# ============================================================================
-
-def detect_delimiter_robust(content: str) -> tuple[str, dict]:
-    """Rileva delimiter contando occorrenze fuori dalle virgolette."""
-    lines = content.split('\n')[:20]
-    candidates = [',', ';', '\t', '|']
-    scores = {}
-    
-    for delim in candidates:
-        counts = []
-        for line in lines:
-            if not line.strip():
-                continue
-            in_quotes = False
-            count = 0
-            for char in line:
-                if char == '"':
-                    in_quotes = not in_quotes
-                elif char == delim and not in_quotes:
-                    count += 1
-            counts.append(count)
-        
-        if counts:
-            mean_count = sum(counts) / len(counts)
-            variance = sum((c - mean_count) ** 2 for c in counts) / len(counts) if len(counts) > 1 else 0
-            scores[delim] = {
-                'mean': mean_count,
-                'variance': variance,
-                'score': mean_count / (variance + 0.1) if mean_count > 0 else 0
-            }
-    
-    best_delim = max(scores.keys(), key=lambda d: scores[d]['score']) if scores else ','
-    return best_delim, scores
-
-
-def layer1_structural_parsing(state: PriceDataState) -> dict:
-    """
-    Layer 1: Parsing strutturale.
-    Carica il file e rileva la struttura.
-    """
-    errors = []
-    warnings = []
-    metadata = {}
-    
-    file_path = state["file_path"]
-    file_type = state["file_type"]
-    encoding = state["encoding"] or 'utf-8'
-    
     df = None
-    delimiter = None
-    
-    # Load based on file type
-    if file_type == "EXCEL":
+    if not any(err.severity == Severity.CRITICAL for err in errors):
         try:
             df = pd.read_excel(file_path)
-            metadata['sheets_loaded'] = 1
-        except Exception as e:
+            metadata["total_rows"] = len(df)
+            metadata["total_columns"] = len(df.columns)
+            metadata["columns"] = df.columns.tolist()
+        except Exception as exc:
             errors.append(ValidationError(
-                code="S1.0",
+                code="L1.2",
                 severity=Severity.CRITICAL,
-                message="Unable to read Excel file: {}".format(e)
+                message=f"Unable to read Excel file: {exc}",
             ))
-    
-    elif file_type == "CSV":
-        try:
-            with open(file_path, 'r', encoding=encoding, errors='replace') as f:
-                content = f.read()
-            
-            # Detect delimiter
-            delimiter, delim_scores = detect_delimiter_robust(content)
-            metadata['detected_delimiter'] = delimiter
-            metadata['delimiter_scores'] = {k: v['score'] for k, v in delim_scores.items()}
-            
-            if delimiter == ';':
-                warnings.append(ValidationError(
-                    code="S1.1",
-                    severity=Severity.WARNING,
-                    message="Detected ';' delimiter (common with French locale settings)",
-                    suggestion="Use ',' as the standard delimiter"
-                ))
-            
-            # Check for broken rows
-            broken_rows = []
-            buffer = io.StringIO(content)
-            reader = csv.reader(buffer, delimiter=delimiter)
-            header = next(reader)
-            expected_cols = len(header)
-            metadata['expected_columns'] = expected_cols
-            metadata['header'] = header[:10]
-            
-            for i, row in enumerate(reader, start=2):
-                if len(row) != expected_cols:
-                    broken_rows.append({
-                        'row_number': i,
-                        'expected': expected_cols,
-                        'actual': len(row)
-                    })
-                    if len(broken_rows) >= 10:
-                        break
-            
-            if broken_rows:
-                errors.append(ValidationError(
-                    code="S1.2",
-                    severity=Severity.CRITICAL,
-                    message="Detected {}+ rows with an incorrect number of columns".format(len(broken_rows)),
-                    details={'broken_rows': broken_rows},
-                    suggestion="Check for line breaks within quoted cells"
-                ))
-            
-            # Load DataFrame
-            df = pd.read_csv(file_path, delimiter=delimiter, encoding=encoding, on_bad_lines='warn')
-            
-        except Exception as e:
-            errors.append(ValidationError(
-                code="S1.0",
-                severity=Severity.CRITICAL,
-                message="Unable to read CSV file: {}".format(e)
-            ))
-    
-    if df is not None:
-        metadata['total_rows'] = len(df)
-        metadata['total_columns'] = len(df.columns)
-        metadata['columns'] = df.columns.tolist()[:20]
-    
-    has_critical = any(e.severity == Severity.CRITICAL for e in errors)
-    
+
+    has_critical = any(err.severity == Severity.CRITICAL for err in errors)
     result = LayerResult(
         layer_id=1,
-        layer_name="Structural Parsing",
-        passed=len(errors) == 0,
+        layer_name="XLSX Validation",
+        passed=not errors,
         can_continue=not has_critical and df is not None,
         errors=errors,
         warnings=warnings,
-        metadata=metadata
+        metadata=metadata,
     )
-    
-    # Serialize DataFrame
-    df_json = df.to_json(orient='split', date_format='iso') if df is not None else None
-    
+
     return {
         "layer_results": [result.to_dict()],
         "can_continue": not has_critical and df is not None,
         "current_layer": 1,
-        "delimiter": delimiter,
-        "dataframe_json": df_json
+        "file_type": "XLSX" if not has_critical else None,
+        "dataframe_json": df.to_json(orient="split", date_format="iso") if df is not None else None,
     }
 
 
 # ============================================================================
-# LAYER 2: SCHEMA VALIDATION
+# LAYER 2: TEMPLATE COMPARISON (REQUIRED)
 # ============================================================================
 
-def detect_language_from_months(df: pd.DataFrame) -> str | None:
-    """Rileva la lingua dai nomi dei mesi nelle colonne stringa."""
-    string_cols = df.select_dtypes(include='object')
-    
-    all_values = []
-    for col in string_cols.columns:
-        values = string_cols[col].dropna().astype(str).str.lower().unique()
-        all_values.extend(values[:100])
-    
-    all_values_set = set(all_values)
-    
-    lang_scores = {}
-    for lang, months in ALL_MONTHS.items():
-        matches = len(all_values_set.intersection(set(m.lower() for m in months)))
-        if matches > 0:
-            lang_scores[lang] = matches
-    
-    if lang_scores:
-        return max(lang_scores.keys(), key=lambda k: lang_scores[k])
-    return None
+def layer2_template_comparison(state: PriceDataState) -> dict:
+    errors: list[ValidationError] = []
+    warnings: list[ValidationError] = []
+    metadata: dict[str, Any] = {}
 
-
-def layer2_schema_validation(state: PriceDataState) -> dict:
-    """
-    Layer 2: Validazione schema.
-    Verifica colonne e formati.
-    """
-    errors = []
-    warnings = []
-    metadata = {}
-    llm_calls = 0
-    
-    df = pd.read_json(io.StringIO(state["dataframe_json"]), orient='split')
-    df_columns = df.columns.tolist()
-    df_cols_lower = [c.lower().strip() for c in df_columns]
-    df_set = set(df_cols_lower)
-    
-    # SC2.1: Check required column categories
-    missing_categories = []
-    for category, expected_cols in REQUIRED_COLUMN_CATEGORIES.items():
-        if not df_set.intersection(expected_cols):
-            missing_categories.append(category)
-    
-    if missing_categories:
+    df = _df_from_state(state)
+    if df.empty:
         errors.append(ValidationError(
-            code="SC2.1",
-            severity=Severity.ERROR,
-            message="Missing required column categories: {}".format(missing_categories),
-            details={'missing': missing_categories},
-            suggestion="Add at least one column for: {}".format(', '.join(missing_categories))
-        ))
-    
-    # SC2.2: Duplicate columns
-    col_counter = Counter(df_cols_lower)
-    duplicates = {col: count for col, count in col_counter.items() if count > 1}
-    
-    if duplicates:
-        errors.append(ValidationError(
-            code="SC2.2",
+            code="L2.0",
             severity=Severity.CRITICAL,
-            message="Duplicate columns: {}".format(list(duplicates.keys())),
-            details={'duplicates': duplicates}
+            message="Dataset is empty or unreadable",
         ))
-    
-    # SC2.3: Language detection from months
-    detected_language = detect_language_from_months(df)
-    metadata['detected_language'] = detected_language
-    
-    if detected_language and detected_language != 'en':
-        warnings.append(ValidationError(
-            code="SC2.3",
-            severity=Severity.WARNING,
-            message="Detected language: {} (not English)".format(detected_language.upper()),
-            details={'language': detected_language},
-            suggestion="Standardize month names to English (January, February, ...)"
+
+    if not state.get("template") or not state["template"].get("columns"):
+        errors.append(ValidationError(
+            code="L2.0",
+            severity=Severity.CRITICAL,
+            message="Template is required for validation",
+            suggestion="Upload the official template XLSX",
         ))
-    
-    # SC2.4: Template comparison if provided
-    if state["template"]:
-        template_cols = [c.lower() for c in state["template"].get('columns', [])]
-        template_set = set(template_cols)
-        
-        missing_from_template = template_set - df_set
-        extra_in_submitted = df_set - template_set
-        
-        if missing_from_template:
+
+    template_cols = [str(col) for col in state.get("template", {}).get("columns", [])]
+    template_trimmed = [_trim_value(col) for col in template_cols]
+    df_cols = [str(col) for col in df.columns]
+    df_trimmed = [_trim_value(col) for col in df_cols]
+
+    metadata["template_columns"] = template_trimmed
+    metadata["submitted_columns"] = df_trimmed
+
+    template_set = set(template_trimmed)
+    df_set = set(df_trimmed)
+
+    missing_columns = [col for col in template_trimmed if col not in df_set]
+    if missing_columns:
+        errors.append(ValidationError(
+            code="L2.1",
+            severity=Severity.CRITICAL,
+            message="Missing columns compared to template",
+            details={"missing_columns": missing_columns},
+            suggestion="Add the missing template columns in the correct order",
+        ))
+
+    if template_set and df_trimmed:
+        present_required = [col for col in df_trimmed if col in template_set]
+        if present_required != template_trimmed:
             errors.append(ValidationError(
-                code="SC2.4a",
-                severity=Severity.ERROR,
-                message="Columns missing compared to template: {}".format(list(missing_from_template)[:10])
+                code="L2.2",
+                severity=Severity.CRITICAL,
+                message="Column order does not match template",
+                details={"expected_order": template_trimmed},
+                suggestion="Reorder columns to match the template exactly",
             ))
-        
-        if extra_in_submitted:
-            warnings.append(ValidationError(
-                code="SC2.4b",
-                severity=Severity.INFO,
-                message="Extra columns not in template: {}".format(list(extra_in_submitted)[:10])
-            ))
-        
-        # Check column order
-        common_cols = [c for c in df_cols_lower if c in template_set]
-        expected_order = [c for c in template_cols if c in df_set]
-        
-        if common_cols != expected_order:
-            warnings.append(ValidationError(
-                code="SC2.4c",
-                severity=Severity.INFO,
-                message="Column order differs from template"
-            ))
-    
-    # Extract metadata
-    cols_map = {c.lower(): c for c in df_columns}
-    
-    # Try to find country
-    country = None
-    for col_name in ['country', 'adm0', 'adm0name']:
-        if col_name in cols_map and len(df) > 0:
-            country = str(df[cols_map[col_name]].iloc[0])
-            break
-    
-    # Count products and markets
-    num_products = None
-    num_markets = None
-    
-    for col_name in ['commodity', 'product', 'item', 'commodity_name', 'product_name']:
-        if col_name in cols_map:
-            num_products = df[cols_map[col_name]].nunique()
-            break
-    
-    for col_name in ['market', 'market_name', 'location']:
-        if col_name in cols_map:
-            num_markets = df[cols_map[col_name]].nunique()
-            break
-    
-    metadata['num_products'] = num_products
-    metadata['num_markets'] = num_markets
-    metadata['total_columns'] = len(df_columns)
-    
-    has_critical = any(e.severity == Severity.CRITICAL for e in errors)
-    
+
+        extra_columns = [col for col in df_trimmed if col not in template_set]
+        if extra_columns:
+            required_indices = [i for i, col in enumerate(df_trimmed) if col in template_set]
+            last_required_index = max(required_indices) if required_indices else -1
+            inserted_extras = [
+                df_trimmed[i]
+                for i in range(0, last_required_index + 1)
+                if df_trimmed[i] not in template_set
+            ]
+            appended_extras = [
+                df_trimmed[i]
+                for i in range(last_required_index + 1, len(df_trimmed))
+                if df_trimmed[i] not in template_set
+            ]
+            if inserted_extras:
+                errors.append(ValidationError(
+                    code="L2.3",
+                    severity=Severity.CRITICAL,
+                    message="Extra columns inserted within template columns",
+                    details={"extra_columns": inserted_extras},
+                    suggestion="Move extra columns after all template columns",
+                ))
+            if appended_extras:
+                metadata["appended_extra_columns"] = appended_extras
+
+    has_critical = any(err.severity == Severity.CRITICAL for err in errors)
     result = LayerResult(
         layer_id=2,
-        layer_name="Schema Validation",
-        passed=len(errors) == 0,
+        layer_name="Template Comparison",
+        passed=not errors,
         can_continue=not has_critical,
         errors=errors,
         warnings=warnings,
-        metadata=metadata
+        metadata=metadata,
     )
-    
+
     return {
         "layer_results": [result.to_dict()],
         "can_continue": not has_critical,
         "current_layer": 2,
-        "llm_calls": state["llm_calls"] + llm_calls,
-        "detected_language": detected_language,
-        "country": country,
-        "num_products": num_products,
-        "num_markets": num_markets
+        "template_columns": template_trimmed,
     }
 
 
 # ============================================================================
-# LAYER 3: PRODUCT CLASSIFICATION
+# LAYER 3: CONTENT VALIDATION
 # ============================================================================
 
-def exact_match_product(product_name: str) -> dict | None:
-    """Prova matching esatto (case-insensitive) prima di usare LLM."""
-    product_lower = product_name.lower().strip()
-    
-    for wfp_name, wfp_id in WFP_PRODUCTS.items():
-        if wfp_name.lower() == product_lower:
-            return {
-                "original_name": product_name,
-                "matched_name": wfp_name,
-                "product_id": wfp_id,
-                "confidence": 1.0,
-                "method": "exact_match"
-            }
-    
-    # Try partial match
-    for wfp_name, wfp_id in WFP_PRODUCTS.items():
-        if product_lower in wfp_name.lower() or wfp_name.lower() in product_lower:
-            return {
-                "original_name": product_name,
-                "matched_name": wfp_name,
-                "product_id": wfp_id,
-                "confidence": 0.9,
-                "method": "partial_match"
-            }
-    
-    return None
-
-
-def layer3_product_classification(state: PriceDataState) -> dict:
-    """
-    Layer 3: Classificazione prodotti.
-    Prima prova matching deterministico, poi usa LLM per prodotti non trovati.
-    """
-    errors = []
-    warnings = []
-    metadata = {}
+def layer3_content_validation(state: PriceDataState) -> dict:
+    errors: list[ValidationError] = []
+    warnings: list[ValidationError] = []
+    metadata: dict[str, Any] = {}
     llm_calls = 0
-    
-    df = pd.read_json(io.StringIO(state["dataframe_json"]), orient='split')
-    cols_map = {c.lower(): c for c in df.columns}
-    
-    # Find product column
-    product_col = None
-    for col_name in ['commodity', 'product', 'item', 'commodity_name', 'product_name']:
-        if col_name in cols_map:
-            product_col = cols_map[col_name]
-            break
-    
-    if not product_col:
-        warnings.append(ValidationError(
-            code="PC3.0",
-            severity=Severity.WARNING,
-            message="Product column not found; classification skipped"
+
+    df = _df_from_state(state)
+    if df.empty:
+        errors.append(ValidationError(
+            code="L3.0",
+            severity=Severity.CRITICAL,
+            message="Dataset is empty; cannot validate contents",
         ))
         result = LayerResult(
             layer_id=3,
-            layer_name="Product Classification",
-            passed=True,
-            can_continue=True,
+            layer_name="Content Validation",
+            passed=False,
+            can_continue=False,
+            errors=errors,
             warnings=warnings,
-            metadata=metadata
+            metadata=metadata,
         )
         return {
             "layer_results": [result.to_dict()],
-            "can_continue": True,
+            "can_continue": False,
             "current_layer": 3,
-            "product_classifications": []
+            "llm_calls": state["llm_calls"],
         }
-    
-    # Get unique products
-    unique_products = df[product_col].dropna().unique().tolist()
-    metadata['total_unique_products'] = len(unique_products)
-    
-    classifications = []
-    unmatched = []
-    
-    # First pass: deterministic matching
-    for product in unique_products:
-        match = exact_match_product(str(product))
-        if match:
-            classifications.append(match)
-        else:
-            unmatched.append(str(product))
-    
-    metadata['deterministic_matches'] = len(classifications)
-    metadata['unmatched_for_llm'] = len(unmatched)
-    
-    # Second pass: LLM for unmatched (batch if many)
-    if unmatched and len(unmatched) <= 20:
-        model = get_model()
-        
-        try:
-            response = model.invoke([
-                SystemMessage(content=PROMPTS["batch_product_classification"]["system"]),
-                HumanMessage(content=PROMPTS["batch_product_classification"]["user"].format(
-                    products_to_classify="\n".join(unmatched),
-                    product_list=WFP_PRODUCT_LIST_STR[:8000]
-                ))
-            ])
-            llm_calls += 1
-            
-            result_text = response.content.strip()
-            if result_text.startswith('```'):
-                result_text = re.sub(r'^```json?\s*', '', result_text)
-                result_text = re.sub(r'\s*```$', '', result_text)
-            
-            llm_results = json.loads(result_text)
-            
-            for item in llm_results:
-                item['method'] = 'llm'
-                classifications.append(item)
-                
-        except Exception as e:
-            logger.warning("LLM classification failed: {}".format(e))
-            warnings.append(ValidationError(
-                code="PC3.1",
-                severity=Severity.WARNING,
-                message="LLM classification failed for {} products".format(len(unmatched))
-            ))
-    
-    elif len(unmatched) > 20:
-        warnings.append(ValidationError(
-            code="PC3.2",
-            severity=Severity.INFO,
-            message="{} products not classified (too many for LLM batch)".format(len(unmatched))
+
+    column_roles, role_errors, role_llm_calls = _detect_columns_with_llm(df)
+    llm_calls += role_llm_calls
+    errors.extend(role_errors)
+
+    commodity_columns = column_roles.get("commodity_columns", []) if column_roles else []
+    market_columns = column_roles.get("market_columns", []) if column_roles else []
+    date_columns = column_roles.get("date_columns", []) if column_roles else []
+
+    metadata["column_roles"] = column_roles
+
+    if not commodity_columns:
+        errors.append(ValidationError(
+            code="L3.1",
+            severity=Severity.CRITICAL,
+            message="Commodity column not detected",
+            suggestion="Ensure the commodity column uses clear headers",
         ))
-    
-    # Count unmatched (confidence < 0.5 or null)
-    low_confidence = [c for c in classifications if c.get('confidence', 0) < 0.5 or c.get('matched_name') is None]
-    
-    if low_confidence:
-        warnings.append(ValidationError(
-            code="PC3.3",
-            severity=Severity.WARNING,
-            message="{} products with low-confidence match or not found".format(len(low_confidence)),
-            details={'products': [c['original_name'] for c in low_confidence[:10]]}
+    if not market_columns:
+        errors.append(ValidationError(
+            code="L3.2",
+            severity=Severity.CRITICAL,
+            message="Market column not detected",
+            suggestion="Ensure the market column uses clear headers",
         ))
-    
-    metadata['classifications_completed'] = len(classifications)
-    metadata['high_confidence'] = len([c for c in classifications if c.get('confidence', 0) >= 0.8])
-    
+    if not date_columns:
+        errors.append(ValidationError(
+            code="L3.3",
+            severity=Severity.CRITICAL,
+            message="Date column not detected",
+            suggestion="Ensure the date column uses clear headers",
+        ))
+
+    approved_products = set(WFP_PRODUCTS.keys())
+    invalid_commodities: list[tuple[int, str]] = []
+    for column in commodity_columns:
+        series = df[column]
+        for idx, value in series.items():
+            if pd.isna(value):
+                continue
+            trimmed = _trim_value(value)
+            if trimmed not in approved_products:
+                invalid_commodities.append((idx, trimmed))
+
+    commodity_suggestions: list[dict] = []
+    if invalid_commodities:
+        unique_invalid = list(dict.fromkeys([val for _, val in invalid_commodities]))
+        if len(unique_invalid) <= MAX_SUGGESTION_VALUES:
+            commodity_suggestions, suggest_llm_calls = _suggest_commodities(unique_invalid)
+            llm_calls += suggest_llm_calls
+
+        errors.append(ValidationError(
+            code="L3.4",
+            severity=Severity.CRITICAL,
+            message="Invalid commodity names detected",
+            details={
+                "invalid_values": unique_invalid[:20],
+                "suggestions": commodity_suggestions,
+            },
+            suggestion="Replace invalid commodities with approved names",
+            affected_rows=_build_affected_rows(invalid_commodities, commodity_columns[0]),
+        ))
+
+    market_names: set[str] = set()
+    try:
+        market_names = _load_market_names()
+    except Exception as exc:
+        errors.append(ValidationError(
+            code="L3.5",
+            severity=Severity.CRITICAL,
+            message=f"Unable to load market names: {exc}",
+            suggestion="Ensure market_names.csv is available in the GCS bucket",
+        ))
+
+    invalid_markets: list[tuple[int, str]] = []
+    if market_names and market_columns:
+        for column in market_columns:
+            series = df[column]
+            for idx, value in series.items():
+                if pd.isna(value):
+                    continue
+                trimmed = _trim_value(value)
+                if trimmed not in market_names:
+                    invalid_markets.append((idx, trimmed))
+
+    if invalid_markets:
+        unique_invalid_markets = list(dict.fromkeys([val for _, val in invalid_markets]))
+        errors.append(ValidationError(
+            code="L3.6",
+            severity=Severity.CRITICAL,
+            message="Invalid market names detected",
+            details={"invalid_values": unique_invalid_markets[:20]},
+            suggestion="Update market names to match the official list",
+            affected_rows=_build_affected_rows(invalid_markets, market_columns[0]),
+        ))
+
+    invalid_dates: list[tuple[int, str]] = []
+    now = datetime.utcnow()
+    if date_columns:
+        for column in date_columns:
+            parsed = pd.to_datetime(df[column], errors="coerce")
+            for idx, value in parsed.items():
+                if pd.isna(value):
+                    continue
+                if value.to_pydatetime() > now:
+                    original = df.at[idx, column]
+                    invalid_dates.append((idx, _trim_value(original)))
+
+    if invalid_dates:
+        errors.append(ValidationError(
+            code="L3.7",
+            severity=Severity.CRITICAL,
+            message="Future dates detected",
+            details={"examples": [val for _, val in invalid_dates[:10]]},
+            suggestion="Remove or correct future dates",
+            affected_rows=_build_affected_rows(invalid_dates, date_columns[0] if date_columns else "date"),
+        ))
+
+    if commodity_columns:
+        metadata["num_products"] = df[commodity_columns[0]].nunique(dropna=True)
+    if market_columns:
+        metadata["num_markets"] = df[market_columns[0]].nunique(dropna=True)
+
+    has_critical = any(err.severity == Severity.CRITICAL for err in errors)
     result = LayerResult(
         layer_id=3,
-        layer_name="Product Classification",
-        passed=True,
-        can_continue=True,
+        layer_name="Content Validation",
+        passed=not errors,
+        can_continue=not has_critical,
         errors=errors,
         warnings=warnings,
-        metadata=metadata
+        metadata=metadata,
     )
-    
+
     return {
         "layer_results": [result.to_dict()],
-        "can_continue": True,
+        "can_continue": not has_critical,
         "current_layer": 3,
         "llm_calls": state["llm_calls"] + llm_calls,
-        "product_classifications": classifications
+        "column_roles": column_roles,
+        "product_classifications": commodity_suggestions,
+        "num_products": metadata.get("num_products"),
+        "num_markets": metadata.get("num_markets"),
     }
 
-
 # ============================================================================
-# LAYER 4: DIAGNOSIS REPORT (LLM)
+# LAYER 4: DETERMINISTIC REPORT
 # ============================================================================
 
-def layer4_generate_report(state: PriceDataState) -> dict:
-    """
-    Layer 4: Genera report diagnostico finale con LLM.
-    """
-    model = get_model()
-    
-    # Format validation results
-    validation_summary = []
-    for layer_result in state["layer_results"]:
-        layer_summary = f"\n### Layer {layer_result['layer_id']}: {layer_result['layer_name']}\n"
-        layer_summary += f"Passed: {layer_result['passed']}\n"
-        
-        if layer_result['errors']:
-            layer_summary += "Errors:\n"
-            for err in layer_result['errors']:
-                layer_summary += f"  - [{err['code']}] {err['severity']}: {err['message']}\n"
-        
-        if layer_result['warnings']:
-            layer_summary += "Warnings:\n"
-            for warn in layer_result['warnings']:
-                layer_summary += f"  - [{warn['code']}] {warn['severity']}: {warn['message']}\n"
-        
-        if layer_result.get('metadata'):
-            layer_summary += f"Metadata: {json.dumps(layer_result['metadata'], indent=2, default=str)}\n"
-        
-        validation_summary.append(layer_summary)
-    
-    # Format product classifications
-    classifications = state.get("product_classifications", [])
-    classifications_summary = ""
-    if classifications:
-        high_conf = [c for c in classifications if c.get('confidence', 0) >= 0.8]
-        low_conf = [c for c in classifications if c.get('confidence', 0) < 0.8]
-        
-        classifications_summary = f"""Total products: {len(classifications)}
-High confidence matches (>=0.8): {len(high_conf)}
-Low confidence matches (<0.8): {len(low_conf)}
+def layer4_deterministic_report(state: PriceDataState) -> dict:
+    report_lines = [
+        "Price Data Validation Report",
+        "",
+        f"File: {state.get('file_name')}",
+        f"File Type: {state.get('file_type') or 'Unknown'}",
+        "",
+        "Errors:",
+    ]
 
-Unrecognized products examples:
-"""
-        for c in low_conf[:5]:
-            classifications_summary += f"  - '{c.get('original_name')}' → '{c.get('matched_name', 'N/A')}' (conf: {c.get('confidence', 0):.2f})\n"
-    
-    try:
-        response = model.invoke([
-            SystemMessage(content=PROMPTS["diagnosis_report"]["system"]),
-            HumanMessage(content=PROMPTS["diagnosis_report"]["user"].format(
-                file_name=state["file_name"],
-                country=state["country"] or "Not detected",
-                num_products=state["num_products"] or "N/A",
-                num_markets=state["num_markets"] or "N/A",
-                file_type=state["file_type"] or "Not detected",
-                detected_language=state["detected_language"] or "English (default)",
-                validation_results="\n".join(validation_summary),
-                product_classifications=classifications_summary
-            ))
-        ])
-        
-        final_report = response.content
-    except Exception as e:
-        logger.error(f"Report generation failed: {e}")
-        final_report = f"Error generating report: {e}\n\nRaw results:\n{json.dumps(state['layer_results'], indent=2)}"
-    
+    errors_found = False
+    warnings_found = False
+
+    for layer in state.get("layer_results", []):
+        layer_label = f"Layer {layer['layer_id']} - {layer['layer_name']}"
+        for err in layer.get("errors", []) or []:
+            errors_found = True
+            details = err.get("details") or {}
+            suggestion = err.get("suggestion") or "Review the dataset and template."
+            affected_rows = err.get("affected_rows") or []
+            location = ""
+            if affected_rows:
+                rows = ", ".join(
+                    [f"{item.get('column')}@{item.get('row')}" for item in affected_rows[:5]]
+                )
+                location = f" (locations: {rows})"
+            report_lines.append(
+                f"- [{err.get('code')}] {layer_label}: {err.get('message')}{location}"
+            )
+            if details:
+                report_lines.append(f"  Details: {json.dumps(details, ensure_ascii=True)}")
+            report_lines.append(f"  Suggestion: {suggestion}")
+
+        for warn in layer.get("warnings", []) or []:
+            warnings_found = True
+            report_lines.append(
+                f"- [WARN {warn.get('code')}] {layer_label}: {warn.get('message')}"
+            )
+
+    if not errors_found:
+        report_lines.append("- No errors detected.")
+
+    if warnings_found:
+        report_lines.append("\nWarnings were detected. Review them if needed.")
+
     return {
-        "final_report": final_report,
-        "llm_calls": state["llm_calls"] + 1,
-        "current_layer": 4
+        "final_report": "\n".join(report_lines),
+        "current_layer": 4,
     }
 
 
@@ -992,7 +799,7 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     Costruisce il grafo LangGraph per Price Data troubleshooting.
     
     Struttura:
-        L0 → [route] → L1 → [route] → L2 → [route] → L3 → report → END
+        L1 → [route] → L2 → [route] → L3 → report → END
     """
     def wrap_node(node_name: str, fn):
         def wrapped(state: PriceDataState):
@@ -1005,22 +812,15 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph = StateGraph(PriceDataState)
     
     # Add nodes
-    graph.add_node("layer0", wrap_node("layer0", layer0_file_validation))
-    graph.add_node("layer1", wrap_node("layer1", layer1_structural_parsing))
-    graph.add_node("layer2", wrap_node("layer2", layer2_schema_validation))
-    graph.add_node("layer3", wrap_node("layer3", layer3_product_classification))
-    graph.add_node("report", wrap_node("report", layer4_generate_report))
+    graph.add_node("layer1", wrap_node("layer1", layer1_xlsx_validation))
+    graph.add_node("layer2", wrap_node("layer2", layer2_template_comparison))
+    graph.add_node("layer3", wrap_node("layer3", layer3_content_validation))
+    graph.add_node("report", wrap_node("report", layer4_deterministic_report))
     
     # Set entry point
-    graph.set_entry_point("layer0")
+    graph.set_entry_point("layer1")
     
     # Add conditional edges for early exit
-    graph.add_conditional_edges(
-        "layer0",
-        route_after_layer,
-        {"continue": "layer1", "report": "report"}
-    )
-    
     graph.add_conditional_edges(
         "layer1",
         route_after_layer,
@@ -1055,8 +855,8 @@ def run_troubleshooting(
     Entry point per validazione Price Data.
     
     Args:
-        file_path: Path al file Excel o CSV
-        template_path: Path al template corretto (opzionale)
+        file_path: Path al file Excel (.xlsx)
+        template_path: Path al template corretto (obbligatorio)
     
     Returns:
         Stato finale con report

@@ -682,7 +682,7 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
 
-    valid_extensions = [".csv", ".xlsx", ".xls"]
+    valid_extensions = [".xlsx"]
     file_ext = os.path.splitext(upload.filename)[1].lower()
     if file_ext not in valid_extensions:
         raise LocalHTTPException(400, f"Unsupported file format. Use: {', '.join(valid_extensions)}")
@@ -693,9 +693,14 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
         tmp_path = _save_temp_file(upload.content, file_ext)
 
         template_upload = _extract_file(files, "template")
-        if template_upload is not None:
-            template_ext = os.path.splitext(template_upload.filename)[1].lower()
-            template_path = _save_temp_file(template_upload.content, template_ext)
+        if template_upload is None or not template_upload.filename:
+            raise LocalHTTPException(400, "Template file is required")
+
+        template_ext = os.path.splitext(template_upload.filename)[1].lower()
+        if template_ext != ".xlsx":
+            raise LocalHTTPException(400, "Template must be an .xlsx file")
+
+        template_path = _save_temp_file(template_upload.content, template_ext)
 
         result = run_price_troubleshooting(file_path=tmp_path, template_path=template_path)
 
@@ -711,6 +716,7 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
             "detected_language": result.get("detected_language"),
             "llm_calls": result.get("llm_calls", 0),
             "layer_results": layer_results,
+            "column_roles": result.get("column_roles"),
             "product_classifications": result.get("product_classifications", []),
             "final_report": result.get("final_report", ""),
             "success": success,
@@ -728,7 +734,7 @@ def _price_validate_async(*, files: Any) -> LocalResponse:
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
 
-    valid_extensions = [".csv", ".xlsx", ".xls"]
+    valid_extensions = [".xlsx"]
     file_ext = os.path.splitext(upload.filename)[1].lower()
     if file_ext not in valid_extensions:
         raise LocalHTTPException(400, f"Unsupported file format. Use: {', '.join(valid_extensions)}")
@@ -739,15 +745,19 @@ def _price_validate_async(*, files: Any) -> LocalResponse:
     tmp_path = _save_temp_file(upload.content, file_ext)
     template_path = None
     template_upload = _extract_file(files, "template")
-    if template_upload is not None:
-        template_ext = os.path.splitext(template_upload.filename)[1].lower()
-        template_path = _save_temp_file(template_upload.content, template_ext)
+    if template_upload is None or not template_upload.filename:
+        raise LocalHTTPException(400, "Template file is required")
+
+    template_ext = os.path.splitext(template_upload.filename)[1].lower()
+    if template_ext != ".xlsx":
+        raise LocalHTTPException(400, "Template must be an .xlsx file")
+
+    template_path = _save_temp_file(template_upload.content, template_ext)
 
     progress_map = {
-        "layer0": 10,
-        "layer1": 30,
+        "layer1": 25,
         "layer2": 55,
-        "layer3": 80,
+        "layer3": 85,
         "report": 95,
     }
 
@@ -776,6 +786,7 @@ def _price_validate_async(*, files: Any) -> LocalResponse:
                 "detected_language": result.get("detected_language"),
                 "llm_calls": result.get("llm_calls", 0),
                 "layer_results": layer_results,
+                "column_roles": result.get("column_roles"),
                 "product_classifications": result.get("product_classifications", []),
                 "final_report": result.get("final_report", ""),
                 "success": success,
@@ -826,62 +837,49 @@ def _price_validator_info() -> Dict[str, Any]:
     return {
         "id": "price-validator",
         "name": "Price Data Validator",
-        "description": "Validates Price Data datasets (CSV or Excel) with 5 layers of validation. "
-        "Detects structural errors, non-conformant schema, "
-        "classifies products against the official WFP list "
-        "and generates a detailed diagnostic report.",
+        "description": "Validates Price Data datasets (XLSX) with 4 layers of validation. "
+        "Compares template columns, detects commodity/market/date fields, "
+        "and generates a deterministic diagnostic report.",
         "version": "1.0.0",
         "inputs": [
             {
                 "name": "file",
                 "type": "file",
                 "required": True,
-                "accept": ".csv,.xlsx,.xls",
+                "accept": ".xlsx",
                 "label": "Price Data dataset",
-                "description": "CSV or Excel file containing the price data to validate",
+                "description": "Excel (.xlsx) file containing the price data to validate",
             },
             {
                 "name": "template",
                 "type": "file",
-                "required": False,
-                "accept": ".csv,.xlsx,.xls",
-                "label": "Template (optional)",
-                "description": "Custom template for validating columns",
+                "required": True,
+                "accept": ".xlsx",
+                "label": "Template",
+                "description": "Official template for validating columns",
             },
         ],
         "outputs": {
             "file_name": "Validated file name",
-            "file_type": "File type (CSV/EXCEL)",
+            "file_type": "File type (XLSX)",
             "country": "Country detected from dataset",
             "num_products": "Number of unique products",
             "num_markets": "Number of unique markets",
             "detected_language": "Detected language (en, fr, es, ar)",
             "llm_calls": "Number of LLM calls performed",
             "layer_results": "Detailed results for each layer",
-            "product_classifications": "Product classifications with confidence",
-            "final_report": "Diagnostic report generated by the LLM",
+            "column_roles": "Detected commodity/market/date columns",
+            "product_classifications": "Commodity name suggestions",
+            "final_report": "Deterministic diagnostic report",
             "success": "True if all layers passed",
         },
         "layers": [
-            {"id": 0, "name": "File Validation", "description": "Checks encoding, format, and extension"},
-            {"id": 1, "name": "Structural Parsing", "description": "Detects delimiter and broken rows"},
-            {
-                "id": 2,
-                "name": "Schema Validation",
-                "description": "Checks required columns and language",
-            },
-            {
-                "id": 3,
-                "name": "Product Classification",
-                "description": "Classifies products against the official WFP list",
-            },
-            {
-                "id": 4,
-                "name": "Report Generation",
-                "description": "Generates a diagnostic report with the LLM",
-            },
+            {"id": 1, "name": "XLSX Validation", "description": "Checks XLSX integrity and loads data"},
+            {"id": 2, "name": "Template Comparison", "description": "Compares submitted columns to template"},
+            {"id": 3, "name": "Content Validation", "description": "Validates commodity, market, and date values"},
+            {"id": 4, "name": "Deterministic Report", "description": "Summarizes errors and fixes"},
         ],
-        "supported_formats": ["CSV", "Excel (.xlsx, .xls)"],
+        "supported_formats": ["Excel (.xlsx)"],
         "product_list_size": "~200 WFP standard products",
     }
 
