@@ -40,9 +40,8 @@ async def validate_mfi_file(
     """
     Validates a RAW MFI CSV dataset.
     
-    The file must be a RAW MFI dataset containing the following required columns:
-    SVYMOD, MARKETID, RESPONSEID, SUBMISSIONDATE, _UUID, ENUMERATOR,
-    ENUMERATORID, TRADER_NAME, INTERVIEW_DATE, DEVICEID, _SUBMISSION_TIME
+    The file must be a RAW MFI dataset containing all required columns
+    defined by `RAW_FILE_INDICATORS` (or accepted aliases).
     
     Runs 5 validation layers:
     - Layer 0: File Validation (encoding, format, RAW indicators)
@@ -364,8 +363,8 @@ def get_service_info():
         ],
         "outputs": {
             "file_name": "Validated file name",
-            "country": "Country detected from ADM0NAME column",
-            "survey_period": "Survey date range (from INTERVIEW_DATE)",
+            "country": "Country detected from ADM0CODE/ADM0NAME columns when available",
+            "survey_period": "Survey date range inferred from SVYDATE/SVYSTARTTIME/_SUBMISSION_TIME (or legacy date columns)",
             "detected_file_type": "Always 'RAW' (PROCESSED not supported)",
             "llm_calls": "Number of LLM calls performed",
             "layer_results": "Detailed results for each validation layer",
@@ -394,7 +393,7 @@ def get_service_info():
             {
                 "id": 3,
                 "name": "Business Rules (RAW)",
-                "description": "RAW-specific checks: survey completeness, ResponseID/UUID uniqueness, "
+                "description": "RAW-specific checks: survey completeness, instanceID/ResponseID and UUID uniqueness, "
                                "date validation, coordinates, enumerator data, trader names"
             },
             {

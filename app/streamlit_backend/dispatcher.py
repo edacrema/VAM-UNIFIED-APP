@@ -602,8 +602,8 @@ def _mfi_validator_info() -> Dict[str, Any]:
         ],
         "outputs": {
             "file_name": "Validated file name",
-            "country": "Country detected from ADM0NAME column",
-            "survey_period": "Survey date range (from INTERVIEW_DATE)",
+            "country": "Country detected from ADM0CODE/ADM0NAME columns when available",
+            "survey_period": "Survey date range inferred from SVYDATE/SVYSTARTTIME/_SUBMISSION_TIME (or legacy date columns)",
             "detected_file_type": "Always 'RAW' (PROCESSED not supported)",
             "llm_calls": "Number of LLM calls performed",
             "layer_results": "Detailed results for each validation layer",
@@ -632,7 +632,7 @@ def _mfi_validator_info() -> Dict[str, Any]:
             {
                 "id": 3,
                 "name": "Business Rules (RAW)",
-                "description": "RAW-specific checks: survey completeness, ResponseID/UUID uniqueness, "
+                "description": "RAW-specific checks: survey completeness, instanceID/ResponseID and UUID uniqueness, "
                 "date validation, coordinates, enumerator data, trader names",
             },
             {
