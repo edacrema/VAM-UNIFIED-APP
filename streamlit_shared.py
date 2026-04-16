@@ -455,11 +455,12 @@ def ordered_live_output_sections(live_outputs: Any) -> List[Tuple[str, Dict[str,
     return sections
 
 
-def render_live_outputs(live_outputs: Any, *, key_prefix: str) -> None:
+def render_live_outputs(live_outputs: Any, *, key_prefix: str, render_instance_id: Optional[str] = None) -> None:
     sections = ordered_live_output_sections(live_outputs)
     if not sections:
         return
 
+    suffix = f"-{render_instance_id}" if render_instance_id else ""
     st.markdown("#### Live Retrieval Outputs")
     for section_name, section in sections:
         kind = str(section.get("kind") or "")
@@ -482,9 +483,9 @@ def render_live_outputs(live_outputs: Any, *, key_prefix: str) -> None:
                     st.write(summary)
 
             if kind == "table":
-                render_live_table_section(section, key_prefix=f"{key_prefix}-{section_name}")
+                render_live_table_section(section, key_prefix=f"{key_prefix}-{section_name}{suffix}")
             elif kind == "documents":
-                render_live_document_section(section, key_prefix=f"{key_prefix}-{section_name}")
+                render_live_document_section(section, key_prefix=f"{key_prefix}-{section_name}{suffix}")
             else:
                 st.json(section)
 
@@ -613,7 +614,7 @@ def render_results_tabs(
             export()
 
 
-def render_run_status(status: Any) -> None:
+def render_run_status(status: Any, *, render_instance_id: Optional[str] = None) -> None:
     if not isinstance(status, dict):
         st.write(status)
         return
@@ -641,6 +642,7 @@ def render_run_status(status: Any) -> None:
             render_live_outputs(
                 live_outputs,
                 key_prefix=str(status.get("run_id") or status.get("current_node") or "run"),
+                render_instance_id=render_instance_id,
             )
 
         retriever_traces = metadata.get("retriever_traces")
@@ -688,12 +690,14 @@ def run_async_and_poll(
     status_placeholder = st.empty()
     started = time.time()
     last_status: Any = None
+    render_count = 0
 
     while True:
         status = request_json("GET", status_path_template.format(run_id=run_id), timeout=30)
         last_status = status
         with status_placeholder.container():
-            render_run_status(status)
+            render_run_status(status, render_instance_id=f"poll-{render_count}")
+        render_count += 1
 
         if isinstance(status, dict) and status.get("status") in {"completed", "failed"}:
             break
