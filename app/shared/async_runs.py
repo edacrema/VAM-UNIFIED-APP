@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 RunStatus = Literal["pending", "running", "completed", "failed"]
@@ -15,12 +17,29 @@ _UNSET = object()
 logger = logging.getLogger(__name__)
 
 @dataclass
+class RunArtifactDescriptor:
+    artifact_id: str
+    label: str
+    mime_type: str
+    file_name: str
+    download_path: str
+
+
+@dataclass
+class RunArtifact(RunArtifactDescriptor):
+    content: bytes = b""
+    storage_uri: Optional[str] = None
+    inline_content_b64: Optional[str] = None
+
+
+@dataclass
 class RunRecord:
     status: RunStatus = "pending"
     current_node: Optional[str] = None
     progress_pct: int = 0
     warnings: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[RunArtifactDescriptor] = field(default_factory=list)
     error: Optional[str] = None
     traceback: Optional[str] = None
     result: Any = None
@@ -28,6 +47,7 @@ class RunRecord:
     updated_at: float = field(default_factory=time.time)
 
 _RUNS: Dict[str, RunRecord] = {}
+_RUN_ARTIFACTS: Dict[str, Dict[str, RunArtifact]] = {}
 _LOCK = threading.Lock()
 
 _BACKEND: Optional[str] = None
@@ -35,6 +55,7 @@ _GCP_CLIENTS_LOCK = threading.Lock()
 _FIRESTORE_CLIENT: Any = None
 _STORAGE_CLIENT: Any = None
 _INLINE_RESULT_MAX_BYTES = 900_000
+_INLINE_ARTIFACT_MAX_BYTES = 200_000
 
 def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
     uri = (uri or "").strip()
@@ -194,6 +215,102 @@ def _serialize_result_json_bytes(result: Any) -> Optional[bytes]:
         logger.exception("Failed to serialize run result")
         return None
 
+def _normalize_artifact_content(content: Any) -> bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, bytearray):
+        return bytes(content)
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    payload = _serialize_result_json_bytes(content)
+    if payload is None:
+        raise ValueError("Artifact content is not serializable")
+    return payload
+
+def _public_artifact_dict(item: Any) -> Dict[str, Any]:
+    if isinstance(item, RunArtifact):
+        item = RunArtifactDescriptor(
+            artifact_id=item.artifact_id,
+            label=item.label,
+            mime_type=item.mime_type,
+            file_name=item.file_name,
+            download_path=item.download_path,
+        )
+    if isinstance(item, RunArtifactDescriptor):
+        return asdict(item)
+    if isinstance(item, dict):
+        return {
+            "artifact_id": str(item.get("artifact_id") or ""),
+            "label": str(item.get("label") or ""),
+            "mime_type": str(item.get("mime_type") or "application/octet-stream"),
+            "file_name": str(item.get("file_name") or "download.bin"),
+            "download_path": str(item.get("download_path") or ""),
+        }
+    return {
+        "artifact_id": "",
+        "label": "",
+        "mime_type": "application/octet-stream",
+        "file_name": "download.bin",
+        "download_path": "",
+    }
+
+def _artifact_descriptor_from_dict(item: Dict[str, Any]) -> RunArtifactDescriptor:
+    public_item = _public_artifact_dict(item)
+    return RunArtifactDescriptor(
+        artifact_id=public_item["artifact_id"],
+        label=public_item["label"],
+        mime_type=public_item["mime_type"],
+        file_name=public_item["file_name"],
+        download_path=public_item["download_path"],
+    )
+
+def _upload_run_artifact(
+    run_id: str,
+    artifact_id: str,
+    file_name: str,
+    content: bytes,
+    *,
+    mime_type: str,
+) -> Optional[str]:
+    client = _get_storage_client()
+    if client is None:
+        return None
+
+    try:
+        bucket_name, prefix = _get_runs_gcs_bucket_prefix()
+    except Exception:
+        logger.exception("Failed to read RUNS_GCS_URI for artifact upload")
+        return None
+
+    object_name = "/".join([p for p in [prefix, run_id, "artifacts", artifact_id, file_name] if p])
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        blob.upload_from_string(content, content_type=mime_type)
+        return f"gs://{bucket_name}/{object_name}"
+    except Exception:
+        logger.exception("Failed to upload run artifact to GCS")
+        return None
+
+def _download_artifact_bytes(uri: str) -> Optional[bytes]:
+    client = _get_storage_client()
+    if client is None:
+        return None
+
+    try:
+        bucket_name, object_name = _parse_gcs_uri(uri)
+    except Exception:
+        logger.exception("Invalid artifact GCS URI")
+        return None
+
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        return blob.download_as_bytes()
+    except Exception:
+        logger.exception("Failed to download run artifact from GCS")
+        return None
+
 def _try_store_result_inline(doc_ref: Any, run_id: str, result: Any) -> bool:
     payload = _serialize_result_json_bytes(result)
     if payload is None:
@@ -269,13 +386,15 @@ def _download_json_from_gcs(uri: str) -> Any:
 def create_run(run_id: str) -> None:
     if not _use_durable_store():
         with _LOCK:
-            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={})
+            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={}, artifacts=[])
+            _RUN_ARTIFACTS[run_id] = {}
         return
 
     doc_ref = _firestore_doc_ref(run_id)
     if doc_ref is None:
         with _LOCK:
-            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={})
+            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={}, artifacts=[])
+            _RUN_ARTIFACTS[run_id] = {}
         return
 
     now = time.time()
@@ -287,6 +406,7 @@ def create_run(run_id: str) -> None:
                 "progress_pct": 0,
                 "warnings": [],
                 "metadata": {},
+                "artifacts": [],
                 "error": None,
                 "traceback": None,
                 "result_gcs_uri": None,
@@ -300,7 +420,8 @@ def create_run(run_id: str) -> None:
         global _BACKEND
         _BACKEND = "memory"
         with _LOCK:
-            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={})
+            _RUNS[run_id] = RunRecord(status="pending", current_node=None, progress_pct=0, metadata={}, artifacts=[])
+            _RUN_ARTIFACTS[run_id] = {}
 
 def get_run(run_id: str) -> Optional[RunRecord]:
     if not _use_durable_store():
@@ -314,6 +435,7 @@ def get_run(run_id: str) -> Optional[RunRecord]:
                 progress_pct=rec.progress_pct,
                 warnings=list(rec.warnings),
                 metadata=dict(rec.metadata),
+                artifacts=[RunArtifactDescriptor(**asdict(item)) for item in rec.artifacts],
                 error=rec.error,
                 traceback=rec.traceback,
                 result=rec.result,
@@ -340,6 +462,11 @@ def get_run(run_id: str) -> Optional[RunRecord]:
     progress_pct = int(data.get("progress_pct") or 0)
     warnings = list(data.get("warnings") or [])
     metadata = dict(data.get("metadata") or {})
+    artifacts = [
+        _artifact_descriptor_from_dict(item)
+        for item in list(data.get("artifacts") or [])
+        if isinstance(item, dict)
+    ]
     error = data.get("error")
     tb = data.get("traceback")
     created_at = float(data.get("created_at") or time.time())
@@ -359,12 +486,155 @@ def get_run(run_id: str) -> Optional[RunRecord]:
         progress_pct=progress_pct,
         warnings=warnings,
         metadata=metadata,
+        artifacts=artifacts,
         error=error,
         traceback=tb,
         result=result,
         created_at=created_at,
         updated_at=updated_at,
     )
+
+def add_run_artifact(
+    run_id: str,
+    *,
+    artifact_id: Optional[str] = None,
+    label: str,
+    mime_type: str,
+    file_name: str,
+    download_path: str,
+    content: Any,
+) -> Dict[str, Any]:
+    artifact_id = str(artifact_id or f"artifact_{uuid.uuid4().hex[:12]}")
+    payload = _normalize_artifact_content(content)
+    descriptor = RunArtifactDescriptor(
+        artifact_id=artifact_id,
+        label=label,
+        mime_type=mime_type,
+        file_name=file_name,
+        download_path=download_path,
+    )
+
+    if not _use_durable_store():
+        with _LOCK:
+            rec = _RUNS.get(run_id)
+            if rec is None:
+                raise KeyError(f"Run ID not found: {run_id}")
+            rec.artifacts = [item for item in rec.artifacts if item.artifact_id != artifact_id]
+            rec.artifacts.append(descriptor)
+            _RUN_ARTIFACTS.setdefault(run_id, {})[artifact_id] = RunArtifact(
+                artifact_id=artifact_id,
+                label=label,
+                mime_type=mime_type,
+                file_name=file_name,
+                download_path=download_path,
+                content=payload,
+            )
+            rec.updated_at = time.time()
+        return asdict(descriptor)
+
+    doc_ref = _firestore_doc_ref(run_id)
+    if doc_ref is None:
+        raise KeyError(f"Run ID not found: {run_id}")
+
+    try:
+        snap = doc_ref.get()
+    except Exception as exc:
+        logger.exception("Failed to read run before adding artifact")
+        raise KeyError(f"Run ID not found: {run_id}") from exc
+
+    if not getattr(snap, "exists", False):
+        raise KeyError(f"Run ID not found: {run_id}")
+
+    existing = snap.to_dict() or {}
+    artifact_entry = asdict(descriptor)
+    storage_uri = _upload_run_artifact(run_id, artifact_id, file_name, payload, mime_type=mime_type)
+    if storage_uri:
+        artifact_entry["storage_uri"] = storage_uri
+    elif len(payload) <= _INLINE_ARTIFACT_MAX_BYTES:
+        artifact_entry["inline_content_b64"] = base64.b64encode(payload).decode("ascii")
+    else:
+        raise RuntimeError("Artifact persistence failed: payload too large for inline fallback.")
+
+    current_artifacts = list(existing.get("artifacts") or [])
+    current_artifacts = [
+        item for item in current_artifacts
+        if not isinstance(item, dict) or str(item.get("artifact_id")) != artifact_id
+    ]
+    current_artifacts.append(artifact_entry)
+
+    try:
+        doc_ref.set({"artifacts": current_artifacts, "updated_at": time.time()}, merge=True)
+    except Exception as exc:
+        logger.exception("Failed to persist run artifact metadata")
+        raise RuntimeError("Artifact persistence failed.") from exc
+
+    return asdict(descriptor)
+
+def get_run_artifact(run_id: str, artifact_id: str) -> Optional[RunArtifact]:
+    if not _use_durable_store():
+        with _LOCK:
+            artifact = (_RUN_ARTIFACTS.get(run_id) or {}).get(artifact_id)
+            if artifact is None:
+                return None
+            return RunArtifact(
+                artifact_id=artifact.artifact_id,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                file_name=artifact.file_name,
+                download_path=artifact.download_path,
+                content=bytes(artifact.content),
+            )
+
+    doc_ref = _firestore_doc_ref(run_id)
+    if doc_ref is None:
+        return None
+
+    try:
+        snap = doc_ref.get()
+    except Exception:
+        logger.exception("Failed to read run artifact metadata from Firestore")
+        return None
+
+    if not getattr(snap, "exists", False):
+        return None
+
+    data = snap.to_dict() or {}
+    for item in list(data.get("artifacts") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("artifact_id") or "") != artifact_id:
+            continue
+
+        payload = b""
+        storage_uri = item.get("storage_uri")
+        inline_content_b64 = item.get("inline_content_b64")
+        if isinstance(storage_uri, str) and storage_uri.strip():
+            downloaded = _download_artifact_bytes(storage_uri)
+            if downloaded is None:
+                return None
+            payload = downloaded
+        elif isinstance(inline_content_b64, str) and inline_content_b64:
+            try:
+                payload = base64.b64decode(inline_content_b64)
+            except Exception:
+                logger.exception("Failed to decode inline artifact payload")
+                return None
+        else:
+            return None
+
+        public_item = _public_artifact_dict(item)
+        return RunArtifact(
+            artifact_id=public_item["artifact_id"],
+            label=public_item["label"],
+            mime_type=public_item["mime_type"],
+            file_name=public_item["file_name"],
+            download_path=public_item["download_path"],
+            content=payload,
+            storage_uri=storage_uri if isinstance(storage_uri, str) else None,
+            inline_content_b64=inline_content_b64 if isinstance(inline_content_b64, str) else None,
+        )
+
+    return None
 
 def update_run(
     run_id: str,

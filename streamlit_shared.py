@@ -2,7 +2,7 @@ import base64
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import pandas as pd
@@ -399,6 +399,11 @@ def request_bytes(method: str, path: str, *, json_body: Any = None, timeout: int
     return resp.content
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_artifact_bytes(path: str) -> bytes:
+    return request_bytes("GET", path)
+
+
 def safe_show_error(err: Exception) -> None:
     st.error(str(err))
 
@@ -431,6 +436,150 @@ def render_retriever_traces(traces: Any, *, max_items: int = 200) -> None:
             lines.append(str(item))
 
     st.code("\n".join(lines))
+
+
+def ordered_live_output_sections(live_outputs: Any) -> List[Tuple[str, Dict[str, Any]]]:
+    if not isinstance(live_outputs, dict):
+        return []
+
+    ordered_keys = ["databridges", "seerist", "reliefweb"]
+    sections: List[Tuple[str, Dict[str, Any]]] = []
+    for key in ordered_keys:
+        payload = live_outputs.get(key)
+        if isinstance(payload, dict):
+            sections.append((key, payload))
+    for key, payload in live_outputs.items():
+        if key in ordered_keys or not isinstance(payload, dict):
+            continue
+        sections.append((str(key), payload))
+    return sections
+
+
+def render_live_outputs(live_outputs: Any, *, key_prefix: str) -> None:
+    sections = ordered_live_output_sections(live_outputs)
+    if not sections:
+        return
+
+    st.markdown("#### Live Retrieval Outputs")
+    for section_name, section in sections:
+        kind = str(section.get("kind") or "")
+        title = str(section.get("title") or section_name.replace("_", " ").title())
+        expanded = section_name == "databridges"
+        with st.expander(title, expanded=expanded):
+            status = str(section.get("status") or "")
+            summary = str(section.get("summary") or "")
+            count = int(section.get("count") or 0)
+            updated_at = str(section.get("updated_at") or "")
+            st.caption(
+                " | ".join(
+                    part for part in [f"Status: {status}", f"Count: {count}", f"Updated: {updated_at}"] if part
+                )
+            )
+            if summary:
+                if status == "failed":
+                    st.warning(summary)
+                else:
+                    st.write(summary)
+
+            if kind == "table":
+                render_live_table_section(section, key_prefix=f"{key_prefix}-{section_name}")
+            elif kind == "documents":
+                render_live_document_section(section, key_prefix=f"{key_prefix}-{section_name}")
+            else:
+                st.json(section)
+
+
+def render_live_table_section(section: Dict[str, Any], *, key_prefix: str) -> None:
+    columns = section.get("columns")
+    rows_preview = section.get("rows_preview")
+    if isinstance(columns, list) and isinstance(rows_preview, list):
+        preview_df = pd.DataFrame(rows_preview, columns=[str(column) for column in columns])
+        if not preview_df.empty:
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        else:
+            st.write("No preview rows available.")
+
+    artifacts = section.get("download_artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return
+
+    st.markdown("**Downloads**")
+    for idx, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            continue
+        download_path = str(artifact.get("download_path") or "")
+        if not download_path:
+            continue
+        try:
+            content = load_artifact_bytes(download_path)
+        except Exception as err:
+            st.caption(f"Download unavailable: {err}")
+            continue
+
+        st.download_button(
+            label=str(artifact.get("label") or f"Download {idx + 1}"),
+            data=content,
+            file_name=str(artifact.get("file_name") or f"download-{idx + 1}.bin"),
+            mime=str(artifact.get("mime_type") or "application/octet-stream"),
+            key=f"{key_prefix}-artifact-{idx}",
+            use_container_width=True,
+        )
+
+
+def render_live_document_section(section: Dict[str, Any], *, key_prefix: str) -> None:
+    documents = section.get("documents")
+    if not isinstance(documents, list) or not documents:
+        st.write("No documents available.")
+        return
+
+    for idx, document in enumerate(documents):
+        if not isinstance(document, dict):
+            continue
+        title = str(document.get("title") or document.get("doc_id") or f"Document {idx + 1}")
+        date = str(document.get("date") or "")
+        source = str(document.get("source") or "")
+        header = " | ".join(part for part in [title, source, date] if part)
+        with st.expander(header or f"Document {idx + 1}", expanded=False):
+            url = str(document.get("url") or "")
+            excerpt = str(document.get("excerpt") or "")
+            if url:
+                st.markdown(f"[Open source]({url})")
+            if excerpt:
+                st.write(excerpt)
+
+            download_specs = [
+                (
+                    "JSON",
+                    str(document.get("download_json_path") or ""),
+                    str(document.get("download_json_file_name") or "document.json"),
+                    "application/json",
+                    f"{key_prefix}-json-{idx}",
+                ),
+                (
+                    "TXT",
+                    str(document.get("download_text_path") or ""),
+                    str(document.get("download_text_file_name") or "document.txt"),
+                    "text/plain",
+                    f"{key_prefix}-txt-{idx}",
+                ),
+            ]
+            cols = st.columns(2)
+            for col, (label, download_path, file_name, mime, button_key) in zip(cols, download_specs):
+                if not download_path:
+                    continue
+                try:
+                    content = load_artifact_bytes(download_path)
+                except Exception as err:
+                    col.caption(f"{label} unavailable: {err}")
+                    continue
+                col.download_button(
+                    label=f"Download {label}",
+                    data=content,
+                    file_name=file_name,
+                    mime=mime,
+                    key=button_key,
+                    use_container_width=True,
+                )
 
 
 def render_results_tabs(
@@ -487,6 +636,13 @@ def render_run_status(status: Any) -> None:
 
     metadata = status.get("metadata")
     if isinstance(metadata, dict) and metadata:
+        live_outputs = metadata.get("live_outputs")
+        if isinstance(live_outputs, dict) and live_outputs:
+            render_live_outputs(
+                live_outputs,
+                key_prefix=str(status.get("run_id") or status.get("current_node") or "run"),
+            )
+
         retriever_traces = metadata.get("retriever_traces")
         if isinstance(retriever_traces, list) and retriever_traces:
             with st.expander("Logs", expanded=False):

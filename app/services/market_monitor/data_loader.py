@@ -309,7 +309,8 @@ def extract_time_series_from_csv(
     admin1_list: List[str],
     csv_path: Optional[Path] = None,
     lookback_months: int = 13,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    return_raw_rows: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame] | Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Compatibility wrapper that returns Databridges price time series."""
     if csv_path is not None:
         logger.info("Ignoring csv_path=%s because Databridges is now the price source.", csv_path)
@@ -395,6 +396,32 @@ def extract_time_series_from_csv(
     df_regional = pd.DataFrame(index=regional_index).reset_index()
     df_regional = df_regional.merge(regional_agg, on=["Date", "Region"], how="left")
     df_regional = df_regional.sort_values(["Date", "Region"]).reset_index(drop=True)
+
+    if return_raw_rows:
+        raw_columns = [
+            "Country",
+            "Country ISO3",
+            "Commodity",
+            "Commodity ID",
+            "Price Type",
+            "Price Date",
+            "Price",
+            "Admin 1",
+            "Admin 2",
+            "Market Name",
+            "Market ID",
+            "Unit",
+            "Currency",
+            "Data Type",
+            "Price Flag",
+            "Observations",
+            "Data Source",
+        ]
+        raw_rows = df[raw_columns].sort_values(
+            ["Price Date", "Admin 1", "Market Name", "Commodity"],
+            na_position="last",
+        ).reset_index(drop=True)
+        return national_pivot, df_regional, raw_rows
 
     return national_pivot, df_regional
 

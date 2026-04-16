@@ -6,13 +6,15 @@ FastAPI endpoints for the MFI Report Generator service.
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 import logging
+import traceback
 import numpy as np
 
 from .graph import run_mfi_report_generation
-from .data_loader import load_mfi_from_csv, validate_csv_structure
+from .data_loader import load_mfi_from_csv, load_mfi_from_databridges_rows, validate_csv_structure
 from .databridges_loader import (
+    find_survey,
     list_mfi_countries,
     list_mfi_surveys_for_country,
     load_mfi_survey_from_databridges,
@@ -28,10 +30,18 @@ from .schemas import (
 from app.shared.async_runs import (
     create_run,
     get_run,
+    get_run_artifact,
     set_run_completed,
     set_run_failed,
     update_run,
     update_run_progress,
+)
+from app.shared.databridges import get_databridges_client
+from app.shared.live_outputs import (
+    build_databridges_live_output,
+    build_document_live_output,
+    create_databridges_artifacts,
+    create_document_previews_with_artifacts,
 )
 
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
@@ -53,6 +63,39 @@ class ExportDocxOptions(BaseModel):
 
 class GenerateMFIReportFromSurveyInput(BaseModel):
     survey_id: int
+
+
+def _trace_error(traces: List[Dict[str, Any]], retriever_name: str) -> Optional[str]:
+    for trace in traces:
+        if not isinstance(trace, dict):
+            continue
+        if str(trace.get("retriever") or "") != retriever_name:
+            continue
+        error = trace.get("error")
+        if error:
+            return str(error)
+    return None
+
+
+def _update_live_metadata(
+    run_id: str,
+    *,
+    section_updates: Optional[Dict[str, Any]] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not section_updates and not extra_metadata:
+        return
+
+    current_run = get_run(run_id)
+    current_metadata = dict(getattr(current_run, "metadata", {}) or {})
+    meta_update: Dict[str, Any] = dict(extra_metadata or {})
+
+    if section_updates:
+        live_outputs = dict(current_metadata.get("live_outputs") or {})
+        live_outputs.update(section_updates)
+        meta_update["live_outputs"] = live_outputs
+
+    update_run(run_id, metadata=meta_update)
 
 def _normalize_text(value: Any) -> str:
     if value is None:
@@ -294,30 +337,53 @@ async def generate_mfi_report_from_survey_async(
     """Start MFI report generation from a Databridges survey in the background."""
     import uuid as uuid_module
 
-    try:
-        csv_data = load_mfi_survey_from_databridges(input_data.survey_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
     run_id = f"mfi_{uuid_module.uuid4().hex[:8]}"
     create_run(run_id)
 
     progress_map = {
-        "mfi_data_agent": 10,
-        "context_retrieval": 25,
-        "context_extractor": 40,
-        "mfi_graph_designer": 55,
-        "dimension_drafter": 72,
-        "market_recommendations_drafter": 82,
-        "executive_summary_drafter": 92,
-        "red_team": 97,
+        "databridges_fetch": 8,
+        "mfi_data_agent": 18,
+        "context_retrieval": 32,
+        "context_extractor": 46,
+        "mfi_graph_designer": 60,
+        "dimension_drafter": 75,
+        "market_recommendations_drafter": 85,
+        "executive_summary_drafter": 93,
+        "red_team": 98,
     }
 
     def run_in_background():
         try:
             update_run(run_id, status="running", error=None, traceback=None)
+            update_run_progress(run_id, current_node="databridges_fetch", progress_pct=progress_map["databridges_fetch"])
+
+            survey = find_survey(input_data.survey_id)
+            if survey is None:
+                raise ValueError(f"Survey ID not found: {input_data.survey_id}")
+
+            raw_rows = get_databridges_client().list_mfi_processed_data(int(input_data.survey_id), page_size=1000)
+            csv_data = load_mfi_from_databridges_rows(raw_rows, survey=survey)
+            databridges_artifacts = create_databridges_artifacts(
+                run_id=run_id,
+                service_slug="mfi-drafter",
+                label_prefix="Databridges survey rows",
+                file_stem=f"mfi-databridges-survey-{input_data.survey_id}",
+                rows=raw_rows,
+            )
+            _update_live_metadata(
+                run_id,
+                section_updates={
+                    "databridges": build_databridges_live_output(
+                        title="Databridges Data",
+                        summary=(
+                            f"{len(raw_rows)} processed survey rows retrieved for survey "
+                            f"{input_data.survey_id} ({csv_data['country']})."
+                        ),
+                        rows=raw_rows,
+                        download_artifacts=databridges_artifacts,
+                    )
+                },
+            )
 
             def on_step(node_name: str, _state: dict):
                 progress = progress_map.get(node_name)
@@ -325,6 +391,63 @@ async def generate_mfi_report_from_survey_async(
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
                     update_run(run_id, current_node=node_name)
+
+                meta_update: Dict[str, Any] = {}
+                context_counts = _state.get("context_counts")
+                if isinstance(context_counts, dict):
+                    meta_update["context_counts"] = context_counts
+
+                retriever_traces = _state.get("retriever_traces")
+                traces_list = retriever_traces if isinstance(retriever_traces, list) else []
+                if traces_list:
+                    meta_update["retriever_traces"] = traces_list
+
+                section_updates: Dict[str, Any] = {}
+                if node_name == "context_retrieval":
+                    seerist_docs = _state.get("seerist_documents") or []
+                    reliefweb_docs = _state.get("reliefweb_documents") or []
+                    if isinstance(seerist_docs, list):
+                        seerist_error = _trace_error(traces_list, "Seerist")
+                        seerist_previews = create_document_previews_with_artifacts(
+                            run_id=run_id,
+                            service_slug="mfi-drafter",
+                            source_slug="seerist",
+                            documents=seerist_docs,
+                        )
+                        section_updates["seerist"] = build_document_live_output(
+                            title="Seerist Documents",
+                            summary=(
+                                f"Seerist retrieval unavailable: {seerist_error}"
+                                if seerist_error
+                                else f"{len(seerist_docs)} Seerist documents retrieved."
+                            ),
+                            documents=seerist_previews,
+                            status="failed" if seerist_error else "completed",
+                        )
+                    if isinstance(reliefweb_docs, list):
+                        reliefweb_error = _trace_error(traces_list, "ReliefWeb")
+                        reliefweb_previews = create_document_previews_with_artifacts(
+                            run_id=run_id,
+                            service_slug="mfi-drafter",
+                            source_slug="reliefweb",
+                            documents=reliefweb_docs,
+                        )
+                        section_updates["reliefweb"] = build_document_live_output(
+                            title="ReliefWeb Documents",
+                            summary=(
+                                f"ReliefWeb retrieval unavailable: {reliefweb_error}"
+                                if reliefweb_error
+                                else f"{len(reliefweb_docs)} ReliefWeb documents retrieved."
+                            ),
+                            documents=reliefweb_previews,
+                            status="failed" if reliefweb_error else "completed",
+                        )
+
+                _update_live_metadata(
+                    run_id,
+                    section_updates=section_updates,
+                    extra_metadata=meta_update,
+                )
 
             result = run_mfi_report_generation(
                 country=csv_data["country"],
@@ -352,7 +475,20 @@ async def generate_mfi_report_from_survey_async(
             )
         except Exception as exc:
             logger.exception("MFI async report generation from Databridges failed")
-            set_run_failed(run_id, error=str(exc))
+            _update_live_metadata(
+                run_id,
+                section_updates={
+                    "databridges": build_databridges_live_output(
+                        title="Databridges Data",
+                        summary=f"Databridges fetch failed: {exc}",
+                        rows=[],
+                        download_artifacts=[],
+                        status="failed",
+                    )
+                },
+            )
+            current_node = get_run(run_id).current_node if get_run(run_id) is not None else "databridges_fetch"
+            set_run_failed(run_id, error=str(exc), traceback=traceback.format_exc(), current_node=current_node)
 
     background_tasks.add_task(run_in_background)
     return {"run_id": run_id, "status": "pending"}
@@ -518,13 +654,62 @@ async def generate_mfi_report_from_csv_async():
                 else:
                     update_run(run_id, current_node=node_name)
 
+                meta_update: Dict[str, Any] = {}
                 context_counts = _state.get("context_counts")
                 if isinstance(context_counts, dict):
-                    meta_update = {"context_counts": context_counts}
-                    retriever_traces = _state.get("retriever_traces")
-                    if isinstance(retriever_traces, list):
-                        meta_update["retriever_traces"] = retriever_traces
-                    update_run(run_id, metadata=meta_update)
+                    meta_update["context_counts"] = context_counts
+
+                retriever_traces = _state.get("retriever_traces")
+                traces_list = retriever_traces if isinstance(retriever_traces, list) else []
+                if traces_list:
+                    meta_update["retriever_traces"] = traces_list
+
+                section_updates: Dict[str, Any] = {}
+                if node_name == "context_retrieval":
+                    seerist_docs = _state.get("seerist_documents") or []
+                    reliefweb_docs = _state.get("reliefweb_documents") or []
+                    if isinstance(seerist_docs, list):
+                        seerist_error = _trace_error(traces_list, "Seerist")
+                        seerist_previews = create_document_previews_with_artifacts(
+                            run_id=run_id,
+                            service_slug="mfi-drafter",
+                            source_slug="seerist",
+                            documents=seerist_docs,
+                        )
+                        section_updates["seerist"] = build_document_live_output(
+                            title="Seerist Documents",
+                            summary=(
+                                f"Seerist retrieval unavailable: {seerist_error}"
+                                if seerist_error
+                                else f"{len(seerist_docs)} Seerist documents retrieved."
+                            ),
+                            documents=seerist_previews,
+                            status="failed" if seerist_error else "completed",
+                        )
+                    if isinstance(reliefweb_docs, list):
+                        reliefweb_error = _trace_error(traces_list, "ReliefWeb")
+                        reliefweb_previews = create_document_previews_with_artifacts(
+                            run_id=run_id,
+                            service_slug="mfi-drafter",
+                            source_slug="reliefweb",
+                            documents=reliefweb_docs,
+                        )
+                        section_updates["reliefweb"] = build_document_live_output(
+                            title="ReliefWeb Documents",
+                            summary=(
+                                f"ReliefWeb retrieval unavailable: {reliefweb_error}"
+                                if reliefweb_error
+                                else f"{len(reliefweb_docs)} ReliefWeb documents retrieved."
+                            ),
+                            documents=reliefweb_previews,
+                            status="failed" if reliefweb_error else "completed",
+                        )
+
+                _update_live_metadata(
+                    run_id,
+                    section_updates=section_updates,
+                    extra_metadata=meta_update,
+                )
 
             result = run_mfi_report_generation(
                 country=csv_data["country"],
@@ -696,6 +881,19 @@ async def get_report_result(run_id: str):
         llm_calls=result.get("llm_calls", 0),
         correction_attempts=result.get("correction_attempts", 0),
         success=True
+    )
+
+
+@router.get("/artifacts/{run_id}/{artifact_id}")
+async def get_report_artifact(run_id: str, artifact_id: str):
+    artifact = get_run_artifact(run_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_id}")
+
+    return Response(
+        content=artifact.content,
+        media_type=artifact.mime_type,
+        headers={"Content-Disposition": build_content_disposition(artifact.file_name)},
     )
 
 

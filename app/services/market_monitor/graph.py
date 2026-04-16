@@ -115,11 +115,14 @@ class MarketReportState(TypedDict):
     time_series_data_national: Optional[str]  # JSON
     time_series_data_regional: Optional[str]  # JSON
     data_statistics: Optional[Dict[str, Any]]
+    databridges_rows: List[Dict[str, Any]]
     visualizations: Dict[str, str]  # Base64 images
 
     # ===== BRANCH 2 OUTPUTS (Contextual Intelligence) =====
     documents: List[Dict[str, Any]]
     document_references: List[Dict[str, Any]]
+    seerist_documents: List[Dict[str, Any]]
+    reliefweb_documents: List[Dict[str, Any]]
     news_counts: Dict[str, int]
     retriever_traces: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
@@ -168,9 +171,12 @@ def create_initial_state(
         time_series_data_national=None,
         time_series_data_regional=None,
         data_statistics=None,
+        databridges_rows=[],
         visualizations={},
         documents=[],
         document_references=[],
+        seerist_documents=[],
+        reliefweb_documents=[],
         news_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
         events=[],
@@ -693,6 +699,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             raise RuntimeError(f"Could not auto-select Databridges commodities: {e}") from e
 
     warnings = []
+    databridges_rows: List[Dict[str, Any]] = []
     
     if use_mock:
         # =====================================================================
@@ -733,12 +740,14 @@ def node_data_agent(state: MarketReportState) -> dict:
                 warnings.extend(availability["warnings"])
             
             # Extract time series from Databridges
-            df_national, df_regional = extract_time_series_from_csv(
+            df_national, df_regional, df_raw = extract_time_series_from_csv(
                 country=state["country"],
                 time_period=state["time_period"],
                 commodities=commodity_list,
-                admin1_list=state["admin1_list"]
+                admin1_list=state["admin1_list"],
+                return_raw_rows=True,
             )
+            databridges_rows = json.loads(df_raw.to_json(orient="records", date_format="iso"))
             
             # Calculate statistics using the existing report statistics contract
             stats = calculate_statistics_from_csv(
@@ -775,6 +784,7 @@ def node_data_agent(state: MarketReportState) -> dict:
         "time_series_data_national": df_national.to_json(date_format='iso'),
         "time_series_data_regional": df_regional.to_json(date_format='iso'),
         "data_statistics": stats,
+        "databridges_rows": databridges_rows,
         "warnings": warnings,
         "current_node": "data_agent"
     }
@@ -1005,6 +1015,8 @@ def node_news_retrieval(state: MarketReportState) -> dict:
     updates = {
         "documents": documents,
         "document_references": refs,
+        "seerist_documents": list(seerist_docs),
+        "reliefweb_documents": list(rw_docs),
         "news_counts": news_counts,
         "retriever_traces": retriever_traces,
         "current_node": "news_retrieval",
@@ -1599,4 +1611,7 @@ def run_report_generation(
     )
     
     agent = build_graph(on_step=on_step)
-    return agent.invoke(initial_state)
+    result = agent.invoke(initial_state)
+    for key in ("databridges_rows", "seerist_documents", "reliefweb_documents"):
+        result.pop(key, None)
+    return result

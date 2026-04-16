@@ -72,6 +72,8 @@ class MFIReportState(TypedDict):
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
     document_references: List[Dict[str, Any]]
+    seerist_documents: List[Dict[str, Any]]
+    reliefweb_documents: List[Dict[str, Any]]
     country_context: Optional[str]
     context_counts: Dict[str, int]
     retriever_traces: List[Dict[str, Any]]
@@ -114,6 +116,8 @@ def create_initial_state(
         survey_metadata=None,
         contextual_documents=[],
         document_references=[],
+        seerist_documents=[],
+        reliefweb_documents=[],
         country_context=None,
         context_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
@@ -548,6 +552,8 @@ def node_context_retrieval(state: MFIReportState) -> dict:
     updates = {
         "contextual_documents": docs,
         "document_references": refs,
+        "seerist_documents": list(seerist_docs),
+        "reliefweb_documents": list(rw_docs),
         "context_counts": context_counts,
         "retriever_traces": retriever_traces,
         "current_node": "context_retrieval",
@@ -1441,4 +1447,7 @@ def run_mfi_report_generation(
     )
     
     agent = build_graph(on_step=on_step)
-    return agent.invoke(initial_state)
+    result = agent.invoke(initial_state)
+    for key in ("seerist_documents", "reliefweb_documents"):
+        result.pop(key, None)
+    return result
