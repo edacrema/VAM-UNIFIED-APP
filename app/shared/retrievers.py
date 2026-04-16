@@ -1,24 +1,30 @@
 """Retrievers per news e documenti (usati da market_monitor e mfi_drafter)."""
-import os
-import logging
-import requests
-import time
-import uuid
+
+from __future__ import annotations
+
 import json
+import logging
+import os
 import re
-from datetime import datetime
-from typing import List, Dict, Any, Optional, Sequence
-from bs4 import BeautifulSoup
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence
+
+import requests
 from dotenv import load_dotenv
+
+from app.shared.countries import resolve_country
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-class GDELTRetriever:
-    BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+class SeeristRetriever:
+    BASE_URL = "https://app.seerist.com/hyperionapi/v1/wod"
     MAX_RETRIES = 3
-    HEADERS = {'User-Agent': 'Mozilla/5.0'}
+    REQUEST_DELAY = 0.5
+    DEFAULT_PAGE_SIZE = 50
     DEFAULT_ECON_TERMS: Sequence[str] = (
         "market",
         "prices",
@@ -32,350 +38,424 @@ class GDELTRetriever:
         "fuel price",
         "wage",
     )
-    DEFAULT_ECON_THEMES: Sequence[str] = (
-        "EPU_ECONOMY",
-        "EPU_POLICY",
-        "TAX_ECON_PRICE",
-        "ECON_STOCKMARKET",
-        "WB_698_TRADE",
-        "WB_1920_FINANCIAL_SECTOR_DEVELOPMENT",
-        "WB_435_AGRICULTURE_AND_FOOD_SECURITY",
-        "AGRICULTURE",
-    )
+    ISO3_TO_AOI_ID: Dict[str, str] = {
+        "AFG": "AF",
+        "AGO": "AO",
+        "ARM": "AM",
+        "BGD": "BD",
+        "BEN": "BJ",
+        "BFA": "BF",
+        "BDI": "BI",
+        "BOL": "BO",
+        "CAF": "CF",
+        "CIV": "CI",
+        "CMR": "CM",
+        "COD": "CD",
+        "COG": "CG",
+        "COL": "CO",
+        "DJI": "DJ",
+        "DZA": "DZ",
+        "ECU": "EC",
+        "EGY": "EG",
+        "SLV": "SV",
+        "LAO": "LA",
+        "ETH": "ET",
+        "GHA": "GH",
+        "GIN": "GN",
+        "GMB": "GM",
+        "GNB": "GW",
+        "GTM": "GT",
+        "HTI": "HT",
+        "HND": "HN",
+        "IDN": "ID",
+        "IRN": "IR",
+        "IRQ": "IQ",
+        "JOR": "JO",
+        "KEN": "KE",
+        "KGZ": "KG",
+        "KHM": "KH",
+        "LBN": "LB",
+        "LBR": "LR",
+        "LBY": "LY",
+        "LKA": "LK",
+        "LSO": "LS",
+        "MDA": "MD",
+        "MDG": "MG",
+        "MLI": "ML",
+        "MMR": "MM",
+        "MOZ": "MZ",
+        "MRT": "MR",
+        "MWI": "MW",
+        "NER": "NE",
+        "NGA": "NG",
+        "NPL": "NP",
+        "PAK": "PK",
+        "PHL": "PH",
+        "PSE": "PS",
+        "RWA": "RW",
+        "SDN": "SD",
+        "SEN": "SN",
+        "SLE": "SL",
+        "SOM": "SO",
+        "SSD": "SS",
+        "SWZ": "SZ",
+        "SYR": "SY",
+        "TCD": "TD",
+        "TJK": "TJ",
+        "TLS": "TL",
+        "TUR": "TR",
+        "TZA": "TZ",
+        "UGA": "UG",
+        "UKR": "UA",
+        "VEN": "VE",
+        "VNM": "VN",
+        "YEM": "YE",
+        "ZMB": "ZM",
+        "ZWE": "ZW",
+    }
+    UNMAPPED_CANONICAL_COUNTRIES = {"Gaza Strip", "West Bank"}
 
-
-    def __init__(self, verbose: bool = False):
+    def __init__(
+        self,
+        verbose: bool = False,
+        api_key: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+    ):
         self.verbose = verbose
+        self.api_key = (api_key if api_key is not None else os.getenv("SEERIST_API_KEY") or "").strip()
+        self.session = session or requests.Session()
+        self.last_request_time = 0.0
         self.last_trace: Dict[str, Any] = {}
 
-    def _format_datetime(self, date_str: str) -> str:
-        try:
-            dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-            return dt.strftime("%Y%m%d%H%M%S")
-        except ValueError:
-            return date_str.replace("-", "")[:8] + "000000"
-
-    def _scrape_content(self, url: str) -> str:
-        if not url:
-            return ""
-        try:
-            resp = requests.get(url, headers=self.HEADERS, timeout=10)
-            if resp.status_code != 200:
-                return ""
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            paragraphs = soup.find_all('p')
-            text = ' '.join([p.get_text() for p in paragraphs])
-            return text.strip()[:5000]
-        except Exception:
-            return ""
+    def _enforce_rate_limit(self) -> None:
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.REQUEST_DELAY:
+            time.sleep(self.REQUEST_DELAY - elapsed)
+        self.last_request_time = time.time()
 
     @staticmethod
-    def _escape_query_value(value: str) -> str:
-        return (value or "").replace('"', "\\\"").strip()
-
-    @classmethod
-    def _format_or_group(cls, terms: Sequence[str]) -> str:
-        cleaned: List[str] = []
-        for t in terms:
-            t = (t or "").strip()
-            if not t:
-                continue
-            safe = cls._escape_query_value(t)
-            if re.search(r"\s", safe):
-                cleaned.append(f'"{safe}"')
+    def _format_datetime(date_str: str, *, end_of_day: bool = False) -> str:
+        raw = (date_str or "").strip()
+        if not raw:
+            raise ValueError("date_str is required")
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             else:
-                cleaned.append(safe)
+                dt = dt.astimezone(timezone.utc)
+            if len(raw) <= 10:
+                dt = dt.replace(
+                    hour=23 if end_of_day else 0,
+                    minute=59 if end_of_day else 0,
+                    second=59 if end_of_day else 0,
+                    microsecond=999000 if end_of_day else 0,
+                )
+        except ValueError:
+            dt = datetime.strptime(raw[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            dt = dt.replace(
+                hour=23 if end_of_day else 0,
+                minute=59 if end_of_day else 0,
+                second=59 if end_of_day else 0,
+                microsecond=999000 if end_of_day else 0,
+            )
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    @staticmethod
+    def _escape_lucene_term(term: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(term or "").strip())
         if not cleaned:
             return ""
-        if len(cleaned) == 1:
-            return cleaned[0]
-        return "(" + " OR ".join(cleaned) + ")"
+        cleaned = cleaned.replace('"', '\\"')
+        if re.search(r"[\s:/-]", cleaned):
+            return f'"{cleaned}"'
+        return cleaned
 
     @classmethod
-    def build_country_clause(cls, country: str) -> str:
-        c = (country or "").strip()
-        if not c:
+    def build_lucene_or_query(cls, terms: Sequence[str]) -> str:
+        unique_terms: List[str] = []
+        seen = set()
+        for term in terms:
+            escaped = cls._escape_lucene_term(term)
+            if not escaped or escaped in seen:
+                continue
+            seen.add(escaped)
+            unique_terms.append(escaped)
+        if not unique_terms:
             return ""
-        safe = cls._escape_query_value(c)
-        tokens = [t for t in re.findall(r"[^\W\d_]+", safe, flags=re.UNICODE) if t]
+        if len(unique_terms) == 1:
+            return unique_terms[0]
+        return "(" + " OR ".join(unique_terms) + ")"
 
-        if len(tokens) <= 1:
-            token = tokens[0] if tokens else safe
-            token_safe = cls._escape_query_value(token)
-            return f'repeat2:"{token_safe}"'
+    @staticmethod
+    def _strip_html(html_text: str) -> str:
+        cleaned = re.sub(r"<[^>]+>", " ", str(html_text or ""))
+        return re.sub(r"\s+", " ", cleaned).strip()
 
-        phrase = f'"{safe}"'
-        and_clause = "(" + " AND ".join(tokens) + ")"
-        return f"({phrase} OR {and_clause})"
+    @staticmethod
+    def _extract_text(field: Any) -> str:
+        if isinstance(field, dict):
+            english = field.get("en")
+            if english:
+                return str(english)
+            for value in field.values():
+                if value:
+                    return str(value)
+            return ""
+        if field is None:
+            return ""
+        return str(field)
 
-    @classmethod
-    def build_economy_query(
-        cls,
+    def _resolve_country_context(self, country: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        try:
+            canonical_country, iso3 = resolve_country(country)
+        except ValueError as exc:
+            return None, None, None, str(exc)
+
+        if canonical_country in self.UNMAPPED_CANONICAL_COUNTRIES:
+            return canonical_country, iso3, None, f"Country '{canonical_country}' does not have a Seerist aoiId mapping."
+
+        aoi_id = self.ISO3_TO_AOI_ID.get(iso3)
+        if not aoi_id:
+            return canonical_country, iso3, None, (
+                f"Country '{canonical_country}' ({iso3}) does not have a Seerist aoiId mapping."
+            )
+        return canonical_country, iso3, aoi_id, None
+
+    def _map_feature_to_document(self, feature: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        props = feature.get("properties", {}) if isinstance(feature, dict) else {}
+        title = self._extract_text(props.get("title")) or f"Seerist report {idx + 1}"
+        content = self._extract_text(props.get("sanitizedBody"))
+        if not content:
+            html_body = self._extract_text(props.get("body"))
+            if html_body:
+                content = self._strip_html(html_body)
+        if not content:
+            content = self._extract_text(props.get("sanitizedSummary"))
+        if not content:
+            content = title
+
+        published_date = props.get("publishedDate") or props.get("@timestamp") or ""
+        seerist_id = str(props.get("id") or feature.get("id") or idx)
+
+        return {
+            "doc_id": f"seerist_{seerist_id}",
+            "title": title,
+            "url": "",
+            "source": "Seerist",
+            "date": str(published_date)[:10],
+            "content": content[:5000],
+        }
+
+    def _query_documents(
+        self,
+        *,
+        search_query: str,
+        start_iso: str,
+        end_iso: str,
+        aoi_id: str,
+        max_records: int,
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        query_trace: Dict[str, Any] = {
+            "query": search_query,
+            "aoi_id": aoi_id,
+            "status_code": None,
+            "max_records": max_records,
+            "request_url": None,
+            "num_documents": 0,
+            "total_available": None,
+            "samples": [],
+            "error": None,
+        }
+        params: Dict[str, Any] = {
+            "sources": "analysis",
+            "start": start_iso,
+            "end": end_iso,
+            "pageSize": min(max_records, self.DEFAULT_PAGE_SIZE),
+            "pageOffset": 0,
+            "sortDirection": "desc",
+            "aoiId": aoi_id,
+        }
+        q = (search_query or "").strip()
+        if q:
+            params["search"] = q
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = self.session.get(
+                    self.BASE_URL,
+                    params=params,
+                    headers={"x-api-key": self.api_key},
+                    timeout=30,
+                )
+                query_trace["status_code"] = response.status_code
+                query_trace["request_url"] = getattr(response, "url", None)
+
+                if response.status_code == 429 and attempt < self.MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+
+                if response.status_code >= 400:
+                    body = (response.text or "").strip()
+                    query_trace["error"] = body[:2000] if body else f"HTTP {response.status_code}"
+                    return [], query_trace
+
+                try:
+                    payload = response.json() if response.text.strip() else {}
+                except Exception as exc:
+                    query_trace["error"] = f"Failed to parse JSON response: {exc}"
+                    return [], query_trace
+
+                features = payload.get("features", []) if isinstance(payload, dict) else []
+                metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+                query_trace["total_available"] = metadata.get("total")
+
+                documents: List[Dict[str, Any]] = []
+                for idx, feature in enumerate(features if isinstance(features, list) else []):
+                    document = self._map_feature_to_document(feature, idx)
+                    if document.get("content"):
+                        documents.append(document)
+
+                query_trace["num_documents"] = len(documents)
+                query_trace["samples"] = [
+                    {
+                        "title": doc.get("title", ""),
+                        "date": doc.get("date", ""),
+                        "doc_id": doc.get("doc_id", ""),
+                    }
+                    for doc in documents[:3]
+                ]
+                return documents, query_trace
+            except requests.exceptions.RequestException as exc:
+                if attempt < self.MAX_RETRIES - 1:
+                    time.sleep((attempt + 1) * 2)
+                    continue
+                query_trace["error"] = str(exc)
+                return [], query_trace
+
+        query_trace["error"] = "Seerist query failed"
+        return [], query_trace
+
+    def fetch(
+        self,
+        *,
+        search_query: str,
+        start_date: str,
+        end_date: str,
         country: str,
-        extra_terms: Optional[Sequence[str]] = None,
-        themes: Optional[Sequence[str]] = None,
-    ) -> str:
-        country_clause = cls.build_country_clause(country)
+        max_records: int = 50,
+    ) -> List[Dict[str, Any]]:
+        return self.fetch_batch(
+            queries=[search_query],
+            start_date=start_date,
+            end_date=end_date,
+            country=country,
+            max_per_query=max_records,
+        )
 
-        merged_terms = list(cls.DEFAULT_ECON_TERMS)
-        if extra_terms:
-            merged_terms.extend(list(extra_terms))
-        topic_clause = cls._format_or_group(merged_terms)
-
-        merged_themes = list(themes) if themes else []
-        theme_clause = ""
-        theme_items = [f"theme:{t}" for t in merged_themes if (t or "").strip()]
-        if theme_items:
-            theme_clause = "(" + " OR ".join(theme_items) + ")"
-
-        focus_clause = ""
-        if topic_clause and theme_clause:
-            focus_clause = f"({topic_clause} OR {theme_clause})"
-        elif topic_clause:
-            focus_clause = topic_clause
-        elif theme_clause:
-            focus_clause = theme_clause
-
-        if country_clause and focus_clause:
-            return f"({country_clause}) AND ({focus_clause})".strip()
-        if country_clause:
-            return f"({country_clause})"
-        return focus_clause
-
-
-    def fetch(self, query: str, start_date: str, end_date: str, max_records: int = 5) -> List[Dict]:
+    def fetch_batch(
+        self,
+        *,
+        queries: Sequence[str],
+        start_date: str,
+        end_date: str,
+        country: str,
+        max_per_query: int = 20,
+    ) -> List[Dict[str, Any]]:
         started = time.time()
-        now_utc = datetime.utcnow()
+        canonical_country, iso3, aoi_id, country_error = self._resolve_country_context(country)
+        unique_queries: List[str] = []
+        seen_queries = set()
+        for query in queries:
+            normalized_query = str(query or "").strip()
+            if normalized_query in seen_queries:
+                continue
+            seen_queries.add(normalized_query)
+            unique_queries.append(normalized_query)
+
         trace: Dict[str, Any] = {
-            "retriever": "GDELT",
-            "query": query,
+            "retriever": "Seerist",
+            "country": country,
+            "canonical_country": canonical_country,
+            "country_iso3": iso3,
+            "aoi_id": aoi_id,
             "start_date": start_date,
             "end_date": end_date,
-            "max_records": max_records,
-            "attempts": 0,
-            "status_code": None,
-            "request_url": None,
-            "content_type": None,
-            "response_snippet": None,
-            "fallback_used": False,
-            "fallback_query": None,
-            "num_articles": 0,
+            "queries": unique_queries,
+            "max_per_query": max_per_query,
             "num_documents": 0,
             "samples": [],
+            "query_traces": [],
             "error": None,
             "duration_ms": None,
         }
 
-        start_dt_raw = None
-        end_dt_raw = None
-        try:
-            start_dt_raw = datetime.strptime(start_date[:10], "%Y-%m-%d")
-        except Exception:
-            start_dt_raw = None
-        try:
-            end_dt_raw = datetime.strptime(end_date[:10], "%Y-%m-%d")
-        except Exception:
-            end_dt_raw = None
-
-        if start_dt_raw is not None and start_dt_raw > now_utc:
-            trace["error"] = "start_date is in the future"
+        if not self.api_key:
+            trace["error"] = "Missing SEERIST_API_KEY."
             trace["duration_ms"] = int((time.time() - started) * 1000)
             self.last_trace = trace
             if self.verbose:
-                logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
+                logger.info(json.dumps({"seerist_trace": trace}, ensure_ascii=False))
             return []
 
-        start_dt_param = self._format_datetime(start_date)
-        end_dt_param = self._format_datetime(end_date)
-        if end_dt_raw is not None and end_dt_raw.date() > now_utc.date():
-            end_dt_param = now_utc.strftime("%Y%m%d%H%M%S")
-
-        if start_dt_raw is not None and end_dt_raw is not None and end_dt_raw < start_dt_raw:
-            trace["error"] = "end_date is before start_date"
+        if country_error:
+            trace["error"] = country_error
             trace["duration_ms"] = int((time.time() - started) * 1000)
             self.last_trace = trace
             if self.verbose:
-                logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
+                logger.info(json.dumps({"seerist_trace": trace}, ensure_ascii=False))
             return []
 
-        q = (query or "").strip()
-        if re.search(r"\bsourcelang:", q, flags=re.IGNORECASE):
-            base_query = q
-        elif q:
-            base_query = f"({q}) AND sourcelang:english"
-        else:
-            base_query = "sourcelang:english"
+        try:
+            start_iso = self._format_datetime(start_date, end_of_day=False)
+            end_iso = self._format_datetime(end_date, end_of_day=True)
+        except ValueError as exc:
+            trace["error"] = str(exc)
+            trace["duration_ms"] = int((time.time() - started) * 1000)
+            self.last_trace = trace
+            if self.verbose:
+                logger.info(json.dumps({"seerist_trace": trace}, ensure_ascii=False))
+            return []
 
-        params = {
-            "query": base_query,
-            "mode": "artlist",
-            "maxrecords": max_records,
-            "format": "json",
-            "sort": "DateDesc",
-            "startdatetime": start_dt_param,
-            "enddatetime": end_dt_param
-        }
+        all_documents: List[Dict[str, Any]] = []
+        seen_doc_ids = set()
+        query_errors: List[str] = []
 
-        def run_once(p: Dict[str, Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
-            resp = requests.get(self.BASE_URL, params=p, timeout=30, headers=self.HEADERS)
-            trace["status_code"] = resp.status_code
-            trace["request_url"] = getattr(resp, "url", None)
-            trace["content_type"] = (resp.headers or {}).get("Content-Type")
-            trace["response_snippet"] = None
-
-            if resp.status_code >= 400:
-                snippet = (resp.text or "").strip()
-                trace["response_snippet"] = (snippet[:2000] if snippet else "")
-                return [], (snippet[:2000] if snippet else f"HTTP {resp.status_code}")
-
-            ctype = (resp.headers or {}).get("Content-Type") or ""
-            if ctype and "json" not in ctype.lower():
-                snippet = (resp.text or "").strip()
-                trace["response_snippet"] = (snippet[:2000] if snippet else "")
-                return [], (snippet[:2000] if snippet else f"Non-JSON response (Content-Type={ctype})")
-
-            try:
-                data = resp.json() if resp.text.strip() else {}
-            except Exception as e:
-                trace["response_snippet"] = (resp.text or "")[:2000]
-                return [], f"Failed to parse JSON response: {str(e)}"
-
-            if isinstance(data, dict) and data.get("error"):
-                return [], str(data.get("error"))[:2000]
-
-            articles = data.get("articles", [])
-            trace["num_articles"] = len(articles) if isinstance(articles, list) else 0
-            documents: List[Dict[str, Any]] = []
-            for art in articles if isinstance(articles, list) else []:
-                content = self._scrape_content(art.get("url"))
-                publisher = art.get("domain", "")
-                safe_content = content if content else (art.get("title", "") or "")
-                documents.append({
-                    "doc_id": f"gdelt_{uuid.uuid4().hex[:8]}",
-                    "title": art.get("title", ""),
-                    "url": art.get("url", ""),
-                    "source": "GDELT",
-                    "publisher": publisher,
-                    "date": art.get("seendate", "")[:8],
-                    "content": safe_content[:5000],
-                })
-            return documents, None
-
-        documents: List[Dict[str, Any]] = []
-        last_error: Optional[str] = None
-        for attempt in range(self.MAX_RETRIES):
-            trace["attempts"] = attempt + 1
-            try:
-                resp = requests.get(self.BASE_URL, params=params, timeout=30, headers=self.HEADERS)
-                trace["status_code"] = resp.status_code
-                trace["request_url"] = getattr(resp, "url", None)
-                trace["content_type"] = (resp.headers or {}).get("Content-Type")
-                trace["response_snippet"] = None
-
-                if resp.status_code == 429:
-                    time.sleep(2 ** attempt)
+        for query in unique_queries:
+            self._enforce_rate_limit()
+            documents, query_trace = self._query_documents(
+                search_query=query,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                aoi_id=aoi_id or "",
+                max_records=max_per_query,
+            )
+            trace["query_traces"].append(query_trace)
+            if query_trace.get("error"):
+                query_errors.append(str(query_trace["error"]))
+            for document in documents:
+                doc_id = document.get("doc_id")
+                if not doc_id or doc_id in seen_doc_ids:
                     continue
+                seen_doc_ids.add(doc_id)
+                all_documents.append(document)
 
-                if resp.status_code >= 400:
-                    snippet = (resp.text or "").strip()
-                    trace["response_snippet"] = (snippet[:2000] if snippet else "")
-                    last_error = (snippet[:2000] if snippet else f"HTTP {resp.status_code}")
-                    break
-
-                ctype = (resp.headers or {}).get("Content-Type") or ""
-                if ctype and "json" not in ctype.lower():
-                    snippet = (resp.text or "").strip()
-                    trace["response_snippet"] = (snippet[:2000] if snippet else "")
-                    last_error = (snippet[:2000] if snippet else f"Non-JSON response (Content-Type={ctype})")
-                    break
-
-                try:
-                    data = resp.json() if resp.text.strip() else {}
-                except Exception as e:
-                    trace["response_snippet"] = (resp.text or "")[:2000]
-                    last_error = f"Failed to parse JSON response: {str(e)}"
-                    break
-
-                if isinstance(data, dict) and data.get("error"):
-                    last_error = str(data.get("error"))[:2000]
-                    break
-
-                articles = data.get("articles", [])
-                trace["num_articles"] = len(articles) if isinstance(articles, list) else 0
-                for art in articles if isinstance(articles, list) else []:
-                    content = self._scrape_content(art.get("url"))
-                    publisher = art.get("domain", "")
-                    safe_content = content if content else (art.get("title", "") or "")
-                    documents.append({
-                        "doc_id": f"gdelt_{uuid.uuid4().hex[:8]}",
-                        "title": art.get("title", ""),
-                        "url": art.get("url", ""),
-                        "source": "GDELT",
-                        "publisher": publisher,
-                        "date": art.get("seendate", "")[:8],
-                        "content": safe_content[:5000],
-                    })
-
-                if documents:
-                    last_error = None
-                break
-            except Exception as e:
-                last_error = str(e)
-                time.sleep(1)
-
-        if not documents and 'repeat2:"' in base_query:
-            relaxed_q = re.sub(r'repeat2:"([^"]+)"', r'\1', base_query)
-            if relaxed_q != base_query:
-                trace["fallback_used"] = True
-                trace["fallback_query"] = relaxed_q
-                fallback_params = dict(params)
-                fallback_params["query"] = relaxed_q
-                documents, last_error = run_once(fallback_params)
-
-        if not documents and last_error and "too short or too long" in last_error.lower():
-            hint: Optional[str] = None
-            m = re.search(r'repeat\d+:"([^"]+)"', base_query, flags=re.IGNORECASE)
-            if m:
-                hint = m.group(1)
-            if not hint:
-                m = re.search(r'"([^"]{2,})"', base_query)
-                if m:
-                    hint = m.group(1)
-
-            if hint:
-                safe_hint = self._escape_query_value(hint)
-                minimal_terms: Sequence[str] = (
-                    "market",
-                    "prices",
-                    "inflation",
-                    "currency",
-                    "exchange rate",
-                )
-                minimal_topic_clause = self._format_or_group(minimal_terms)
-                if minimal_topic_clause:
-                    relaxed_q = f'"{safe_hint}" AND {minimal_topic_clause} AND sourcelang:english'
-                    trace["fallback_used"] = True
-                    trace["fallback_query"] = relaxed_q
-                    fallback_params = dict(params)
-                    fallback_params["query"] = relaxed_q
-                    documents, last_error = run_once(fallback_params)
-
-        trace["num_documents"] = len(documents)
+        trace["num_documents"] = len(all_documents)
         trace["samples"] = [
             {
-                "title": d.get("title", ""),
-                "url": d.get("url", ""),
-                "date": d.get("date", ""),
-                "publisher": d.get("publisher", ""),
+                "title": doc.get("title", ""),
+                "date": doc.get("date", ""),
+                "doc_id": doc.get("doc_id", ""),
             }
-            for d in documents[:3]
+            for doc in all_documents[:3]
         ]
-        trace["error"] = last_error
+        if not all_documents and query_errors:
+            trace["error"] = "; ".join(dict.fromkeys(query_errors))
         trace["duration_ms"] = int((time.time() - started) * 1000)
         self.last_trace = trace
         if self.verbose:
-            logger.info(json.dumps({"gdelt_trace": trace}, ensure_ascii=False))
-        return documents
+            logger.info(json.dumps({"seerist_trace": trace}, ensure_ascii=False))
+        return all_documents
 
 
 class ReliefWebRetriever:
@@ -393,7 +473,6 @@ class ReliefWebRetriever:
         "fuel price",
         "wage",
     )
-
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
@@ -429,7 +508,7 @@ class ReliefWebRetriever:
         end_date: str,
         max_records: int = 10,
         query: Optional[str] = None,
-    ) -> List[Dict]:
+    ) -> List[Dict[str, Any]]:
         started = time.time()
         trace: Dict[str, Any] = {
             "retriever": "ReliefWeb",
@@ -460,8 +539,8 @@ class ReliefWebRetriever:
                 "operator": "AND",
                 "conditions": [
                     {"field": "country", "value": country},
-                    {"field": "date.created", "value": {"from": start_iso, "to": end_iso}}
-                ]
+                    {"field": "date.created", "value": {"from": start_iso, "to": end_iso}},
+                ],
             },
             "limit": max_records,
             "fields": {"include": ["title", "url", "source", "date.created", "body"]},
@@ -499,8 +578,8 @@ class ReliefWebRetriever:
 
             try:
                 parsed = resp.json() if resp.text.strip() else {}
-            except Exception as e:
-                trace["error"] = f"Failed to parse JSON response: {str(e)}"
+            except Exception as exc:
+                trace["error"] = f"Failed to parse JSON response: {exc}"
                 trace["duration_ms"] = int((time.time() - started) * 1000)
                 self.last_trace = trace
                 if self.verbose:
@@ -522,14 +601,16 @@ class ReliefWebRetriever:
                     body_val = ""
                 if not isinstance(body_val, str):
                     body_val = json.dumps(body_val, ensure_ascii=False)
-                documents.append({
-                    "doc_id": f"rw_{item.get('id', '')}",
-                    "title": fields.get("title", ""),
-                    "url": fields.get("url", ""),
-                    "source": "ReliefWeb",
-                    "date": (date_created or "")[:10],
-                    "content": body_val[:5000]
-                })
+                documents.append(
+                    {
+                        "doc_id": f"rw_{item.get('id', '')}",
+                        "title": fields.get("title", ""),
+                        "url": fields.get("url", ""),
+                        "source": "ReliefWeb",
+                        "date": (date_created or "")[:10],
+                        "content": body_val[:5000],
+                    }
+                )
 
             trace["num_documents"] = len(documents)
             trace["samples"] = [
@@ -541,8 +622,8 @@ class ReliefWebRetriever:
             if self.verbose:
                 logger.info(json.dumps({"reliefweb_trace": trace}, ensure_ascii=False))
             return documents
-        except Exception as e:
-            trace["error"] = str(e)
+        except Exception as exc:
+            trace["error"] = str(exc)
             trace["duration_ms"] = int((time.time() - started) * 1000)
             self.last_trace = trace
             if self.verbose:

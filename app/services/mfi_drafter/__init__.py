@@ -1,46 +1,16 @@
-"""
-MFI Drafter Service
-===================
-Servizio per la generazione di Market Functionality Index Reports.
-"""
-from .router import router
-from .graph import (
-    run_mfi_report_generation,
-    build_graph,
-    create_initial_state,
-    DIMENSION_DESCRIPTIONS
-)
-from .schemas import (
-    MFI_DIMENSIONS,
-    RISK_COLORS,
-    get_risk_level,
-    Document,
-    MFIMarketData,
-    MFIDimensionScore,
-    DimensionFinding,
-    SkepticFlag,
-    SurveyMetadata,
-    GenerateMFIReportInput,
-    GenerateMFIReportOutput,
-    MFIReportStatusOutput
-)
+"""MFI Drafter service package."""
+
+from importlib import import_module
 
 __all__ = [
-    # Router
     "router",
-    
-    # Graph
     "run_mfi_report_generation",
     "build_graph",
     "create_initial_state",
     "DIMENSION_DESCRIPTIONS",
-    
-    # Constants
     "MFI_DIMENSIONS",
     "RISK_COLORS",
     "get_risk_level",
-    
-    # Schemas
     "Document",
     "MFIMarketData",
     "MFIDimensionScore",
@@ -49,5 +19,35 @@ __all__ = [
     "SurveyMetadata",
     "GenerateMFIReportInput",
     "GenerateMFIReportOutput",
-    "MFIReportStatusOutput"
+    "MFIReportStatusOutput",
 ]
+
+
+def __getattr__(name: str):
+    if name == "router":
+        from .router import router
+
+        return router
+    if name in {
+        "run_mfi_report_generation",
+        "build_graph",
+        "create_initial_state",
+        "DIMENSION_DESCRIPTIONS",
+    }:
+        return getattr(import_module(".graph", __name__), name)
+    if name in {
+        "MFI_DIMENSIONS",
+        "RISK_COLORS",
+        "get_risk_level",
+        "Document",
+        "MFIMarketData",
+        "MFIDimensionScore",
+        "DimensionFinding",
+        "SkepticFlag",
+        "SurveyMetadata",
+        "GenerateMFIReportInput",
+        "GenerateMFIReportOutput",
+        "MFIReportStatusOutput",
+    }:
+        return getattr(import_module(".schemas", __name__), name)
+    raise AttributeError(name)

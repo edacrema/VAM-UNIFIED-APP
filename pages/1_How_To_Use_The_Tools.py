@@ -198,12 +198,10 @@ with left:
 1. **Country**: Select the country for which the report should be generated.
 2. **Time Period**: Select the reference month (e.g., January 2026). The system will analyze price trends for that month against the previous 12 months.
 
-**Important**: Do not check **"Use Mock Data"** if the country you want to generate the report for is available in the Country dropdown list. Mock data is only intended for testing purposes when data for a specific country is not yet available in the system.
-
 Once you select the country and period, the system will **automatically populate**:
 
-- **Commodities**: The commodities for which data are available for the selected country and month. You can remove any commodity you want to exclude from the report.
-- **Regions (Admin1)**: The regions for which data are available. You can remove any region you want to exclude.
+- **Commodities**: The commodities available from Databridges for the selected country. You can remove any commodity you want to exclude from the report.
+- **Regions (Admin1)**: The Databridges market regions available for the selected country. You can remove any region you want to exclude.
 - **Currency Code**: Required to download macroeconomic data from TradingEconomics for the optional modules.
 
 **Optional fields:**
@@ -232,14 +230,14 @@ st.header("4. MFI Report Drafter")
 st.subheader("What it does")
 st.markdown(
     """
-The MFI Report Drafter generates a complete Market Functionality Index (MFI) assessment report from processed MFI data.
+The MFI Report Drafter generates a complete Market Functionality Index (MFI) assessment report from processed MFI data retrieved directly from Databridges.
     """
 )
 
 st.subheader("When to use it")
 st.markdown(
     """
-Use this tool **after** your raw MFI data has been uploaded to DataBridges and processed. You need the **processed CSV** that you can download from DataBridges once processing is complete and the MFI scores have been calculated.
+Use this tool **after** your raw MFI data has been uploaded to Databridges and processed. The drafter reads the processed survey rows from Databridges; you do not need to download or upload a processed CSV.
     """
 )
 
@@ -248,10 +246,10 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-1. **Upload the processed MFI CSV**: This is the file you download from DataBridges after it has processed your raw data and computed the MFI scores.
-2. *(Optional)* **Country Override**: Specify the country if you want to override what the agent detects from the data.
-3. *(Optional)* **Start Override / End Override**: Specify the data collection start and end dates. However, the agent should be able to extract this information automatically from the processed dataset.
-4. **Click "Validate CSV"** to verify the file is a valid processed MFI dataset, then click **"Run"**.
+1. **Select a country** with available MFI surveys in Databridges.
+2. *(Optional)* **Filter surveys by date range** to narrow the list.
+3. **Select one survey** from the available Databridges surveys.
+4. **Click "Run"** to generate the MFI report from the selected survey.
         """
     )
 with right:

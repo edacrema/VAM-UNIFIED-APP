@@ -34,13 +34,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.shared.llm import get_model
-from app.shared.retrievers import GDELTRetriever, ReliefWebRetriever
+from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 
 from .data_loader import (
     extract_time_series_from_csv,
     calculate_statistics_from_csv,
     check_data_availability,
-    normalize_country_name
 )
 
 logger = logging.getLogger(__name__)
@@ -172,7 +171,7 @@ def create_initial_state(
         visualizations={},
         documents=[],
         document_references=[],
-        news_counts={"GDELT": 0, "ReliefWeb": 0, "total": 0},
+        news_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
         events=[],
         trend_analysis=None,
@@ -670,11 +669,11 @@ def node_data_agent(state: MarketReportState) -> dict:
     Nodo: Recupera e processa i dati.
     
     Supports two modes:
-    - use_mock_data=True: Uses generated mock data (original behavior)
-    - use_mock_data=False: Loads real data from data/price_data.csv
-    
-    The function gracefully falls back to mock data if CSV loading fails,
-    adding appropriate warnings to the state.
+    - use_mock_data=True: Uses generated mock data for explicit testing only
+    - use_mock_data=False: Loads Databridges price data
+
+    Databridges failures are raised so users see actionable errors instead of
+    silently receiving generated data.
     """
     logger.info(f"[DataAgent] Processing data for {state['country']}")
 
@@ -684,19 +683,14 @@ def node_data_agent(state: MarketReportState) -> dict:
 
     if not commodity_list and not use_mock:
         from .data_loader import (
-            load_csv_price_data,
             get_available_commodities,
-            normalize_country_name
         )
         try:
-            df = load_csv_price_data()
-            country_normalized = normalize_country_name(country)
-            available = get_available_commodities(df, country_normalized)
+            available = get_available_commodities(country)
             commodity_list = _select_default_commodities(available)
             logger.info(f"[DataAgent] Auto-selected commodities: {commodity_list}")
         except Exception as e:
-            logger.warning(f"[DataAgent] Could not auto-select commodities: {e}")
-            commodity_list = []
+            raise RuntimeError(f"Could not auto-select Databridges commodities: {e}") from e
 
     warnings = []
     
@@ -715,9 +709,9 @@ def node_data_agent(state: MarketReportState) -> dict:
         
     else:
         # =====================================================================
-        # CSV DATA MODE (New behavior)
+        # DATABRIDGES DATA MODE
         # =====================================================================
-        logger.info("[DataAgent] Loading data from CSV file")
+        logger.info("[DataAgent] Loading data from Databridges")
         
         try:
             # First, check what data is available
@@ -738,7 +732,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             if availability.get("warnings"):
                 warnings.extend(availability["warnings"])
             
-            # Extract time series from CSV
+            # Extract time series from Databridges
             df_national, df_regional = extract_time_series_from_csv(
                 country=state["country"],
                 time_period=state["time_period"],
@@ -746,59 +740,32 @@ def node_data_agent(state: MarketReportState) -> dict:
                 admin1_list=state["admin1_list"]
             )
             
-            # Calculate statistics using CSV-compatible function
+            # Calculate statistics using the existing report statistics contract
             stats = calculate_statistics_from_csv(
                 df_national, 
                 commodity_list
             )
+            food_basket_stats = stats.get("food_basket", {}) if isinstance(stats, dict) else {}
+            missing_latest_components = food_basket_stats.get("missing_latest_component_names") or []
+            selected_component_count = food_basket_stats.get("selected_component_count")
+            latest_component_count = food_basket_stats.get("latest_component_count")
+            latest_component_names = food_basket_stats.get("latest_component_names") or []
+            if missing_latest_components and selected_component_count:
+                warnings.append(
+                    f"Food basket for {state['time_period']} is based on "
+                    f"{latest_component_count} of {selected_component_count} selected commodities "
+                    f"with target-month data ({', '.join(latest_component_names) or 'none'}). "
+                    f"Missing target-month components: {', '.join(missing_latest_components)}."
+                )
             
             logger.info(
                 f"[DataAgent] Successfully loaded {len(df_national)} months of data "
                 f"with {len(df_national.columns)} columns"
             )
             
-        except FileNotFoundError as e:
-            # CSV file doesn't exist - fallback to mock
-            logger.error(f"[DataAgent] CSV file not found: {e}")
-            warnings.append(
-                f"Price data file not found: {e}. Falling back to mock data."
-            )
-            df_national, df_regional = generate_mock_time_series(
-                state["country"],
-                state["time_period"],
-                commodity_list,
-                state["admin1_list"]
-            )
-            stats = calculate_statistics(df_national)
-            
-        except ValueError as e:
-            # Data validation error (country not found, date range issues, etc.)
-            logger.error(f"[DataAgent] Data validation error: {e}")
-            warnings.append(
-                f"Data validation error: {str(e)}. Falling back to mock data."
-            )
-            df_national, df_regional = generate_mock_time_series(
-                state["country"],
-                state["time_period"],
-                commodity_list,
-                state["admin1_list"]
-            )
-            stats = calculate_statistics(df_national)
-            
         except Exception as e:
-            # Any other unexpected error
-            logger.exception(f"[DataAgent] Unexpected error loading CSV: {e}")
-            warnings.append(
-                f"Unexpected error loading price data: {str(e)}. "
-                f"Falling back to mock data."
-            )
-            df_national, df_regional = generate_mock_time_series(
-                state["country"],
-                state["time_period"],
-                commodity_list,
-                state["admin1_list"]
-            )
-            stats = calculate_statistics(df_national)
+            logger.exception(f"[DataAgent] Failed to load Databridges price data: {e}")
+            raise
     
     # =========================================================================
     # RETURN STATE UPDATE
@@ -946,6 +913,7 @@ def node_news_retrieval(state: MarketReportState) -> dict:
 
     documents: List[Dict[str, Any]] = []
     retriever_traces: List[Dict[str, Any]] = []
+    warnings: List[str] = []
 
     country = state.get("country", "")
     time_period = state.get("time_period", "")
@@ -976,17 +944,33 @@ def node_news_retrieval(state: MarketReportState) -> dict:
     if getattr(rw, "last_trace", None):
         retriever_traces.append(rw.last_trace)
 
-    gdelt = GDELTRetriever(verbose=False)
-    gd_query = GDELTRetriever.build_economy_query(
+    seerist = SeeristRetriever(verbose=False)
+    seerist_queries = [
+        SeeristRetriever.build_lucene_or_query(
+            list(SeeristRetriever.DEFAULT_ECON_TERMS)
+            + ["food security", "wheat", "sorghum", "rice", "cooking oil"]
+        ),
+        SeeristRetriever.build_lucene_or_query(
+            ["market", "food security", "inflation", "currency", "availability"]
+        ),
+        "",
+    ]
+    seerist_docs = seerist.fetch_batch(
+        queries=seerist_queries,
+        start_date=start_date,
+        end_date=end_date,
         country=country,
-        extra_terms=["food security", "wheat", "sorghum", "rice", "cooking oil"],
+        max_per_query=10,
     )
-    gd_docs = gdelt.fetch(query=gd_query, start_date=start_date, end_date=end_date, max_records=10)
-    if getattr(gdelt, "last_trace", None):
-        retriever_traces.append(gdelt.last_trace)
+    if len(seerist_docs) > 10:
+        seerist_docs = seerist_docs[:10]
+    if getattr(seerist, "last_trace", None):
+        retriever_traces.append(seerist.last_trace)
+        if seerist.last_trace.get("error"):
+            warnings.append(f"Seerist retrieval unavailable for {country}: {seerist.last_trace['error']}")
     
 
-    combined = list(rw_docs) + list(gd_docs)
+    combined = list(rw_docs) + list(seerist_docs)
     seen_keys = set()
     deduped: List[Dict[str, Any]] = []
     for d in combined:
@@ -1013,18 +997,21 @@ def node_news_retrieval(state: MarketReportState) -> dict:
 
     counts = Counter([d.get("source", "Unknown") for d in documents])
     news_counts = {
-        "GDELT": int(counts.get("GDELT", 0)),
+        "Seerist": int(counts.get("Seerist", 0)),
         "ReliefWeb": int(counts.get("ReliefWeb", 0)),
         "total": int(len(documents)),
     }
-    
-    return {
+
+    updates = {
         "documents": documents,
         "document_references": refs,
         "news_counts": news_counts,
         "retriever_traces": retriever_traces,
-        "current_node": "news_retrieval"
+        "current_node": "news_retrieval",
     }
+    if warnings:
+        updates["warnings"] = warnings
+    return updates
 
 
 # ============================================================================

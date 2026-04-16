@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:snowan.gitbook.io)",
+      "Bash(find . -name \"*.py\" -exec grep -l \"docker\\\\|Docker\\\\|DOCKER\\\\|Cloud Run\\\\|cloud.run\\\\|gcp\\\\|GCP\" {} \\\\;)",
+      "Bash(sed 's/\"//g')"
+    ]
+  }
+}

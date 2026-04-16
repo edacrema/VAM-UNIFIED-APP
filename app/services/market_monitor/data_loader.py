@@ -1,476 +1,198 @@
-"""
-Market Monitor - Data Loader
-============================
-Functions to load and process price data from CSV files.
-
-This module replaces the mock data generation in graph.py with real
-data loading from CSV files.
-
-Features:
-- Loads price data from CSV
-- Normalizes country names
-- Extracts time series with complete date index (no missing rows)
-- Handles missing data gracefully (NaN values preserved)
-- Calculates MoM and YoY statistics
-
-Usage:
-    from .data_loader import (
-        extract_time_series_from_csv,
-        calculate_statistics_from_csv,
-        check_data_availability
-    )
-"""
+"""Databridges-backed data loading for the Price Bulletin drafter."""
 from __future__ import annotations
 
 import logging
-import os
-import re
-import tempfile
-import threading
-
-from pathlib import Path
+import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+from app.shared.countries import (
+    COUNTRY_CURRENCIES,
+    normalize_country_name as _normalize_country_name,
+    resolve_country,
+    supported_country_options,
+)
+from app.shared.databridges import get_databridges_client
+from app.shared.gcs import (
+    download_gcs_to_file as _download_gcs_to_file,
+    parse_gcs_uri as _parse_gcs_uri,
+)
 
 logger = logging.getLogger(__name__)
 
-# Path to the data directory (relative to this file's location)
 DATA_DIR = Path(__file__).parent / "data"
+_CACHE_TTL_SECONDS = 15 * 60
+_RECENT_METADATA_MONTHS = 36
+_ALLOWED_PRICE_FLAGS = {"actual", "aggregate", "aggregated"}
 
-_GCS_CLIENT_LOCK = threading.Lock()
-_GCS_CLIENT: Any = None
-_PRICE_DATA_CACHE_LOCK = threading.Lock()
-_PRICE_DATA_CACHE_PATH: Optional[str] = None
-_PRICE_DATA_CACHE_MTIME: Optional[float] = None
-_PRICE_DATA_CACHE_DF: Optional[pd.DataFrame] = None
-
-
-def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
-    uri = (uri or "").strip()
-    if not uri.startswith("gs://"):
-        raise ValueError("Invalid GCS URI")
-    path = uri[5:]
-    bucket, _, obj = path.partition("/")
-    return bucket, obj
-
-
-def _get_gcs_client() -> Any:
-    global _GCS_CLIENT
-    if _GCS_CLIENT is not None:
-        return _GCS_CLIENT
-    with _GCS_CLIENT_LOCK:
-        if _GCS_CLIENT is not None:
-            return _GCS_CLIENT
-        try:
-            from google.cloud import storage  # type: ignore
-
-            _GCS_CLIENT = storage.Client()
-        except Exception:
-            logger.exception("Failed to initialize GCS client")
-            _GCS_CLIENT = None
-        return _GCS_CLIENT
-
-
-def _get_price_data_gcs_uri() -> Optional[str]:
-    uri = (os.getenv("PRICE_DATA_GCS_URI") or "").strip()
-    if uri:
-        return uri
-    uri = (os.getenv("MARKET_MONITOR_PRICE_DATA_GCS_URI") or "").strip()
-    return uri or None
-
-
-def _get_price_data_cache_path() -> Path:
-    cache_dir = (os.getenv("PRICE_DATA_CACHE_DIR") or "").strip() or tempfile.gettempdir()
-    return Path(cache_dir) / "price_data.csv"
-
-
-def _download_gcs_to_file(gcs_uri: str, destination: Path) -> None:
-    client = _get_gcs_client()
-    if client is None:
-        raise FileNotFoundError("GCS client is not available")
-
-    bucket_name, object_name = _parse_gcs_uri(gcs_uri)
-    if not bucket_name or not object_name:
-        raise FileNotFoundError("Invalid GCS URI")
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(object_name)
-    blob.download_to_filename(str(destination))
-
-
-def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
-    client = _get_gcs_client()
-    if client is None:
-        raise RuntimeError("GCS client is not available")
-
-    bucket_name, object_name = _parse_gcs_uri(gcs_uri)
-    if not bucket_name or not object_name:
-        raise RuntimeError("Invalid GCS URI")
-
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(object_name)
-    blob.upload_from_string(content, content_type="text/csv")
-
-
-def _read_price_csv(csv_path: Path) -> pd.DataFrame:
-    try:
-        return pd.read_csv(csv_path)
-    except pd.errors.ParserError as exc:
-        logger.warning(
-            "CSV parse error; retrying with python engine and best-effort settings.",
-            exc_info=exc,
-        )
-        try:
-            return pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
-        except TypeError:
-            return pd.read_csv(csv_path, engine="python")
-        except Exception as exc2:
-            raise ValueError(
-                "Failed to parse price_data.csv. Ensure fields with commas are properly quoted."
-            ) from exc2
-
-
-def _normalize_column_key(column: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", column.lower().strip())
-
-
-def _normalize_price_data_columns(df: pd.DataFrame) -> pd.DataFrame:
-    column_map = {
-        "admin1": "Admin 1",
-        "admin2": "Admin 2",
-        "marketname": "Market Name",
-        "pricetype": "Price Type",
-        "pricedate": "Price Date",
-        "date": "Price Date",
-        "dateprice": "Price Date",
-        "collectionfrequency": "Collection Frequency",
-        "datasource": "Data Source",
-        "datatype": "Data Type",
-        "trend": "Trend",
-        "analysisvaluepewi": "ValuePewi",
-        "valuepewi": "ValuePewi",
-        "alpsphase": "ALPS Phase",
-        "upper95ci": "Upper (95%) CI",
-        "lower95ci": "Lower (95%) CI",
-        "forecastmethodology": "Forecast Methodology",
-        "country": "Country",
-        "commodity": "Commodity",
-        "price": "Price",
-        "unit": "Unit",
-    }
-
-    rename_map: Dict[str, str] = {}
-    for column in df.columns:
-        key = _normalize_column_key(column)
-        rename_map[column] = column_map.get(key, column.strip())
-
-    df = df.rename(columns=rename_map)
-
-    if df.columns.duplicated().any():
-        duplicates = df.columns[df.columns.duplicated()].unique().tolist()
-        logger.warning(
-            "Duplicate columns after normalization: %s. Keeping first occurrence.",
-            duplicates,
-        )
-        df = df.loc[:, ~df.columns.duplicated()]
-
-    return df
-
-
-def _normalize_price_dates(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, format="%d/%m/%Y", errors="coerce")
-    missing = parsed.isna()
-    if missing.any():
-        parsed_alt = pd.to_datetime(series[missing], errors="coerce", dayfirst=True)
-        parsed.loc[missing] = parsed_alt
-    return parsed
-
-
-def _strip_string_columns(df: pd.DataFrame, columns: List[str]) -> None:
-    for column in columns:
-        if column in df.columns:
-            df[column] = df[column].astype("string").str.strip()
-
-
-def _normalize_price_data_df(df: pd.DataFrame) -> pd.DataFrame:
-    df = _normalize_price_data_columns(df)
-
-    for required_column in [
-        "Upper (95%) CI",
-        "Lower (95%) CI",
-        "Forecast Methodology",
-    ]:
-        if required_column not in df.columns:
-            df[required_column] = pd.NA
-
-    required_columns = ["Country", "Commodity", "Price Date", "Price", "Admin 1", "Market Name"]
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(
-            "Price data missing required columns after normalization: "
-            f"{', '.join(missing_columns)}"
-        )
-
-    _strip_string_columns(
-        df,
-        [
-            "Country",
-            "Commodity",
-            "Admin 1",
-            "Admin 2",
-            "Market Name",
-            "Data Source",
-            "Collection Frequency",
-            "Data Type",
-            "Price Type",
-            "Unit",
-        ],
-    )
-
-    df["Price Date"] = _normalize_price_dates(df["Price Date"])
-    df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
-
-    if "Data Type" in df.columns:
-        data_type = df["Data Type"].astype("string").str.strip().str.lower()
-        data_type = data_type.replace({"": pd.NA, "aggregate": "aggregated"})
-        df["Data Type"] = data_type.str.title()
-        before_filter = len(df)
-        allowed_types = {"Aggregated", "Actual"}
-        df = df[(df["Data Type"].isna()) | (df["Data Type"].isin(allowed_types))]
-        filtered = before_filter - len(df)
-        if filtered:
-            logger.info("Filtered %s non-aggregated rows (e.g., Forecast).", filtered)
-
-    if "Unit" in df.columns:
-        nonstandard_units = df["Unit"].astype("string").str.contains(r"\d", na=False)
-        if nonstandard_units.any():
-            sample_units = sorted(
-                df.loc[nonstandard_units, "Unit"].dropna().unique().tolist()
-            )
-            logger.warning(
-                "Found %s rows with nonstandard Unit values (sample: %s). Keeping as-is.",
-                int(nonstandard_units.sum()),
-                sample_units[:5],
-            )
-
-    initial_len = len(df)
-    df = df.drop_duplicates()
-    if len(df) < initial_len:
-        logger.info("Dropped %s duplicate rows.", initial_len - len(df))
-
-    # Remove rows with invalid dates or prices
-    initial_len = len(df)
-    df = df.dropna(subset=["Price Date", "Price"])
-    if len(df) < initial_len:
-        logger.warning(f"Dropped {initial_len - len(df)} rows with invalid date/price")
-
-    return df
-
-
-# ============================================================================
-# COUNTRY NAME MAPPING
-# ============================================================================
-
-# Maps various country name formats to the canonical form used in the CSV
-COUNTRY_NAME_MAPPING = {
-    # Syrian Arab Republic variations
-    "syria": "Syrian Arab Republic",
-    "syrian arab republic": "Syrian Arab Republic",
-    "syr": "Syrian Arab Republic",
-    "syrian": "Syrian Arab Republic",
-    
-    # South Sudan variations
-    "south sudan": "South Sudan",
-    "southsudan": "South Sudan",
-    "ssd": "South Sudan",
-    "s. sudan": "South Sudan",
-    
-    # Lebanon variations
-    "lebanon": "Lebanon",
-    "lbn": "Lebanon",
-    
-    # Additional country mappings (add as needed)
-    "sudan": "Sudan",
-    "yemen": "Yemen",
-    "myanmar": "Myanmar",
-    "burma": "Myanmar",
-    "afghanistan": "Afghanistan",
-    "ethiopia": "Ethiopia",
-    "nigeria": "Nigeria",
-    "pakistan": "Pakistan",
-    "bangladesh": "Bangladesh",
-    "kenya": "Kenya",
-    "uganda": "Uganda",
-    "tanzania": "Tanzania",
-    "zambia": "Zambia",
-    "malawi": "Malawi",
-    "haiti": "Haiti",
-    "democratic republic of congo": "Democratic Republic of Congo",
-    "drc": "Democratic Republic of Congo",
-    "congo": "Democratic Republic of Congo",
-    "somalia": "Somalia",
-}
+_COMMODITY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_MARKET_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_PRICE_CACHE: dict[tuple[Any, ...], tuple[float, pd.DataFrame]] = {}
+_METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def normalize_country_name(country: str) -> str:
-    """
-    Normalize country name to match CSV format.
-    
-    Args:
-        country: Input country name (any format)
-    
-    Returns:
-        Normalized country name matching the CSV
-    
-    Examples:
-        >>> normalize_country_name("Syria")
-        'Syrian Arab Republic'
-        >>> normalize_country_name("South Sudan")
-        'South Sudan'
-    """
-    # Try exact match first (already in canonical form)
-    if country in COUNTRY_NAME_MAPPING.values():
-        return country
-    
-    # Try case-insensitive lookup
-    country_lower = country.lower().strip()
-    if country_lower in COUNTRY_NAME_MAPPING:
-        return COUNTRY_NAME_MAPPING[country_lower]
-    
-    # Return original if no mapping found
-    logger.warning(f"No country mapping found for '{country}', using as-is")
-    return country
+    """Normalize a UI country value to the canonical country name."""
+    return _normalize_country_name(country)
 
 
-# ============================================================================
-# CSV DATA LOADER
-# ============================================================================
+def reset_market_monitor_caches_for_tests() -> None:
+    _COMMODITY_CACHE.clear()
+    _MARKET_CACHE.clear()
+    _PRICE_CACHE.clear()
+    _METADATA_CACHE.clear()
 
 
 def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
-    """
-    Load the price data CSV file.
-    
-    Args:
-        csv_path: Optional path to CSV file. Defaults to data/price_data.csv
-    
-    Returns:
-        DataFrame with price data, dates parsed
-    
-    Raises:
-        FileNotFoundError: If CSV file doesn't exist
-    """
-    global _PRICE_DATA_CACHE_PATH, _PRICE_DATA_CACHE_MTIME, _PRICE_DATA_CACHE_DF
+    """Deprecated compatibility shim for the removed spreadsheet data path."""
+    raise FileNotFoundError(
+        "The provisional price_data.csv path has been removed. Price Bulletin "
+        "data is now retrieved from Databridges."
+    )
 
-    if csv_path is None:
-        gcs_uri = _get_price_data_gcs_uri()
-        if gcs_uri:
-            cache_path = _get_price_data_cache_path()
-            if not cache_path.exists():
-                try:
-                    _download_gcs_to_file(gcs_uri, cache_path)
-                except Exception as e:
-                    logger.exception("Failed to download price data from GCS")
-                    raise FileNotFoundError(f"Failed to load price data from GCS: {e}")
-            csv_path = cache_path
-        else:
-            csv_path = DATA_DIR / "price_data.csv"
 
-    csv_path_str = str(csv_path)
-    if csv_path_str.startswith("gs://"):
-        gcs_uri = csv_path_str
-        cache_path = _get_price_data_cache_path()
-        if not cache_path.exists():
-            try:
-                _download_gcs_to_file(gcs_uri, cache_path)
-            except Exception as e:
-                logger.exception("Failed to download price data from GCS")
-                raise FileNotFoundError(f"Failed to load price data from GCS: {e}")
-        csv_path = cache_path
+def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
+    """Deprecated compatibility shim for removed dataset upload endpoints."""
+    raise RuntimeError(
+        "Uploading processed Price Bulletin datasets is no longer supported. "
+        "Use the Price Data Validator to validate raw files before Databridges upload."
+    )
+
+
+def get_supported_countries() -> List[Dict[str, Any]]:
+    """Return country options backed by the existing ISO3/currency mapping."""
+    return supported_country_options()
+
+
+def get_available_countries(df: Optional[pd.DataFrame] = None) -> List[str]:
+    if df is not None and "Country" in df.columns:
+        return sorted(df["Country"].dropna().astype(str).unique().tolist())
+    return [str(item["name"]) for item in get_supported_countries()]
+
+
+def get_available_commodities(
+    df_or_country: Optional[Any] = None,
+    country: Optional[str] = None,
+) -> List[str]:
+    """Return commodity names available for a country.
+
+    Accepts the old signature ``get_available_commodities(df, country)`` and the
+    new Databridges signature ``get_available_commodities(country)``.
+    """
+    if isinstance(df_or_country, pd.DataFrame):
+        if not country:
+            return []
+        country_normalized = normalize_country_name(country)
+        country_df = df_or_country[df_or_country["Country"] == country_normalized]
+        return sorted(country_df["Commodity"].dropna().astype(str).unique().tolist())
+
+    country_value = country or str(df_or_country or "")
+    canonical, iso3 = resolve_country(country_value)
+    start_date, end_date = _recent_price_window()
+    rows = _get_country_price_df(
+        canonical,
+        iso3,
+        start_date=start_date,
+        end_date=end_date,
+        latest_value_only=True,
+    )
+    if rows.empty:
+        rows = _get_country_price_df(canonical, iso3, latest_value_only=True)
+    names = sorted(rows["Commodity"].dropna().astype(str).unique().tolist()) if not rows.empty else []
+    if names:
+        return names
+    return [item["name"] for item in _get_commodities(canonical, iso3)]
+
+
+def get_all_commodities(df: Optional[pd.DataFrame] = None) -> List[str]:
+    if df is not None and "Commodity" in df.columns:
+        return sorted(df["Commodity"].dropna().astype(str).unique().tolist())
+    names: set[str] = set()
+    for country in get_supported_countries():
+        try:
+            names.update(get_available_commodities(str(country["name"])))
+        except Exception:
+            logger.debug("Could not fetch commodities for %s", country["name"], exc_info=True)
+    return sorted(names)
+
+
+def get_available_regions(
+    df_or_country: Optional[Any] = None,
+    country: Optional[str] = None,
+) -> List[str]:
+    if isinstance(df_or_country, pd.DataFrame):
+        if not country:
+            return []
+        country_normalized = normalize_country_name(country)
+        country_df = df_or_country[df_or_country["Country"] == country_normalized]
+        return sorted(country_df["Admin 1"].dropna().astype(str).unique().tolist())
+
+    country_value = country or str(df_or_country or "")
+    canonical, iso3 = resolve_country(country_value)
+    return sorted(
+        {
+            str(market["admin1_name"])
+            for market in _get_markets(canonical, iso3)
+            if market.get("admin1_name")
+        }
+    )
+
+
+def get_available_markets(
+    df_or_country: Optional[Any] = None,
+    country: Optional[str] = None,
+) -> List[str]:
+    if isinstance(df_or_country, pd.DataFrame):
+        if not country:
+            return []
+        country_normalized = normalize_country_name(country)
+        country_df = df_or_country[df_or_country["Country"] == country_normalized]
+        return sorted(country_df["Market Name"].dropna().astype(str).unique().tolist())
+
+    country_value = country or str(df_or_country or "")
+    canonical, iso3 = resolve_country(country_value)
+    return sorted(
+        {
+            str(market["market_name"])
+            for market in _get_markets(canonical, iso3)
+            if market.get("market_name")
+        }
+    )
+
+
+def get_date_range(
+    df_or_country: Optional[Any] = None,
+    country: Optional[str] = None,
+) -> Tuple[datetime, datetime]:
+    if isinstance(df_or_country, pd.DataFrame):
+        if not country:
+            raise ValueError("Country is required")
+        country_normalized = normalize_country_name(country)
+        country_df = df_or_country[df_or_country["Country"] == country_normalized]
+        return country_df["Price Date"].min(), country_df["Price Date"].max()
+
+    country_value = country or str(df_or_country or "")
+    canonical, iso3 = resolve_country(country_value)
+    df = _get_country_price_df(canonical, iso3)
+    if df.empty:
+        raise ValueError(f"No monthly price data returned by Databridges for {canonical}.")
+    return df["Price Date"].min().to_pydatetime(), df["Price Date"].max().to_pydatetime()
+
+
+def get_commodity_categories(source: Optional[Any] = None) -> Dict[str, List[str]]:
+    """Group commodity names into broad report-friendly categories."""
+    if isinstance(source, pd.DataFrame):
+        commodities = get_all_commodities(source)
+    elif isinstance(source, list):
+        commodities = [str(item.get("name", item)) if isinstance(item, dict) else str(item) for item in source]
     else:
-        csv_path = Path(csv_path)
+        commodities = []
 
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Price data file not found at {csv_path}. "
-            f"Please ensure 'price_data.csv' exists in the 'data' folder."
-        )
-
-    resolved_path = str(csv_path.resolve())
-    try:
-        mtime = csv_path.stat().st_mtime
-    except OSError:
-        mtime = None
-
-    with _PRICE_DATA_CACHE_LOCK:
-        if (
-            _PRICE_DATA_CACHE_DF is not None
-            and _PRICE_DATA_CACHE_PATH == resolved_path
-            and _PRICE_DATA_CACHE_MTIME == mtime
-        ):
-            return _PRICE_DATA_CACHE_DF.copy()
-
-    logger.info(f"Loading price data from {csv_path}")
-
-    df = _read_price_csv(csv_path)
-    df = _normalize_price_data_df(df)
-
-    logger.info(f"Loaded {len(df)} price records")
-
-    with _PRICE_DATA_CACHE_LOCK:
-        _PRICE_DATA_CACHE_PATH = resolved_path
-        _PRICE_DATA_CACHE_MTIME = mtime
-        _PRICE_DATA_CACHE_DF = df.copy()
-
-    return df
-
-
-def get_available_countries(df: pd.DataFrame) -> List[str]:
-    """Get list of countries available in the dataset."""
-    return sorted(df['Country'].unique().tolist())
-
-
-def get_available_commodities(df: pd.DataFrame, country: str) -> List[str]:
-    """Get list of commodities available for a specific country."""
-    country_normalized = normalize_country_name(country)
-    country_df = df[df['Country'] == country_normalized]
-    return sorted(country_df['Commodity'].unique().tolist())
-
-
-def get_available_regions(df: pd.DataFrame, country: str) -> List[str]:
-    """Get list of Admin1 regions available for a specific country."""
-    country_normalized = normalize_country_name(country)
-    country_df = df[df['Country'] == country_normalized]
-    return sorted(country_df['Admin 1'].unique().tolist())
-
-
-def get_available_markets(df: pd.DataFrame, country: str) -> List[str]:
-    """Get list of markets available for a specific country."""
-    country_normalized = normalize_country_name(country)
-    country_df = df[df['Country'] == country_normalized]
-    return sorted(country_df['Market Name'].unique().tolist())
-
-
-def get_all_commodities(df: pd.DataFrame) -> List[str]:
-    """Get list of all unique commodities across all countries."""
-    return sorted(df['Commodity'].unique().tolist())
-
-
-def get_commodity_categories(df: pd.DataFrame) -> Dict[str, List[str]]:
-    """
-    Get commodities grouped by category (inferred from naming conventions).
-
-    Returns:
-        Dictionary mapping category names to lists of commodities
-    """
-    all_commodities = get_all_commodities(df)
-
-    categories = {
+    categories: Dict[str, List[str]] = {
         "Cereals": [],
         "Pulses": [],
         "Oil": [],
@@ -482,50 +204,103 @@ def get_commodity_categories(df: pd.DataFrame) -> Dict[str, List[str]]:
         "Exchange Rate": [],
         "Milling": [],
         "Wage": [],
-        "Other": []
+        "Other": [],
     }
-
-    for commodity in all_commodities:
-        commodity_lower = commodity.lower()
-
-        if any(x in commodity_lower for x in ["sorghum", "maize", "wheat", "rice", "millet", "bread"]):
+    for commodity in sorted({c for c in commodities if c}):
+        lowered = commodity.lower()
+        if any(token in lowered for token in ["sorghum", "maize", "wheat", "rice", "millet", "bread"]):
             categories["Cereals"].append(commodity)
-        elif any(x in commodity_lower for x in ["beans", "lentil", "pea", "chickpea", "pulse"]):
+        elif any(token in lowered for token in ["beans", "lentil", "pea", "chickpea", "pulse"]):
             categories["Pulses"].append(commodity)
-        elif "oil" in commodity_lower:
+        elif "oil" in lowered:
             categories["Oil"].append(commodity)
-        elif "sugar" in commodity_lower:
+        elif "sugar" in lowered:
             categories["Sugar"].append(commodity)
-        elif "salt" in commodity_lower:
+        elif "salt" in lowered:
             categories["Condiments"].append(commodity)
-        elif any(x in commodity_lower for x in ["cabbage", "tomato", "onion", "vegetable", "leaves", "sukuma", "pumpkin", "cassava"]):
+        elif any(token in lowered for token in ["cabbage", "tomato", "onion", "vegetable", "leaves", "cassava"]):
             categories["Vegetables"].append(commodity)
-        elif "livestock" in commodity_lower or any(x in commodity_lower for x in ["goat", "sheep", "cattle", "chicken"]):
+        elif "livestock" in lowered or any(token in lowered for token in ["goat", "sheep", "cattle", "chicken"]):
             categories["Livestock"].append(commodity)
-        elif "fuel" in commodity_lower or any(x in commodity_lower for x in ["petrol", "diesel", "gasoline"]):
+        elif "fuel" in lowered or any(token in lowered for token in ["petrol", "diesel", "gasoline"]):
             categories["Fuel"].append(commodity)
-        elif "exchange" in commodity_lower:
+        elif "exchange" in lowered:
             categories["Exchange Rate"].append(commodity)
-        elif "milling" in commodity_lower:
+        elif "milling" in lowered:
             categories["Milling"].append(commodity)
-        elif "wage" in commodity_lower or "labour" in commodity_lower:
+        elif "wage" in lowered or "labour" in lowered:
             categories["Wage"].append(commodity)
         else:
             categories["Other"].append(commodity)
-
-    return {k: v for k, v in categories.items() if v}
-
-
-def get_date_range(df: pd.DataFrame, country: str) -> Tuple[datetime, datetime]:
-    """Get the date range available for a specific country."""
-    country_normalized = normalize_country_name(country)
-    country_df = df[df['Country'] == country_normalized]
-    return country_df['Price Date'].min(), country_df['Price Date'].max()
+    return {name: values for name, values in categories.items() if values}
 
 
-# ============================================================================
-# TIME SERIES EXTRACTION
-# ============================================================================
+def get_country_metadata(country: str) -> Dict[str, Any]:
+    canonical, iso3 = resolve_country(country)
+    cached = _cache_get(_METADATA_CACHE, iso3)
+    if cached is not None:
+        return dict(cached)
+
+    commodities = [
+        {"id": item["id"], "name": item["name"], "category": _infer_category(item["name"])}
+        for item in _get_commodities(canonical, iso3)
+    ]
+    metadata_warnings: list[str] = []
+    start_date, end_date = _recent_price_window()
+    price_df = _get_country_price_df(canonical, iso3, start_date=start_date, end_date=end_date)
+    metadata_window = {
+        "start": start_date,
+        "end": end_date,
+        "months": _RECENT_METADATA_MONTHS,
+        "bounded": True,
+    }
+    if price_df.empty:
+        metadata_warnings.append(
+            f"No Databridges price rows found in the recent {_RECENT_METADATA_MONTHS}-month metadata window; used unbounded fallback."
+        )
+        price_df = _get_country_price_df(canonical, iso3)
+        metadata_window = {
+            "start": None,
+            "end": None,
+            "months": None,
+            "bounded": False,
+        }
+    if not price_df.empty:
+        priced_names = sorted(price_df["Commodity"].dropna().astype(str).unique().tolist())
+        if priced_names:
+            commodity_by_name = {str(item["name"]).lower(): item for item in commodities}
+            commodities = [
+                commodity_by_name.get(name.lower(), {"id": None, "name": name, "category": _infer_category(name)})
+                for name in priced_names
+            ]
+
+    regions = get_available_regions(canonical)
+    markets = _get_markets(canonical, iso3)
+    date_range = None
+    if not price_df.empty:
+        date_range = {
+            "start": price_df["Price Date"].min().strftime("%Y-%m-%d"),
+            "end": price_df["Price Date"].max().strftime("%Y-%m-%d"),
+        }
+
+    commodity_names = [str(item["name"]) for item in commodities if item.get("name")]
+    metadata = {
+        "country": canonical,
+        "iso3": iso3,
+        "currency": COUNTRY_CURRENCIES.get(canonical, {"code": "USD", "name": "US Dollar"}),
+        "commodities": commodities,
+        "commodity_categories": get_commodity_categories(commodity_names),
+        "default_commodities": _select_default_commodities(commodity_names),
+        "regions": regions,
+        "markets": markets,
+        "date_range": date_range,
+        "metadata_price_window": metadata_window,
+        "warnings": metadata_warnings,
+        "source": "Databridges",
+    }
+    _cache_set(_METADATA_CACHE, iso3, metadata)
+    return dict(metadata)
+
 
 def extract_time_series_from_csv(
     country: str,
@@ -533,515 +308,577 @@ def extract_time_series_from_csv(
     commodities: List[str],
     admin1_list: List[str],
     csv_path: Optional[Path] = None,
-    lookback_months: int = 13
+    lookback_months: int = 13,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Extract time series data from the CSV file.
-    
-    This function replaces `generate_mock_time_series` in graph.py.
-    It returns data in the same format expected by downstream nodes.
-    
-    IMPORTANT: The returned DataFrames have a COMPLETE date index covering
-    all months in the lookback period. Months with no data will have NaN values.
-    This ensures:
-    - Correct MoM and YoY calculations (comparing the right months)
-    - Visualizations show gaps where data is missing
-    - No silent data alignment errors
-    
-    Args:
-        country: Country name (will be normalized)
-        time_period: Target period in YYYY-MM format (e.g., "2025-01")
-        commodities: List of commodities to include
-        admin1_list: List of Admin1 regions to include (empty = all regions)
-        csv_path: Optional path to CSV file
-        lookback_months: Number of months to include (default: 13 for YoY calculation)
-    
-    Returns:
-        Tuple of (df_national, df_regional):
-        - df_national: National-level aggregated time series (indexed by Date)
-                      Columns: commodity names + FoodBasket + ExchangeRate + FuelPrice
-                      Index: Complete monthly DatetimeIndex (13 months, no gaps)
-        - df_regional: Regional-level time series
-                      Columns: Date, Region, FoodBasket
-    
-    Raises:
-        ValueError: If no data found for the specified parameters
-        FileNotFoundError: If CSV file doesn't exist
-    """
-    # Load data
-    df = load_csv_price_data(csv_path)
-    
-    # Normalize country name
-    country_normalized = normalize_country_name(country)
-    logger.info(f"[DataLoader] Extracting data for country: {country_normalized}")
-    
-    # Filter by country
-    df_country = df[df['Country'] == country_normalized].copy()
-    
-    if df_country.empty:
-        available = get_available_countries(df)
-        raise ValueError(
-            f"No data found for country '{country}' (normalized: '{country_normalized}'). "
-            f"Available countries: {available}"
-        )
-    
-    # Parse target period
-    try:
-        target_date = pd.to_datetime(time_period + "-01")
-    except Exception:
-        target_date = pd.to_datetime("2025-01-01")
-        logger.warning(f"Invalid time_period '{time_period}', using default: 2025-01")
-    
-    # Calculate date range (lookback_months ending at target_date)
+    """Compatibility wrapper that returns Databridges price time series."""
+    if csv_path is not None:
+        logger.info("Ignoring csv_path=%s because Databridges is now the price source.", csv_path)
+
+    canonical, iso3 = resolve_country(country)
+    target_date = _parse_time_period(time_period)
     start_date = target_date - pd.DateOffset(months=lookback_months - 1)
     end_date = target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)
-    
-    logger.info(f"[DataLoader] Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    
-    # Create COMPLETE date range for the lookback period (no gaps)
-    full_date_index = pd.date_range(start=start_date, end=target_date, freq='MS')
-    logger.info(f"[DataLoader] Full date index: {len(full_date_index)} months")
-    
-    # Filter by date range
-    df_filtered = df_country[
-        (df_country['Price Date'] >= start_date) & 
-        (df_country['Price Date'] <= end_date)
-    ].copy()
-    
-    if df_filtered.empty:
-        actual_range = get_date_range(df, country_normalized)
+    full_date_index = pd.date_range(start=start_date, end=target_date, freq="MS")
+
+    valid_names, commodity_ids, missing = _resolve_commodities(canonical, iso3, commodities)
+    if missing:
+        logger.warning("Requested commodities not available in Databridges for %s: %s", canonical, missing)
+    if not valid_names:
         raise ValueError(
-            f"No data found for period {time_period} (range: {start_date} to {end_date}). "
-            f"Available data range for {country_normalized}: "
-            f"{actual_range[0].strftime('%Y-%m-%d')} to {actual_range[1].strftime('%Y-%m-%d')}"
+            f"No requested commodities are available for {canonical}. "
+            f"Available commodities: {get_available_commodities(canonical)}"
         )
-    
-    # Filter by commodities (use available if requested not found)
-    available_commodities = df_filtered['Commodity'].unique().tolist()
-    valid_commodities = [c for c in commodities if c in available_commodities]
-    
-    if not valid_commodities:
-        logger.warning(
-            f"[DataLoader] None of the requested commodities {commodities} found. "
-            f"Available: {available_commodities}. Using all available."
-        )
-        valid_commodities = available_commodities
-    else:
-        missing = set(commodities) - set(valid_commodities)
-        if missing:
-            logger.warning(f"[DataLoader] Commodities not found in data: {missing}")
-    
-    df_commodities = df_filtered[df_filtered['Commodity'].isin(valid_commodities)].copy()
-    
-    # Extract month for grouping (first day of month)
-    df_commodities['Month'] = df_commodities['Price Date'].dt.to_period('M').dt.to_timestamp()
-    
-    # =========================================================================
-    # NATIONAL AGGREGATION
-    # =========================================================================
-    
-    # Aggregate prices at national level: mean price per commodity per month
-    national_pivot = df_commodities.pivot_table(
-        index='Month',
-        columns='Commodity',
-        values='Price',
-        aggfunc='mean'
+
+    df = _get_country_price_df(
+        canonical,
+        iso3,
+        start_date=start_date.strftime("%Y-%m-%d"),
+        end_date=end_date.strftime("%Y-%m-%d"),
+        commodity_ids=commodity_ids,
     )
-    
-    # CRITICAL: Reindex to complete date range to ensure no missing rows
-    # Missing months will have NaN for all commodities
-    national_pivot = national_pivot.reindex(full_date_index)
-    
-    # Round existing values
-    national_pivot = national_pivot.round(2)
-    
-    # Calculate FoodBasket as sum of commodity prices (NaN if any commodity is NaN)
-    # Use skipna=False to propagate NaN if any commodity is missing
-    # Actually, let's use skipna=True so partial data still produces a food basket
-    national_pivot['FoodBasket'] = national_pivot[valid_commodities].sum(axis=1, skipna=True).round(2)
-    
-    # Replace 0 with NaN for FoodBasket if ALL commodities are NaN for that month
-    all_commodities_nan = national_pivot[valid_commodities].isna().all(axis=1)
-    national_pivot.loc[all_commodities_nan, 'FoodBasket'] = np.nan
-    
-    # Add placeholder columns for auxiliary data
-    # These would typically come from other sources (exchange rate module, etc.)
-    national_pivot['ExchangeRate'] = np.nan
-    national_pivot['FuelPrice'] = np.nan
-    
-    df_national = national_pivot.copy()
-    df_national.index.name = 'Date'
-    
-    # Log data availability
-    data_coverage = df_national[valid_commodities].notna().sum()
-    logger.info(f"[DataLoader] Data coverage per commodity: {data_coverage.to_dict()}")
-    
-    missing_months = df_national[valid_commodities].isna().all(axis=1).sum()
-    if missing_months > 0:
-        logger.warning(f"[DataLoader] {missing_months} month(s) have NO data for any commodity")
-    
-    # =========================================================================
-    # REGIONAL AGGREGATION
-    # =========================================================================
-    
-    # Determine which regions to include
-    available_regions = df_filtered['Admin 1'].unique().tolist()
-    
-    if admin1_list and len(admin1_list) > 0:
-        valid_regions = [r for r in admin1_list if r in available_regions]
+    if df.empty:
+        raise ValueError(
+            f"Databridges returned no monthly price rows for {canonical} from "
+            f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}."
+        )
+
+    df = df[df["Commodity"].isin(valid_names)].copy()
+    if df.empty:
+        raise ValueError(f"No Databridges price rows matched the requested commodities: {valid_names}")
+
+    df["Month"] = df["Price Date"].dt.to_period("M").dt.to_timestamp()
+
+    national_pivot = df.pivot_table(
+        index="Month",
+        columns="Commodity",
+        values="Price",
+        aggfunc="mean",
+    ).reindex(full_date_index)
+
+    for name in valid_names:
+        if name not in national_pivot.columns:
+            national_pivot[name] = np.nan
+    national_pivot = national_pivot[valid_names].round(2)
+    national_pivot["FoodBasket"] = national_pivot[valid_names].sum(axis=1, skipna=True).round(2)
+    national_pivot.loc[national_pivot[valid_names].isna().all(axis=1), "FoodBasket"] = np.nan
+    national_pivot["ExchangeRate"] = np.nan
+    national_pivot["FuelPrice"] = np.nan
+    national_pivot.index.name = "Date"
+
+    available_regions = sorted(df["Admin 1"].dropna().astype(str).unique().tolist())
+    if admin1_list:
+        valid_regions = [region for region in admin1_list if region in available_regions]
         if not valid_regions:
-            logger.warning(
-                f"[DataLoader] None of the requested regions {admin1_list} found. "
-                f"Available: {available_regions}. Using all available."
+            raise ValueError(
+                f"Requested regions are not available for {canonical}: {admin1_list}. "
+                f"Available regions: {available_regions}"
             )
-            valid_regions = available_regions
-        else:
-            missing = set(admin1_list) - set(valid_regions)
-            if missing:
-                logger.warning(f"[DataLoader] Regions not found in data: {missing}")
     else:
         valid_regions = available_regions
-    
-    # Filter for valid regions
-    df_regional_data = df_commodities[df_commodities['Admin 1'].isin(valid_regions)].copy()
-    
-    # Regional aggregation: sum of mean commodity prices per region per month
-    # This creates a "food basket" proxy at regional level
-    regional_agg = df_regional_data.groupby(['Month', 'Admin 1']).agg({
-        'Price': 'sum'
-    }).reset_index()
-    
-    regional_agg.columns = ['Date', 'Region', 'FoodBasket']
-    regional_agg['FoodBasket'] = regional_agg['FoodBasket'].round(2)
-    
-    # Create complete regional DataFrame with all month-region combinations
-    # This ensures no missing rows in regional data
+
+    df_regional_data = df[df["Admin 1"].isin(valid_regions)].copy()
+    regional_agg = (
+        df_regional_data.groupby(["Month", "Admin 1", "Commodity"], dropna=True)["Price"]
+        .mean()
+        .reset_index()
+        .groupby(["Month", "Admin 1"], dropna=True)["Price"]
+        .sum()
+        .reset_index()
+    )
+    regional_agg.columns = ["Date", "Region", "FoodBasket"]
+    regional_agg["FoodBasket"] = regional_agg["FoodBasket"].round(2)
+
     regional_index = pd.MultiIndex.from_product(
         [full_date_index, valid_regions],
-        names=['Date', 'Region']
+        names=["Date", "Region"],
     )
-    df_regional_complete = pd.DataFrame(index=regional_index).reset_index()
-    
-    # Merge with actual data (left join to keep all month-region combinations)
-    df_regional = df_regional_complete.merge(
-        regional_agg,
-        on=['Date', 'Region'],
-        how='left'
-    )
-    
-    # Sort by date and region
-    df_regional = df_regional.sort_values(['Date', 'Region']).reset_index(drop=True)
-    
-    # =========================================================================
-    # LOGGING & SUMMARY
-    # =========================================================================
-    
-    logger.info(f"[DataLoader] National data: {len(df_national)} months, columns: {list(df_national.columns)}")
-    logger.info(f"[DataLoader] Regional data: {len(df_regional)} records ({len(valid_regions)} regions × {len(full_date_index)} months)")
-    logger.info(f"[DataLoader] Commodities included: {valid_commodities}")
-    
-    # Report on missing data
-    national_missing = df_national[valid_commodities].isna().sum()
-    if national_missing.any():
-        logger.info(f"[DataLoader] Missing data points per commodity: {national_missing.to_dict()}")
-    
-    return df_national, df_regional
+    df_regional = pd.DataFrame(index=regional_index).reset_index()
+    df_regional = df_regional.merge(regional_agg, on=["Date", "Region"], how="left")
+    df_regional = df_regional.sort_values(["Date", "Region"]).reset_index(drop=True)
+
+    return national_pivot, df_regional
 
 
-# ============================================================================
-# STATISTICS CALCULATION
-# ============================================================================
+extract_time_series_from_databridges = extract_time_series_from_csv
+
 
 def calculate_statistics_from_csv(
     df_national: pd.DataFrame,
-    commodities: List[str]
+    commodities: List[str],
 ) -> Dict[str, Any]:
-    """
-    Calculate MoM and YoY statistics from the extracted data.
-    
-    This function is compatible with the original `calculate_statistics` in graph.py.
-    It properly handles NaN values in the time series.
-    
-    Args:
-        df_national: National-level time series DataFrame (from extract_time_series_from_csv)
-        commodities: List of commodity names to include in stats
-    
-    Returns:
-        Dictionary with structure:
-        {
-            "food_basket": {"current_price": X, "mom_change_pct": X, "yoy_change_pct": X},
-            "commodities": {"Commodity1": {...}, "Commodity2": {...}},
-            "auxiliary": {"ExchangeRate": {...}, "FuelPrice": {...}}
-        }
-        
-        Values will be None or excluded if data is not available.
-    """
     stats: Dict[str, Any] = {
         "food_basket": {},
         "commodities": {},
-        "auxiliary": {}
+        "auxiliary": {},
     }
-    
     if df_national.empty:
-        logger.warning("[DataLoader] Empty DataFrame - cannot calculate statistics")
         return stats
-    
-    if len(df_national) < 2:
-        logger.warning(f"[DataLoader] Only {len(df_national)} month(s) of data - limited statistics")
-    
-    # Get indices for current, previous month, and year-ago
-    # Since we have a complete date index, positions are reliable:
-    # - iloc[-1] = current month (target_date)
-    # - iloc[-2] = previous month
-    # - iloc[0]  = 12 months ago (if 13 months of data)
-    
+
     current_idx = -1
     mom_idx = -2 if len(df_national) >= 2 else -1
-    yoy_idx = 0  # First row = oldest month in the lookback
-    
+    yoy_idx = 0
     current = df_national.iloc[current_idx]
     mom = df_national.iloc[mom_idx]
     yoy = df_national.iloc[yoy_idx]
-    
-    # Log the dates being compared
-    logger.info(f"[DataLoader] Statistics comparing:")
-    logger.info(f"  Current: {df_national.index[current_idx].strftime('%Y-%m')}")
-    logger.info(f"  MoM vs:  {df_national.index[mom_idx].strftime('%Y-%m')}")
-    logger.info(f"  YoY vs:  {df_national.index[yoy_idx].strftime('%Y-%m')}")
-    
-    # Calculate statistics for each column
-    for col in df_national.columns:
-        current_val = current[col]
-        mom_val = mom[col]
-        yoy_val = yoy[col]
-        
-        # Skip if current value is NaN
+    selected_components = [commodity for commodity in commodities if commodity in df_national.columns]
+    historical_components = [
+        commodity for commodity in selected_components if df_national[commodity].notna().any()
+    ]
+    latest_components = [
+        commodity for commodity in selected_components if pd.notna(current.get(commodity))
+    ]
+    missing_latest_components = [
+        commodity for commodity in selected_components if commodity not in latest_components
+    ]
+
+    for column in df_national.columns:
+        current_val = current[column]
         if pd.isna(current_val):
-            logger.debug(f"[DataLoader] Skipping {col}: current value is NaN")
             continue
-        
-        # Calculate MoM percentage change
-        if pd.notna(mom_val) and mom_val != 0:
-            mom_pct = round(((current_val - mom_val) / mom_val * 100), 1)
-        else:
-            mom_pct = None  # Cannot calculate
-            logger.debug(f"[DataLoader] Cannot calculate MoM for {col}: previous month is NaN or zero")
-        
-        # Calculate YoY percentage change
-        if pd.notna(yoy_val) and yoy_val != 0:
-            yoy_pct = round(((current_val - yoy_val) / yoy_val * 100), 1)
-        else:
-            yoy_pct = None  # Cannot calculate
-            logger.debug(f"[DataLoader] Cannot calculate YoY for {col}: year-ago value is NaN or zero")
-        
-        data = {
+        mom_val = mom[column]
+        yoy_val = yoy[column]
+        mom_pct = round(((current_val - mom_val) / mom_val * 100), 1) if pd.notna(mom_val) and mom_val != 0 else None
+        yoy_pct = round(((current_val - yoy_val) / yoy_val * 100), 1) if pd.notna(yoy_val) and yoy_val != 0 else None
+        item = {
             "current_price": round(float(current_val), 2),
             "mom_change_pct": float(mom_pct) if mom_pct is not None else None,
-            "yoy_change_pct": float(yoy_pct) if yoy_pct is not None else None
+            "yoy_change_pct": float(yoy_pct) if yoy_pct is not None else None,
         }
-        
-        # Categorize the statistic
-        if col == "FoodBasket":
-            stats["food_basket"] = data
-        else:
-            # Auxiliary indicators (non-food items)
-            auxiliary_patterns = ["exchange", "fuel", "wage", "milling"]
-            is_auxiliary = any(pattern in col.lower() for pattern in auxiliary_patterns)
-
-            if is_auxiliary:
-                if pd.notna(current_val):
-                    stats["auxiliary"][col] = data
-            elif col != "FoodBasket":
-                # This is a commodity column
-                if pd.notna(current_val):
-                    stats["commodities"][col] = data
-    
+        if column == "FoodBasket":
+            item.update(
+                {
+                    "selected_component_count": len(selected_components),
+                    "historical_component_count": len(historical_components),
+                    "latest_component_count": len(latest_components),
+                    "latest_component_names": latest_components,
+                    "missing_latest_component_names": missing_latest_components,
+                }
+            )
+            stats["food_basket"] = item
+        elif any(token in column.lower() for token in ["exchange", "fuel", "wage", "milling"]):
+            stats["auxiliary"][column] = item
+        elif column in commodities:
+            stats["commodities"][column] = item
     return stats
 
-
-# ============================================================================
-# DATA AVAILABILITY CHECK
-# ============================================================================
 
 def check_data_availability(
     country: str,
     time_period: str,
     commodities: List[str],
-    csv_path: Optional[Path] = None
+    csv_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """
-    Check what data is available before running the full extraction.
-    
-    Useful for validation, error handling, and informing users about
-    available data including any gaps.
-    
-    Args:
-        country: Country name
-        time_period: Target period in YYYY-MM format
-        commodities: Requested commodities
-        csv_path: Optional path to CSV file
-    
-    Returns:
-        Dictionary with availability information:
-        {
-            "available": bool,
-            "country_normalized": str,
-            "countries": [list of available countries],
-            "commodities": [list of available commodities for country],
-            "regions": [list of available regions for country],
-            "markets": [list of available markets for country],
-            "date_range": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
-            "missing_commodities": [requested but not available],
-            "data_gaps": [list of months with no data],
-            "warnings": [list of warning messages]
-        }
-    """
+    if csv_path is not None:
+        logger.info("Ignoring csv_path=%s because Databridges is now the price source.", csv_path)
+
     try:
-        df = load_csv_price_data(csv_path)
-    except FileNotFoundError as e:
+        canonical, iso3 = resolve_country(country)
+        metadata = get_country_metadata(canonical)
+        available_commodities = [str(item["name"]) for item in metadata.get("commodities", [])]
+        missing = [item for item in commodities if item not in available_commodities]
+        target_date = _parse_time_period(time_period)
+        start_date = target_date - pd.DateOffset(months=12)
+        df = _get_country_price_df(
+            canonical,
+            iso3,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=target_date.strftime("%Y-%m-%d"),
+        )
+        expected_months = pd.date_range(start=start_date, end=target_date, freq="MS")
+        actual_months = set()
+        if not df.empty:
+            actual_months = set(df["Price Date"].dt.to_period("M").dt.to_timestamp())
+        data_gaps = [month.strftime("%Y-%m") for month in expected_months if month not in actual_months]
+
+        warnings = []
+        if missing:
+            warnings.append(
+                f"Requested commodities not available from Databridges for {canonical}: {missing}."
+            )
+        if data_gaps:
+            warnings.append(f"Databridges price data has gaps in {len(data_gaps)} month(s): {data_gaps}.")
+        if metadata.get("date_range") is None:
+            warnings.append(f"Databridges returned no monthly price date range for {canonical}.")
+
+        return {
+            "available": True,
+            "country_normalized": canonical,
+            "iso3": iso3,
+            "countries": get_available_countries(),
+            "commodities": available_commodities,
+            "regions": metadata.get("regions", []),
+            "markets": [market.get("market_name") for market in metadata.get("markets", [])],
+            "date_range": metadata.get("date_range"),
+            "missing_commodities": missing,
+            "data_gaps": data_gaps,
+            "warnings": warnings,
+        }
+    except Exception as exc:
         return {
             "available": False,
-            "error": str(e),
+            "error": str(exc),
             "country_normalized": None,
-            "countries": [],
+            "countries": get_available_countries(),
             "commodities": [],
             "regions": [],
             "markets": [],
             "date_range": None,
             "missing_commodities": commodities,
             "data_gaps": [],
-            "warnings": [str(e)]
+            "warnings": [str(exc)],
         }
-    
-    country_normalized = normalize_country_name(country)
-    
-    result: Dict[str, Any] = {
-        "available": country_normalized in df['Country'].values,
-        "country_normalized": country_normalized,
-        "countries": get_available_countries(df),
-        "commodities": [],
-        "regions": [],
-        "markets": [],
-        "date_range": None,
-        "missing_commodities": [],
-        "data_gaps": [],
-        "warnings": []
-    }
-    
-    if result["available"]:
-        result["commodities"] = get_available_commodities(df, country_normalized)
-        result["regions"] = get_available_regions(df, country_normalized)
-        result["markets"] = get_available_markets(df, country_normalized)
-        
-        date_range = get_date_range(df, country_normalized)
-        result["date_range"] = {
-            "start": date_range[0].strftime("%Y-%m-%d"),
-            "end": date_range[1].strftime("%Y-%m-%d")
-        }
-        
-        # Check which requested commodities are missing
-        result["missing_commodities"] = [
-            c for c in commodities if c not in result["commodities"]
-        ]
-        
-        if result["missing_commodities"]:
-            result["warnings"].append(
-                f"Requested commodities not available: {result['missing_commodities']}. "
-                f"Available: {result['commodities']}"
-            )
-        
-        # Check for data gaps in the requested period
-        try:
-            target_date = pd.to_datetime(time_period + "-01")
-            start_date = target_date - pd.DateOffset(months=12)
-            
-            # Check if time_period is within available range
-            if target_date < date_range[0] or target_date > date_range[1]:
-                result["warnings"].append(
-                    f"Requested period {time_period} is outside available range "
-                    f"({result['date_range']['start']} to {result['date_range']['end']})"
-                )
-            
-            # Find gaps in the data
-            df_country = df[df['Country'] == country_normalized].copy()
-            df_country['Month'] = df_country['Price Date'].dt.to_period('M').dt.to_timestamp()
-            
-            # Filter to lookback period
-            df_period = df_country[
-                (df_country['Month'] >= start_date) & 
-                (df_country['Month'] <= target_date)
-            ]
-            
-            if not df_period.empty:
-                # Generate expected months
-                expected_months = pd.date_range(start=start_date, end=target_date, freq='MS')
-                actual_months = set(df_period['Month'].unique())
-                
-                # Find missing months
-                missing_months = [
-                    m.strftime("%Y-%m") for m in expected_months 
-                    if m not in actual_months
-                ]
-                
-                if missing_months:
-                    result["data_gaps"] = missing_months
-                    result["warnings"].append(
-                        f"Data gaps detected in {len(missing_months)} month(s): {missing_months}"
-                    )
-                    
-        except Exception as e:
-            result["warnings"].append(f"Could not check for data gaps: {str(e)}")
-    else:
-        result["warnings"].append(
-            f"Country '{country}' (normalized: '{country_normalized}') not found. "
-            f"Available: {result['countries']}"
-        )
-    
-    return result
 
-
-# ============================================================================
-# CONVENIENCE FUNCTIONS
-# ============================================================================
 
 def get_data_summary(csv_path: Optional[Path] = None) -> Dict[str, Any]:
-    """
-    Get a summary of all data in the CSV file.
-    
-    Returns:
-        Dictionary with overall data summary
-    """
-    try:
-        df = load_csv_price_data(csv_path)
-    except FileNotFoundError as e:
-        return {"error": str(e)}
-    
-    summary = {
-        "total_records": len(df),
-        "countries": {},
-        "date_range": {
-            "start": df['Price Date'].min().strftime("%Y-%m-%d"),
-            "end": df['Price Date'].max().strftime("%Y-%m-%d")
-        }
+    if csv_path is not None:
+        logger.info("Ignoring csv_path=%s because Databridges is now the price source.", csv_path)
+    countries = get_supported_countries()
+    return {
+        "source": "Databridges",
+        "countries": {str(item["name"]): {"iso3": item["iso3"]} for item in countries},
+        "total_records": None,
+        "date_range": None,
     }
-    
-    for country in get_available_countries(df):
-        country_df = df[df['Country'] == country]
-        date_range = get_date_range(df, country)
-        
-        # Count months with data
-        months_with_data = country_df['Price Date'].dt.to_period('M').nunique()
-        
-        summary["countries"][country] = {
-            "records": len(country_df),
-            "commodities": get_available_commodities(df, country),
-            "regions": len(get_available_regions(df, country)),
-            "markets": len(get_available_markets(df, country)),
-            "months_with_data": months_with_data,
-            "date_range": {
-                "start": date_range[0].strftime("%Y-%m-%d"),
-                "end": date_range[1].strftime("%Y-%m-%d")
+
+
+def _get_country_price_df(
+    canonical: str,
+    iso3: str,
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    commodity_ids: Optional[Iterable[int]] = None,
+    latest_value_only: bool = False,
+) -> pd.DataFrame:
+    ids = tuple(sorted({int(item) for item in commodity_ids or [] if item is not None}))
+    cache_key = (iso3, start_date, end_date, ids, latest_value_only)
+    cached = _cache_get(_PRICE_CACHE, cache_key)
+    if cached is not None:
+        return cached.copy()
+
+    client = get_databridges_client()
+    raw_rows: list[dict[str, Any]] = []
+    if ids:
+        for commodity_id in ids:
+            raw_rows.extend(
+                client.list_monthly_prices(
+                    iso3,
+                    commodity_id=commodity_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    latest_value_only=latest_value_only,
+                )
+            )
+    else:
+        raw_rows = client.list_monthly_prices(
+            iso3,
+            start_date=start_date,
+            end_date=end_date,
+            latest_value_only=latest_value_only,
+        )
+
+    df = _normalise_price_rows(raw_rows, canonical, iso3, _market_lookup(canonical, iso3))
+    _cache_set(_PRICE_CACHE, cache_key, df)
+    return df.copy()
+
+
+def _normalise_price_rows(
+    rows: list[dict[str, Any]],
+    canonical: str,
+    iso3: str,
+    markets_by_id: dict[int, dict[str, Any]],
+) -> pd.DataFrame:
+    records = []
+    for row in _sort_raw_price_rows(rows):
+        flag = str(_field(row, "commodityPriceFlag", "commodity_price_flag", "priceFlag", default="") or "").strip()
+        if flag and flag.lower() not in _ALLOWED_PRICE_FLAGS:
+            continue
+
+        price = pd.to_numeric(_field(row, "commodityPrice", "commodity_price", "price"), errors="coerce")
+        price_date = pd.to_datetime(
+            _field(row, "commodityPriceDate", "commodity_price_date", "priceDate", "date"),
+            errors="coerce",
+        )
+        if pd.isna(price) or pd.isna(price_date):
+            continue
+
+        market_id = _to_int(_field(row, "marketId", "market_id", "marketID"))
+        market = markets_by_id.get(market_id or -1, {})
+        observations = _to_int(_field(row, "commodityPriceObservations", "commodity_price_observations", "observations"))
+        source = str(_field(row, "commodityPriceSourceName", "commodity_price_source_name", "source", default="") or "")
+        records.append(
+            {
+                "Country": str(_field(row, "countryName", "country_name", default=canonical) or canonical),
+                "Country ISO3": str(_field(row, "countryIso3", "country_iso3", default=iso3) or iso3),
+                "Commodity": str(_field(row, "commodityName", "commodity_name", default="Unknown") or "Unknown"),
+                "Commodity ID": _to_int(_field(row, "commodityId", "commodity_id", "commodityID")),
+                "Price Type": str(_field(row, "priceTypeName", "price_type_name", default="") or ""),
+                "Price Date": price_date.to_period("M").to_timestamp(),
+                "Price": float(price),
+                "Admin 1": str(market.get("admin1_name") or _field(row, "admin1Name", "adm1Name", "adm1_name", default="Unknown") or "Unknown"),
+                "Admin 2": str(market.get("admin2_name") or _field(row, "admin2Name", "adm2Name", "adm2_name", default="") or ""),
+                "Market Name": str(_field(row, "marketName", "market_name", default=market.get("market_name", "Unknown")) or "Unknown"),
+                "Market ID": market_id,
+                "Unit": str(_field(row, "commodityUnitName", "commodity_unit_name", default="") or ""),
+                "Currency": str(_field(row, "currencyName", "currency_name", default="") or ""),
+                "Data Type": "Aggregated" if flag.lower() == "aggregate" else (flag.title() if flag else ""),
+                "Price Flag": flag.lower(),
+                "Observations": observations,
+                "Data Source": source,
             }
-        }
-    
-    return summary
+        )
+
+    columns = [
+        "Country",
+        "Country ISO3",
+        "Commodity",
+        "Commodity ID",
+        "Price Type",
+        "Price Date",
+        "Price",
+        "Admin 1",
+        "Admin 2",
+        "Market Name",
+        "Market ID",
+        "Unit",
+        "Currency",
+        "Data Type",
+        "Price Flag",
+        "Observations",
+        "Data Source",
+    ]
+    if not records:
+        return pd.DataFrame(columns=columns)
+    df = pd.DataFrame(records)
+    sort_columns = [
+        "Commodity ID",
+        "Commodity",
+        "Price Type",
+        "Currency",
+        "Unit",
+        "Price Date",
+        "Market ID",
+        "Market Name",
+        "Price Flag",
+        "Price",
+        "Observations",
+        "Data Source",
+    ]
+    return df.sort_values(sort_columns, na_position="last").drop_duplicates().reset_index(drop=True)
+
+
+def _get_commodities(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    cached = _cache_get(_COMMODITY_CACHE, iso3)
+    if cached is not None:
+        return list(cached)
+
+    rows = get_databridges_client().list_commodities(iso3)
+    commodities = []
+    for row in rows:
+        commodity_id = _to_int(_field(row, "id", "commodityId", "commodity_id", "commodityID"))
+        name = str(_field(row, "name", "commodityName", "commodity_name", default="") or "").strip()
+        if not name:
+            continue
+        commodities.append(
+            {
+                "id": commodity_id,
+                "name": name,
+                "category_id": _to_int(_field(row, "categoryId", "category_id")),
+                "country": canonical,
+                "iso3": iso3,
+            }
+        )
+    commodities = sorted(commodities, key=_commodity_sort_key)
+    _cache_set(_COMMODITY_CACHE, iso3, commodities)
+    return list(commodities)
+
+
+def _get_markets(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    cached = _cache_get(_MARKET_CACHE, iso3)
+    if cached is not None:
+        return list(cached)
+
+    rows = get_databridges_client().list_markets(iso3)
+    markets = []
+    for row in rows:
+        market_id = _to_int(_field(row, "marketId", "market_id", "marketID"))
+        market_name = str(_field(row, "marketName", "market_name", default="") or "").strip()
+        if not market_name:
+            continue
+        markets.append(
+            {
+                "market_id": market_id,
+                "market_name": market_name,
+                "admin1_name": str(_field(row, "admin1Name", "admin1_name", default="") or ""),
+                "admin1_code": _to_int(_field(row, "admin1Code", "admin1_code")),
+                "admin2_name": str(_field(row, "admin2Name", "admin2_name", default="") or ""),
+                "admin2_code": _to_int(_field(row, "admin2Code", "admin2_code")),
+                "latitude": _to_float(_field(row, "marketLatitude", "market_latitude")),
+                "longitude": _to_float(_field(row, "marketLongitude", "market_longitude")),
+                "country": canonical,
+                "iso3": iso3,
+            }
+        )
+    markets = sorted(markets, key=lambda item: item["market_name"])
+    _cache_set(_MARKET_CACHE, iso3, markets)
+    return list(markets)
+
+
+def _market_lookup(canonical: str, iso3: str) -> dict[int, dict[str, Any]]:
+    return {
+        int(market["market_id"]): market
+        for market in _get_markets(canonical, iso3)
+        if market.get("market_id") is not None
+    }
+
+
+def _sort_raw_price_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(rows, key=_raw_price_sort_key)
+
+
+def _raw_price_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        _sort_int(_field(row, "commodityId", "commodity_id", "commodityID")),
+        _sort_text(_field(row, "commodityName", "commodity_name")),
+        _sort_text(_field(row, "priceTypeName", "price_type_name")),
+        _sort_text(_field(row, "currencyName", "currency_name")),
+        _sort_text(_field(row, "commodityUnitName", "commodity_unit_name")),
+        _sort_text(_field(row, "commodityPriceDate", "commodity_price_date", "priceDate", "date")),
+        _sort_int(_field(row, "marketId", "market_id", "marketID")),
+        _sort_text(_field(row, "marketName", "market_name")),
+        _sort_text(_field(row, "commodityPriceFlag", "commodity_price_flag", "priceFlag")),
+        _sort_float(_field(row, "commodityPrice", "commodity_price", "price")),
+        _sort_int(_field(row, "commodityPriceObservations", "commodity_price_observations", "observations")),
+        _sort_text(_field(row, "commodityPriceSourceName", "commodity_price_source_name", "source")),
+    )
+
+
+def _commodity_sort_key(item: dict[str, Any]) -> tuple[str, int]:
+    commodity_id = _to_int(item.get("id"))
+    return (str(item.get("name") or "").strip().lower(), commodity_id if commodity_id is not None else 10**12)
+
+
+def _resolve_commodities(
+    canonical: str,
+    iso3: str,
+    requested: List[str],
+) -> Tuple[List[str], List[int], List[str]]:
+    commodities = _get_commodities(canonical, iso3)
+    by_name: dict[str, dict[str, Any]] = {}
+    for item in sorted(commodities, key=_commodity_sort_key):
+        by_name.setdefault(str(item["name"]).lower(), item)
+    by_id = {str(item["id"]): item for item in commodities if item.get("id") is not None}
+
+    selected = requested or _select_default_commodities([str(item["name"]) for item in commodities])
+    valid_names: list[str] = []
+    valid_ids: list[int] = []
+    missing: list[str] = []
+    for item in selected:
+        key = str(item).strip().lower()
+        commodity = by_name.get(key) or by_id.get(str(item).strip())
+        if not commodity:
+            missing.append(str(item))
+            continue
+        name = str(commodity["name"])
+        if name not in valid_names:
+            valid_names.append(name)
+        if commodity.get("id") is not None:
+            valid_ids.append(int(commodity["id"]))
+    return valid_names, valid_ids, missing
+
+
+def _select_default_commodities(available: List[str], max_items: int = 5) -> List[str]:
+    defaults: list[str] = []
+    priority_patterns = ["maize", "wheat", "rice", "sorghum", "millet", "beans", "lentil", "oil", "salt", "sugar"]
+    for pattern in priority_patterns:
+        for commodity in available:
+            if pattern in commodity.lower() and commodity not in defaults:
+                defaults.append(commodity)
+                break
+        if len(defaults) >= max_items:
+            return defaults
+    for commodity in available:
+        if commodity not in defaults:
+            defaults.append(commodity)
+        if len(defaults) >= max_items:
+            break
+    return defaults
+
+
+def _infer_category(commodity: str) -> str:
+    categories = get_commodity_categories([commodity])
+    return next(iter(categories.keys()), "Other")
+
+
+def _parse_time_period(time_period: str) -> pd.Timestamp:
+    try:
+        return pd.to_datetime(f"{time_period}-01").to_period("M").to_timestamp()
+    except Exception as exc:
+        raise ValueError(f"Invalid time period '{time_period}'. Expected YYYY-MM.") from exc
+
+
+def _recent_price_window(months: int = _RECENT_METADATA_MONTHS) -> Tuple[str, str]:
+    today = pd.Timestamp.today().normalize()
+    start = (today - pd.DateOffset(months=months)).replace(day=1)
+    return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+
+def _field(row: dict[str, Any], *names: str, default: Any = None) -> Any:
+    for name in names:
+        if name in row:
+            return row[name]
+    lowered = {key.lower(): value for key, value in row.items()}
+    for name in names:
+        key = name.lower()
+        if key in lowered:
+            return lowered[key]
+    return default
+
+
+def _to_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _sort_int(value: Any) -> int:
+    parsed = _to_int(value)
+    return parsed if parsed is not None else 10**12
+
+
+def _sort_float(value: Any) -> float:
+    parsed = _to_float(value)
+    return parsed if parsed is not None else float("inf")
+
+
+def _cache_get(cache: dict[Any, tuple[float, Any]], key: Any) -> Any:
+    item = cache.get(key)
+    if not item:
+        return None
+    created_at, value = item
+    if time.time() - created_at > _CACHE_TTL_SECONDS:
+        cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(cache: dict[Any, tuple[float, Any]], key: Any, value: Any) -> None:
+    cache[key] = (time.time(), value)

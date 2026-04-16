@@ -2,7 +2,9 @@ venv/
 __pycache__/
 *.pyc
 .env
+.tmp/
 
 app/services/market_monitor/data/
 
 app/docker.env
+app/price_data.csv

@@ -86,7 +86,14 @@ if country:
 
 if isinstance(metadata, dict):
     regions = metadata.get("regions") or []
-    commodities = metadata.get("commodities") or []
+    raw_commodities = metadata.get("commodities") or []
+    commodities = [
+        item.get("name")
+        for item in raw_commodities
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+    if not commodities:
+        commodities = [item for item in raw_commodities if isinstance(item, str)]
     default_commodities = metadata.get("default_commodities") or []
 
     date_range = metadata.get("date_range")
@@ -153,8 +160,6 @@ with st.form("market_monitor_form"):
     news_start_date = news_start_date_date.strftime("%Y-%m-%d") if use_news_dates else ""
     news_end_date = news_end_date_date.strftime("%Y-%m-%d") if use_news_dates else ""
 
-    use_mock_data = st.checkbox("Use Mock Data", value=False)
-
     valid_commodities = [c for c in commodities if isinstance(c, str)]
     default_candidates = [c for c in default_commodities if c in valid_commodities]
     commodity_list = st.multiselect(
@@ -192,7 +197,7 @@ if submitted:
             "news_start_date": news_start_date or None,
             "news_end_date": news_end_date or None,
             "previous_report_text": previous_report_text or "",
-            "use_mock_data": use_mock_data,
+            "use_mock_data": False,
         }
 
         run_id, final_status, result = run_async_and_poll(

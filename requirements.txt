@@ -11,8 +11,6 @@ pandas
 numpy
 chardet
 requests
-beautifulsoup4
-lxml
 matplotlib
 python-docx
 google-cloud-firestore

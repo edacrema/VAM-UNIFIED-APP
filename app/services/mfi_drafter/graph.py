@@ -33,7 +33,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.shared.llm import get_model
-from app.shared.retrievers import GDELTRetriever, ReliefWebRetriever
+from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .schemas import (
     MFI_DIMENSIONS, RISK_COLORS, get_risk_level,
     Document, MFIMarketData, MFIDimensionScore, SurveyMetadata
@@ -115,7 +115,7 @@ def create_initial_state(
         contextual_documents=[],
         document_references=[],
         country_context=None,
-        context_counts={"GDELT": 0, "ReliefWeb": 0, "total": 0},
+        context_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
         visualizations={},
         executive_summary=None,
@@ -474,6 +474,7 @@ def node_context_retrieval(state: MFIReportState) -> dict:
 
     docs: List[Dict[str, Any]] = []
     retriever_traces: List[Dict[str, Any]] = []
+    warnings: List[str] = []
 
     country = state.get("country", "")
     start_date = state.get("data_collection_start", "")
@@ -487,16 +488,32 @@ def node_context_retrieval(state: MFIReportState) -> dict:
     if getattr(rw, "last_trace", None):
         retriever_traces.append(rw.last_trace)
 
-    gdelt = GDELTRetriever(verbose=False)
-    gd_query = GDELTRetriever.build_economy_query(
+    seerist = SeeristRetriever(verbose=False)
+    seerist_queries = [
+        SeeristRetriever.build_lucene_or_query(
+            list(SeeristRetriever.DEFAULT_ECON_TERMS)
+            + ["market functionality", "food security", "supply", "availability", "access"]
+        ),
+        SeeristRetriever.build_lucene_or_query(
+            ["market functionality", "market", "availability", "access", "food security"]
+        ),
+        "",
+    ]
+    seerist_docs = seerist.fetch_batch(
+        queries=seerist_queries,
+        start_date=start_date,
+        end_date=end_date,
         country=country,
-        extra_terms=["market functionality", "food security", "supply", "availability", "access"],
+        max_per_query=8,
     )
-    gd_docs = gdelt.fetch(query=gd_query, start_date=start_date, end_date=end_date, max_records=8)
-    if getattr(gdelt, "last_trace", None):
-        retriever_traces.append(gdelt.last_trace)
+    if len(seerist_docs) > 8:
+        seerist_docs = seerist_docs[:8]
+    if getattr(seerist, "last_trace", None):
+        retriever_traces.append(seerist.last_trace)
+        if seerist.last_trace.get("error"):
+            warnings.append(f"Seerist retrieval unavailable for {country}: {seerist.last_trace['error']}")
 
-    combined = list(rw_docs) + list(gd_docs)
+    combined = list(rw_docs) + list(seerist_docs)
     seen_keys = set()
     deduped: List[Dict[str, Any]] = []
     for d in combined:
@@ -512,7 +529,7 @@ def node_context_retrieval(state: MFIReportState) -> dict:
 
     counts = Counter([d.get("source", "Unknown") for d in docs])
     context_counts = {
-        "GDELT": int(counts.get("GDELT", 0)),
+        "Seerist": int(counts.get("Seerist", 0)),
         "ReliefWeb": int(counts.get("ReliefWeb", 0)),
         "total": int(len(docs)),
     }
@@ -528,13 +545,16 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         for d in docs
     ]
     
-    return {
+    updates = {
         "contextual_documents": docs,
         "document_references": refs,
         "context_counts": context_counts,
         "retriever_traces": retriever_traces,
-        "current_node": "context_retrieval"
+        "current_node": "context_retrieval",
     }
+    if warnings:
+        updates["warnings"] = warnings
+    return updates
 
 # NODE: CONTEXT EXTRACTOR
 # ============================================================================

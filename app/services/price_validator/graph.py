@@ -15,7 +15,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +26,10 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.shared.llm import get_model
-from app.services.market_monitor.data_loader import (
-    _download_gcs_to_file,
-    _get_price_data_cache_path,
-    _get_price_data_gcs_uri,
-    _parse_gcs_uri,
+from app.shared.gcs import (
+    download_gcs_to_file,
+    get_market_names_cache_path,
+    get_market_names_gcs_uri,
 )
 from .schemas import ValidationError, LayerResult, PriceDataTemplate, Severity
 
@@ -246,17 +244,7 @@ def _df_from_state(state: PriceDataState) -> pd.DataFrame:
 
 
 def _get_market_names_gcs_uri() -> str | None:
-    uri = (os.getenv("MARKET_NAMES_GCS_URI") or "").strip()
-    if uri:
-        return uri
-    price_uri = _get_price_data_gcs_uri()
-    if not price_uri:
-        return None
-    bucket, obj = _parse_gcs_uri(price_uri)
-    parent = Path(obj).parent.as_posix()
-    if parent == ".":
-        return f"gs://{bucket}/market_names.csv"
-    return f"gs://{bucket}/{parent}/market_names.csv"
+    return get_market_names_gcs_uri()
 
 
 def _load_market_names() -> set[str]:
@@ -264,9 +252,9 @@ def _load_market_names() -> set[str]:
     if not gcs_uri:
         raise FileNotFoundError("Market names GCS URI not configured")
 
-    destination = _get_price_data_cache_path().with_name("market_names.csv")
+    destination = get_market_names_cache_path()
     if not destination.exists():
-        _download_gcs_to_file(gcs_uri, destination)
+        download_gcs_to_file(gcs_uri, destination)
 
     df = pd.read_csv(destination)
     if df.empty:

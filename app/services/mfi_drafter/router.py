@@ -3,7 +3,7 @@ MFI Drafter - Router
 ====================
 FastAPI endpoints for the MFI Report Generator service.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional, Any, Dict
@@ -12,6 +12,11 @@ import numpy as np
 
 from .graph import run_mfi_report_generation
 from .data_loader import load_mfi_from_csv, validate_csv_structure
+from .databridges_loader import (
+    list_mfi_countries,
+    list_mfi_surveys_for_country,
+    load_mfi_survey_from_databridges,
+)
 from .schemas import (
     GenerateMFIReportInput,
     GenerateMFIReportOutput,
@@ -45,6 +50,10 @@ class ExportDocxOptions(BaseModel):
     include_visualizations: bool = True
     template: Optional[str] = None
 
+
+class GenerateMFIReportFromSurveyInput(BaseModel):
+    survey_id: int
+
 def _normalize_text(value: Any) -> str:
     if value is None:
         return ""
@@ -75,6 +84,81 @@ def _normalize_dimension_findings(findings: Any) -> Dict[str, Dict[str, str]]:
             "recommendations": _normalize_text(payload.get("recommendations")),
         }
     return normalized
+
+
+def _build_mfi_output(
+    *,
+    result: Dict[str, Any],
+    country: str,
+    data_collection_start: str,
+    data_collection_end: str,
+) -> GenerateMFIReportOutput:
+    market_mfis = [
+        float(m.get("overall_mfi", 0) or 0)
+        for m in (result.get("markets_data", []) or [])
+        if isinstance(m, dict)
+    ]
+    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
+
+    risk_dist: Dict[str, int] = {}
+    for market in result.get("markets_data", []) or []:
+        if isinstance(market, dict):
+            risk = str(market.get("risk_level") or "Unknown")
+            risk_dist[risk] = risk_dist.get(risk, 0) + 1
+
+    normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
+
+    return GenerateMFIReportOutput(
+        run_id=result.get("run_id", "unknown"),
+        country=country,
+        data_collection_start=data_collection_start,
+        data_collection_end=data_collection_end,
+        survey_metadata=result.get("survey_metadata", {}),
+        national_mfi=national_mfi,
+        risk_distribution=risk_dist,
+        markets_data=result.get("markets_data", []),
+        dimension_scores=result.get("dimension_scores", []),
+        executive_summary=result.get("executive_summary", ""),
+        dimension_findings=normalized_dimension_findings,
+        market_recommendations=result.get("market_recommendations", {}) or {},
+        country_context=result.get("country_context"),
+        document_references=result.get("document_references", []),
+        report_blocks=build_mfi_report_blocks(
+            {
+                **(result or {}),
+                "country": country,
+                "data_collection_start": data_collection_start,
+                "data_collection_end": data_collection_end,
+                "dimension_findings": normalized_dimension_findings,
+                "market_recommendations": result.get("market_recommendations", {}) or {},
+            }
+        ),
+        visualizations=result.get("visualizations", {}),
+        warnings=result.get("warnings", []),
+        llm_calls=result.get("llm_calls", 0),
+        correction_attempts=result.get("correction_attempts", 0),
+        success=True,
+    )
+
+
+def _run_mfi_from_structured_data(csv_data: Dict[str, Any]) -> GenerateMFIReportOutput:
+    country = csv_data["country"]
+    data_collection_start = csv_data["data_collection_start"]
+    data_collection_end = csv_data["data_collection_end"]
+    markets = csv_data["markets"]
+    result = run_mfi_report_generation(
+        country=country,
+        data_collection_start=data_collection_start,
+        data_collection_end=data_collection_end,
+        markets=markets,
+        csv_data=csv_data,
+    )
+    return _build_mfi_output(
+        result=result,
+        country=country,
+        data_collection_start=data_collection_start,
+        data_collection_end=data_collection_end,
+    )
 
 @router.post("/generate", response_model=GenerateMFIReportOutput)
 async def generate_mfi_report(input_data: GenerateMFIReportInput):
@@ -160,14 +244,127 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/generate-from-csv", response_model=GenerateMFIReportOutput)
-async def generate_mfi_report_from_csv(
-    file: UploadFile = File(..., description="Processed MFI CSV file"),
-    country_override: Optional[str] = Form(None, description="Override country name"),
-    data_collection_start_override: Optional[str] = Form(None, description="Override start date"),
-    data_collection_end_override: Optional[str] = Form(None, description="Override end date"),
+@router.get("/countries")
+def get_mfi_countries():
+    """Return countries with available MFI surveys in Databridges."""
+    try:
+        return {"countries": list_mfi_countries()}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/countries/{country}/surveys")
+def get_mfi_surveys(
+    country: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ):
+    """Return Databridges MFI surveys for a selected country."""
+    try:
+        return {
+            "country": country,
+            "surveys": list_mfi_surveys_for_country(
+                country,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/generate-from-survey", response_model=GenerateMFIReportOutput)
+async def generate_mfi_report_from_survey(input_data: GenerateMFIReportFromSurveyInput):
+    """Generate an MFI report from a selected Databridges survey."""
+    try:
+        csv_data = load_mfi_survey_from_databridges(input_data.survey_id)
+        return _run_mfi_from_structured_data(csv_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("MFI report generation from Databridges failed")
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/generate-from-survey-async")
+async def generate_mfi_report_from_survey_async(
+    input_data: GenerateMFIReportFromSurveyInput,
+    background_tasks: BackgroundTasks,
+):
+    """Start MFI report generation from a Databridges survey in the background."""
+    import uuid as uuid_module
+
+    try:
+        csv_data = load_mfi_survey_from_databridges(input_data.survey_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    run_id = f"mfi_{uuid_module.uuid4().hex[:8]}"
+    create_run(run_id)
+
+    progress_map = {
+        "mfi_data_agent": 10,
+        "context_retrieval": 25,
+        "context_extractor": 40,
+        "mfi_graph_designer": 55,
+        "dimension_drafter": 72,
+        "market_recommendations_drafter": 82,
+        "executive_summary_drafter": 92,
+        "red_team": 97,
+    }
+
+    def run_in_background():
+        try:
+            update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_step(node_name: str, _state: dict):
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
+
+            result = run_mfi_report_generation(
+                country=csv_data["country"],
+                data_collection_start=csv_data["data_collection_start"],
+                data_collection_end=csv_data["data_collection_end"],
+                markets=csv_data["markets"],
+                csv_data=csv_data,
+                on_step=on_step,
+            )
+            result = {
+                **(result or {}),
+                "country": csv_data["country"],
+                "data_collection_start": csv_data["data_collection_start"],
+                "data_collection_end": csv_data["data_collection_end"],
+            }
+            output = _build_mfi_output(
+                result=result,
+                country=csv_data["country"],
+                data_collection_start=csv_data["data_collection_start"],
+                data_collection_end=csv_data["data_collection_end"],
+            )
+            set_run_completed(
+                run_id,
+                result=output.model_dump() if hasattr(output, "model_dump") else output.dict(),
+            )
+        except Exception as exc:
+            logger.exception("MFI async report generation from Databridges failed")
+            set_run_failed(run_id, error=str(exc))
+
+    background_tasks.add_task(run_in_background)
+    return {"run_id": run_id, "status": "pending"}
+
+
+@router.post("/generate-from-csv", response_model=GenerateMFIReportOutput)
+async def generate_mfi_report_from_csv():
     """Generates a full MFI report from an uploaded CSV file."""
+    raise HTTPException(
+        status_code=404,
+        detail="Processed MFI CSV upload has been removed. Select a Databridges country and survey instead.",
+    )
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -254,10 +451,12 @@ async def generate_mfi_report_from_csv(
 
 
 @router.post("/validate-csv")
-async def validate_mfi_csv(
-    file: UploadFile = File(..., description="CSV file to validate"),
-):
+async def validate_mfi_csv():
     """Validates a CSV file structure before processing."""
+    raise HTTPException(
+        status_code=404,
+        detail="Processed MFI CSV validation has been removed. Select a Databridges country and survey instead.",
+    )
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -270,14 +469,12 @@ async def validate_mfi_csv(
 
 
 @router.post("/generate-from-csv-async")
-async def generate_mfi_report_from_csv_async(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Processed MFI CSV file"),
-    country_override: Optional[str] = Form(None),
-    data_collection_start_override: Optional[str] = Form(None),
-    data_collection_end_override: Optional[str] = Form(None),
-):
+async def generate_mfi_report_from_csv_async():
     """Starts report generation from CSV in the background."""
+    raise HTTPException(
+        status_code=404,
+        detail="Processed MFI CSV upload has been removed. Select a Databridges country and survey instead.",
+    )
     import uuid as uuid_module
 
     filename = file.filename or ""
@@ -549,59 +746,29 @@ def get_service_info():
                        "Analyzes 9 market functionality dimensions and generates "
                        "visualizations, an executive summary, and recommendations.",
         "version": "1.1.0",
-        "supports_csv_upload": True,
+        "supports_csv_upload": False,
+        "data_source": "Databridges",
         "inputs": [
             {
                 "name": "country",
                 "type": "string",
                 "required": True,
                 "label": "Country",
-                "description": "Country name"
+                "description": "Country with available MFI surveys in Databridges"
             },
             {
-                "name": "data_collection_start",
-                "type": "string",
+                "name": "survey_id",
+                "type": "integer",
                 "required": True,
-                "label": "Data Collection Start",
-                "description": "Data collection start date (YYYY-MM-DD)"
-            },
-            {
-                "name": "data_collection_end",
-                "type": "string",
-                "required": True,
-                "label": "Data Collection End",
-                "description": "Data collection end date (YYYY-MM-DD)"
-            },
-            {
-                "name": "markets",
-                "type": "array",
-                "required": True,
-                "label": "Markets",
-                "description": "List of surveyed markets (names)"
+                "label": "MFI Survey",
+                "description": "Databridges survey ID selected after choosing a country"
             }
         ],
-        "csv_upload": {
-            "endpoint": "/generate-from-csv",
-            "async_endpoint": "/generate-from-csv-async",
-            "validate_endpoint": "/validate-csv",
-            "required_columns": [
-                "MarketName",
-                "Adm0Name",
-                "Adm1Name",
-                "LevelID",
-                "DimensionName",
-                "VariableName",
-                "OutputValue",
-                "TradersSampleSize",
-            ],
-            "optional_columns": [
-                "MarketLatitude",
-                "MarketLongitude",
-                "Adm2Name",
-                "StartDate",
-                "EndDate",
-            ],
-            "description": "Upload a processed MFI CSV file instead of providing manual input",
+        "databridges": {
+            "countries_endpoint": "/countries",
+            "surveys_endpoint": "/countries/{country}/surveys",
+            "endpoint": "/generate-from-survey",
+            "async_endpoint": "/generate-from-survey-async",
         },
         "outputs": {
             "run_id": "Unique generation identifier",

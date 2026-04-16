@@ -1,40 +1,14 @@
-"""
-Market Monitor Service
-======================
-Servizio per la generazione di Market Monitor Reports WFP.
-"""
-from .router import router
-from .graph import (
-    run_report_generation,
-    build_graph,
-    create_initial_state,
-    AVAILABLE_MODULES,
-    CURRENCY_SYMBOLS
-)
-from .schemas import (
-    ModuleOutput,
-    Document,
-    Event,
-    TrendAnalysis,
-    SkepticFlag,
-    DataStatistics,
-    GenerateReportInput,
-    GenerateReportOutput,
-    ReportStatusOutput
-)
+"""Market Monitor service package."""
+
+from importlib import import_module
 
 __all__ = [
-    # Router
     "router",
-    
-    # Graph
     "run_report_generation",
     "build_graph",
     "create_initial_state",
     "AVAILABLE_MODULES",
     "CURRENCY_SYMBOLS",
-    
-    # Schemas
     "ModuleOutput",
     "Document",
     "Event",
@@ -43,5 +17,33 @@ __all__ = [
     "DataStatistics",
     "GenerateReportInput",
     "GenerateReportOutput",
-    "ReportStatusOutput"
+    "ReportStatusOutput",
 ]
+
+
+def __getattr__(name: str):
+    if name == "router":
+        from .router import router
+
+        return router
+    if name in {
+        "run_report_generation",
+        "build_graph",
+        "create_initial_state",
+        "AVAILABLE_MODULES",
+        "CURRENCY_SYMBOLS",
+    }:
+        return getattr(import_module(".graph", __name__), name)
+    if name in {
+        "ModuleOutput",
+        "Document",
+        "Event",
+        "TrendAnalysis",
+        "SkepticFlag",
+        "DataStatistics",
+        "GenerateReportInput",
+        "GenerateReportOutput",
+        "ReportStatusOutput",
+    }:
+        return getattr(import_module(".schemas", __name__), name)
+    raise AttributeError(name)

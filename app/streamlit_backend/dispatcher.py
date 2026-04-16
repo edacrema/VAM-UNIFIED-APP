@@ -29,26 +29,21 @@ from app.shared.report_blocks import build_market_monitor_report_blocks, build_m
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
 from app.services.mfi_drafter.data_loader import load_mfi_from_csv, validate_csv_structure
+from app.services.mfi_drafter.databridges_loader import (
+    list_mfi_countries,
+    list_mfi_surveys_for_country,
+    load_mfi_survey_from_databridges,
+)
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
 from app.services.market_monitor.graph import AVAILABLE_MODULES, CURRENCY_SYMBOLS, run_report_generation
 from app.services.market_monitor.data_loader import (
-    DATA_DIR,
-    _get_gcs_client,
-    _get_price_data_cache_path,
-    _get_price_data_gcs_uri,
-    _parse_gcs_uri,
-    _upload_file_to_gcs,
     check_data_availability,
-    get_all_commodities,
     get_available_commodities,
-    get_available_countries,
-    get_available_markets,
-    get_available_regions,
+    get_country_metadata as get_market_monitor_country_metadata,
     get_commodity_categories,
-    get_date_range,
-    load_csv_price_data,
+    get_supported_countries as get_market_monitor_supported_countries,
     normalize_country_name,
 )
 
@@ -895,12 +890,14 @@ def _dispatch_mfi_drafter(
 ) -> LocalResponse:
     if method == "POST" and parts == ["generate"]:
         return _mfi_drafter_generate(json_body=json_body)
-    if method == "POST" and parts == ["generate-from-csv"]:
-        return _mfi_drafter_generate_from_csv(data=data, files=files, params=params)
-    if method == "POST" and parts == ["validate-csv"]:
-        return _mfi_drafter_validate_csv(files=files)
-    if method == "POST" and parts == ["generate-from-csv-async"]:
-        return _mfi_drafter_generate_from_csv_async(data=data, files=files, params=params)
+    if method == "GET" and parts == ["countries"]:
+        return _mfi_drafter_countries()
+    if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "surveys":
+        return _mfi_drafter_country_surveys(parts[1], params=params)
+    if method == "POST" and parts == ["generate-from-survey"]:
+        return _mfi_drafter_generate_from_survey(json_body=json_body)
+    if method == "POST" and parts == ["generate-from-survey-async"]:
+        return _mfi_drafter_generate_from_survey_async(json_body=json_body)
     if method == "POST" and parts == ["generate-async"]:
         return _mfi_drafter_generate_async(json_body=json_body)
     if method == "GET" and len(parts) == 2 and parts[0] == "status":
@@ -950,6 +947,129 @@ def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
         data_collection_end=data_collection_end,
     )
     return _json_response(output)
+
+
+def _mfi_drafter_countries() -> LocalResponse:
+    try:
+        return _json_response({"countries": list_mfi_countries()})
+    except Exception as exc:
+        raise LocalHTTPException(502, str(exc))
+
+
+def _mfi_drafter_country_surveys(country: str, *, params: Dict[str, Any]) -> LocalResponse:
+    start_date = _get_form_value(params, "start_date", None)
+    end_date = _get_form_value(params, "end_date", None)
+    try:
+        surveys = list_mfi_surveys_for_country(
+            country,
+            start_date=str(start_date) if start_date else None,
+            end_date=str(end_date) if end_date else None,
+        )
+        return _json_response({"country": country, "surveys": surveys})
+    except Exception as exc:
+        raise LocalHTTPException(502, str(exc))
+
+
+def _mfi_drafter_generate_from_survey(*, json_body: Any) -> LocalResponse:
+    if not isinstance(json_body, dict):
+        raise LocalHTTPException(400, "Invalid JSON body")
+    survey_id = json_body.get("survey_id")
+    if survey_id is None:
+        raise LocalHTTPException(400, "survey_id is required")
+    try:
+        csv_data = load_mfi_survey_from_databridges(int(survey_id))
+        result = run_mfi_report_generation(
+            country=csv_data["country"],
+            data_collection_start=csv_data["data_collection_start"],
+            data_collection_end=csv_data["data_collection_end"],
+            markets=csv_data["markets"],
+            csv_data=csv_data,
+        )
+        output = _build_mfi_report_output(
+            result=result,
+            run_id=result.get("run_id", "unknown"),
+            country=csv_data["country"],
+            data_collection_start=csv_data["data_collection_start"],
+            data_collection_end=csv_data["data_collection_end"],
+        )
+        return _json_response(output)
+    except ValueError as exc:
+        raise LocalHTTPException(400, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(502, str(exc))
+
+
+def _mfi_drafter_generate_from_survey_async(*, json_body: Any) -> LocalResponse:
+    if not isinstance(json_body, dict):
+        raise LocalHTTPException(400, "Invalid JSON body")
+    survey_id = json_body.get("survey_id")
+    if survey_id is None:
+        raise LocalHTTPException(400, "survey_id is required")
+    try:
+        csv_data = load_mfi_survey_from_databridges(int(survey_id))
+    except ValueError as exc:
+        raise LocalHTTPException(400, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(502, str(exc))
+
+    run_id = f"mfi_{uuid.uuid4().hex[:8]}"
+    create_run(run_id)
+
+    progress_map = {
+        "mfi_data_agent": 10,
+        "context_retrieval": 25,
+        "context_extractor": 40,
+        "mfi_graph_designer": 55,
+        "dimension_drafter": 72,
+        "market_recommendations_drafter": 82,
+        "executive_summary_drafter": 92,
+        "red_team": 97,
+    }
+
+    def run_in_background() -> None:
+        try:
+            update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_step(node_name: str, _state: dict) -> None:
+                progress = progress_map.get(node_name)
+                if progress is not None:
+                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
+                else:
+                    update_run(run_id, current_node=node_name)
+
+                context_counts = _state.get("context_counts")
+                if isinstance(context_counts, dict):
+                    update_run(run_id, metadata={"context_counts": context_counts})
+
+            result = run_mfi_report_generation(
+                country=csv_data["country"],
+                data_collection_start=csv_data["data_collection_start"],
+                data_collection_end=csv_data["data_collection_end"],
+                markets=csv_data["markets"],
+                csv_data=csv_data,
+                on_step=on_step,
+            )
+            result = {
+                **(result or {}),
+                "country": csv_data["country"],
+                "data_collection_start": csv_data["data_collection_start"],
+                "data_collection_end": csv_data["data_collection_end"],
+            }
+            output = _build_mfi_report_output(
+                result=result,
+                run_id=run_id,
+                country=csv_data["country"],
+                data_collection_start=csv_data["data_collection_start"],
+                data_collection_end=csv_data["data_collection_end"],
+            )
+            set_run_completed(run_id, result=output)
+        except Exception as exc:
+            logger.exception("MFI async report generation from Databridges failed")
+            set_run_failed(run_id, error=str(exc), traceback=traceback.format_exc())
+
+    thread = threading.Thread(target=run_in_background, name=f"mfi-survey-{run_id}", daemon=True)
+    thread.start()
+    return _json_response({"run_id": run_id, "status": "pending"})
 
 
 def _mfi_drafter_generate_from_csv(
@@ -1251,59 +1371,29 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "Analyzes 9 market functionality dimensions and generates "
         "visualizations, an executive summary, and recommendations.",
         "version": "1.1.0",
-        "supports_csv_upload": True,
+        "supports_csv_upload": False,
+        "data_source": "Databridges",
         "inputs": [
             {
                 "name": "country",
                 "type": "string",
                 "required": True,
                 "label": "Country",
-                "description": "Country name",
+                "description": "Country with available MFI surveys in Databridges",
             },
             {
-                "name": "data_collection_start",
-                "type": "string",
+                "name": "survey_id",
+                "type": "integer",
                 "required": True,
-                "label": "Data Collection Start",
-                "description": "Data collection start date (YYYY-MM-DD)",
-            },
-            {
-                "name": "data_collection_end",
-                "type": "string",
-                "required": True,
-                "label": "Data Collection End",
-                "description": "Data collection end date (YYYY-MM-DD)",
-            },
-            {
-                "name": "markets",
-                "type": "array",
-                "required": True,
-                "label": "Markets",
-                "description": "List of surveyed markets (names)",
+                "label": "MFI Survey",
+                "description": "Databridges survey ID selected after choosing a country",
             },
         ],
-        "csv_upload": {
-            "endpoint": "/generate-from-csv",
-            "async_endpoint": "/generate-from-csv-async",
-            "validate_endpoint": "/validate-csv",
-            "required_columns": [
-                "MarketName",
-                "Adm0Name",
-                "Adm1Name",
-                "LevelID",
-                "DimensionName",
-                "VariableName",
-                "OutputValue",
-                "TradersSampleSize",
-            ],
-            "optional_columns": [
-                "MarketLatitude",
-                "MarketLongitude",
-                "Adm2Name",
-                "StartDate",
-                "EndDate",
-            ],
-            "description": "Upload a processed MFI CSV file instead of providing manual input",
+        "databridges": {
+            "countries_endpoint": "/countries",
+            "surveys_endpoint": "/countries/{country}/surveys",
+            "endpoint": "/generate-from-survey",
+            "async_endpoint": "/generate-from-survey-async",
         },
         "outputs": {
             "run_id": "Unique generation identifier",
@@ -1427,10 +1517,6 @@ def _dispatch_market_monitor(
         return _json_response(_market_monitor_info())
     if method == "GET" and parts == ["health"]:
         return _json_response({"status": "healthy", "service": "market-monitor"})
-    if method == "GET" and parts == ["dataset", "status"]:
-        return _market_monitor_dataset_status()
-    if method == "POST" and parts == ["dataset", "upload"]:
-        return _market_monitor_dataset_upload(files=files)
     if method == "GET" and parts == ["countries"]:
         return _market_monitor_countries()
     if method == "GET" and parts == ["commodities"]:
@@ -1693,14 +1779,6 @@ def _market_monitor_info() -> Dict[str, Any]:
                 "default": [],
                 "options": list(AVAILABLE_MODULES.keys()),
             },
-            {
-                "name": "use_mock_data",
-                "type": "boolean",
-                "required": False,
-                "label": "Use Mock Data",
-                "description": "If True, force mock numeric price data. If False (default), load price data from CSV and fall back to mock only on errors.",
-                "default": False,
-            },
         ],
         "outputs": {
             "run_id": "Unique generation identifier",
@@ -1735,157 +1813,41 @@ def _market_monitor_info() -> Dict[str, Any]:
 
 
 def _market_monitor_dataset_status() -> LocalResponse:
-    gcs_uri = _get_price_data_gcs_uri()
-    cache_path = _get_price_data_cache_path()
-    local_path = DATA_DIR / "price_data.csv"
-
-    cache_exists = cache_path.exists()
-    local_exists = local_path.exists()
-
-    cache_stat = cache_path.stat() if cache_exists else None
-    local_stat = local_path.stat() if local_exists else None
-
-    gcs_exists = None
-    if gcs_uri:
-        try:
-            client = _get_gcs_client()
-            if client is not None:
-                bucket_name, object_name = _parse_gcs_uri(gcs_uri)
-                blob = client.bucket(bucket_name).blob(object_name)
-                gcs_exists = blob.exists()
-        except Exception:
-            gcs_exists = None
-
-    return _json_response(
-        {
-            "gcs_uri": gcs_uri,
-            "gcs_exists": gcs_exists,
-            "cache": {
-                "path": str(cache_path),
-                "exists": cache_exists,
-                "size_bytes": getattr(cache_stat, "st_size", None),
-                "updated_at": getattr(cache_stat, "st_mtime", None),
-            },
-            "local": {
-                "path": str(local_path),
-                "exists": local_exists,
-                "size_bytes": getattr(local_stat, "st_size", None),
-                "updated_at": getattr(local_stat, "st_mtime", None),
-            },
-        }
+    raise LocalHTTPException(
+        404,
+        "The processed Price Bulletin dataset upload/status path has been removed. Data is loaded from Databridges.",
     )
 
 
 def _market_monitor_dataset_upload(*, files: Any) -> LocalResponse:
-    upload = _extract_file(files, "file")
-    if upload is None or not upload.filename:
-        raise LocalHTTPException(400, "Missing filename")
-    if not upload.filename.lower().endswith(".csv"):
-        raise LocalHTTPException(400, "File must be a CSV")
-
-    gcs_uri = _get_price_data_gcs_uri()
-    if gcs_uri:
-        try:
-            _upload_file_to_gcs(upload.content, gcs_uri)
-        except Exception as exc:
-            raise LocalHTTPException(500, f"Upload to GCS failed: {str(exc)}")
-
-        cache_path = _get_price_data_cache_path()
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(upload.content)
-        return _json_response({"uploaded": True, "gcs_uri": gcs_uri})
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    local_path = DATA_DIR / "price_data.csv"
-    local_path.write_bytes(upload.content)
-    return _json_response({"uploaded": True, "local_path": str(local_path)})
+    raise LocalHTTPException(
+        404,
+        "The processed Price Bulletin dataset upload path has been removed. Data is loaded from Databridges.",
+    )
 
 
 def _market_monitor_countries() -> LocalResponse:
-    country_currencies = {
-        "South Sudan": {"code": "SSP", "name": "South Sudanese Pound"},
-        "Sudan": {"code": "SDG", "name": "Sudanese Pound"},
-        "Yemen": {"code": "YER", "name": "Yemeni Rial"},
-        "Myanmar": {"code": "MMK", "name": "Myanmar Kyat"},
-        "Syrian Arab Republic": {"code": "SYP", "name": "Syrian Pound"},
-        "Afghanistan": {"code": "AFN", "name": "Afghan Afghani"},
-        "Ethiopia": {"code": "ETB", "name": "Ethiopian Birr"},
-        "Nigeria": {"code": "NGN", "name": "Nigerian Naira"},
-        "Pakistan": {"code": "PKR", "name": "Pakistani Rupee"},
-        "Bangladesh": {"code": "BDT", "name": "Bangladeshi Taka"},
-        "Kenya": {"code": "KES", "name": "Kenyan Shilling"},
-        "Uganda": {"code": "UGX", "name": "Ugandan Shilling"},
-        "Tanzania": {"code": "TZS", "name": "Tanzanian Shilling"},
-        "Zambia": {"code": "ZMW", "name": "Zambian Kwacha"},
-        "Malawi": {"code": "MWK", "name": "Malawian Kwacha"},
-        "Haiti": {"code": "HTG", "name": "Haitian Gourde"},
-        "Democratic Republic of Congo": {"code": "CDF", "name": "Congolese Franc"},
-        "Somalia": {"code": "SOS", "name": "Somali Shilling"},
-        "Lebanon": {"code": "LBP", "name": "Lebanese Pound"},
-    }
-
-    try:
-        df = load_csv_price_data()
-        available_countries = get_available_countries(df)
-    except FileNotFoundError:
-        available_countries = []
-
-    countries: List[Dict[str, Any]] = []
-    for country in available_countries:
-        currency_info = country_currencies.get(country, {"code": "USD", "name": "US Dollar"})
-        countries.append(
-            {
-                "name": country,
-                "currency_code": currency_info["code"],
-                "currency_name": currency_info["name"],
-                "has_data": True,
-            }
-        )
-
-    for country, currency_info in country_currencies.items():
-        if country not in available_countries:
-            countries.append(
-                {
-                    "name": country,
-                    "currency_code": currency_info["code"],
-                    "currency_name": currency_info["name"],
-                    "has_data": False,
-                }
-            )
-
-    return _json_response({"countries": sorted(countries, key=lambda x: x["name"])})
+    return _json_response({"countries": get_market_monitor_supported_countries()})
 
 
 def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
     country = _get_form_value(params, "country", None)
-    try:
-        df = load_csv_price_data()
-    except FileNotFoundError:
+    if not country:
         return _json_response(
             {
                 "commodities": [],
                 "categories": {},
-                "warning": "No price data file found. Please upload price_data.csv.",
+                "warning": "Select a country to load Databridges commodity options.",
             }
         )
 
-    if country:
-        country_normalized = normalize_country_name(str(country))
-        commodity_list = get_available_commodities(df, country_normalized)
-        categories = get_commodity_categories(df[df["Country"] == country_normalized])
-        return _json_response(
-            {
-                "country": country_normalized,
-                "commodities": [{"name": c} for c in commodity_list],
-                "categories": categories,
-            }
-        )
-
-    categories = get_commodity_categories(df)
-    all_commodities = get_all_commodities(df)
+    country_normalized = normalize_country_name(str(country))
+    commodity_list = get_available_commodities(country_normalized)
+    categories = get_commodity_categories(commodity_list)
     return _json_response(
         {
-            "commodities": [{"name": c} for c in all_commodities],
+            "country": country_normalized,
+            "commodities": [{"name": c} for c in commodity_list],
             "categories": categories,
         }
     )
@@ -1893,33 +1855,9 @@ def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
 
 def _market_monitor_country_metadata(country: str) -> LocalResponse:
     try:
-        df = load_csv_price_data()
-    except FileNotFoundError:
-        raise LocalHTTPException(404, "Price data file not found")
-
-    country_normalized = normalize_country_name(country)
-    if country_normalized not in df["Country"].values:
-        available = sorted(df["Country"].unique().tolist())
-        raise LocalHTTPException(404, f"Country '{country}' not found. Available: {available}")
-
-    date_range = get_date_range(df, country_normalized)
-    commodities = get_available_commodities(df, country_normalized)
-    categories = get_commodity_categories(df[df["Country"] == country_normalized])
-
-    return _json_response(
-        {
-            "country": country_normalized,
-            "commodities": commodities,
-            "commodity_categories": categories,
-            "regions": get_available_regions(df, country_normalized),
-            "markets": get_available_markets(df, country_normalized),
-            "date_range": {
-                "start": date_range[0].strftime("%Y-%m-%d"),
-                "end": date_range[1].strftime("%Y-%m-%d"),
-            },
-            "default_commodities": _get_food_basket_commodities(commodities),
-        }
-    )
+        return _json_response(get_market_monitor_country_metadata(country))
+    except Exception as exc:
+        raise LocalHTTPException(502, str(exc))
 
 
 def _get_food_basket_commodities(available: List[str]) -> List[str]:

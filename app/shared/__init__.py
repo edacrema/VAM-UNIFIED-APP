@@ -1,10 +1,23 @@
 """Shared Module - Componenti condivisi tra i servizi."""
-from .llm import get_model, configure_model
-from .retrievers import GDELTRetriever, ReliefWebRetriever
 
 __all__ = [
     "get_model",
     "configure_model",
-    "GDELTRetriever",
-    "ReliefWebRetriever"
+    "SeeristRetriever",
+    "ReliefWebRetriever",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"get_model", "configure_model"}:
+        from .llm import configure_model, get_model
+
+        return {"get_model": get_model, "configure_model": configure_model}[name]
+    if name in {"SeeristRetriever", "ReliefWebRetriever"}:
+        from .retrievers import ReliefWebRetriever, SeeristRetriever
+
+        return {
+            "SeeristRetriever": SeeristRetriever,
+            "ReliefWebRetriever": ReliefWebRetriever,
+        }[name]
+    raise AttributeError(name)
