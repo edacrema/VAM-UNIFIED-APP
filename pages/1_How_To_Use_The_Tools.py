@@ -230,14 +230,14 @@ st.header("4. MFI Report Drafter")
 st.subheader("What it does")
 st.markdown(
     """
-The MFI Report Drafter generates a complete Market Functionality Index (MFI) assessment report from processed MFI data retrieved directly from Databridges.
+The MFI Report Drafter generates a complete Market Functionality Index (MFI) assessment report from processed MFI data. You can either upload the final processed/elaborated MFI CSV or select a processed survey directly from Databridges.
     """
 )
 
 st.subheader("When to use it")
 st.markdown(
     """
-Use this tool **after** your raw MFI data has been uploaded to Databridges and processed. The drafter reads the processed survey rows from Databridges; you do not need to download or upload a processed CSV.
+Use this tool **after** your raw MFI data has been processed by Databridges. If you already have the final processed CSV, upload it directly. If not, you can select the survey from Databridges and let the drafter fetch the processed rows for you.
     """
 )
 
@@ -246,10 +246,10 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-1. **Select a country** with available MFI surveys in Databridges.
-2. *(Optional)* **Filter surveys by date range** to narrow the list.
-3. **Select one survey** from the available Databridges surveys.
-4. **Click "Run"** to generate the MFI report from the selected survey.
+1. **Choose an input source**: upload the processed MFI CSV or use a Databridges survey.
+2. **If uploading a CSV**, add optional country/date overrides only if the file metadata is missing or incorrect.
+3. **If using Databridges**, select a country, optionally filter surveys by date, then choose one processed survey.
+4. **Click "Run"** to generate the MFI report.
         """
     )
 with right:

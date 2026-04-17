@@ -944,6 +944,12 @@ def _dispatch_mfi_drafter(
         return _mfi_drafter_generate_from_survey(json_body=json_body)
     if method == "POST" and parts == ["generate-from-survey-async"]:
         return _mfi_drafter_generate_from_survey_async(json_body=json_body)
+    if method == "POST" and parts == ["generate-from-csv"]:
+        return _mfi_drafter_generate_from_csv(data=data, files=files, params=params)
+    if method == "POST" and parts == ["validate-csv"]:
+        return _mfi_drafter_validate_csv(files=files)
+    if method == "POST" and parts == ["generate-from-csv-async"]:
+        return _mfi_drafter_generate_from_csv_async(data=data, files=files, params=params)
     if method == "POST" and parts == ["generate-async"]:
         return _mfi_drafter_generate_async(json_body=json_body)
     if method == "GET" and len(parts) == 2 and parts[0] == "status":
@@ -1618,8 +1624,8 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "Analyzes 9 market functionality dimensions and generates "
         "visualizations, an executive summary, and recommendations.",
         "version": "1.1.0",
-        "supports_csv_upload": False,
-        "data_source": "Databridges",
+        "supports_csv_upload": True,
+        "data_source": "Databridges or uploaded processed CSV",
         "inputs": [
             {
                 "name": "country",
@@ -1641,6 +1647,29 @@ def _mfi_drafter_info() -> Dict[str, Any]:
             "surveys_endpoint": "/countries/{country}/surveys",
             "endpoint": "/generate-from-survey",
             "async_endpoint": "/generate-from-survey-async",
+        },
+        "csv_upload": {
+            "endpoint": "/generate-from-csv",
+            "async_endpoint": "/generate-from-csv-async",
+            "validate_endpoint": "/validate-csv",
+            "required_columns": [
+                "MarketName",
+                "Adm0Name",
+                "Adm1Name",
+                "LevelID",
+                "DimensionName",
+                "VariableName",
+                "OutputValue",
+                "TradersSampleSize",
+            ],
+            "optional_columns": [
+                "MarketLatitude",
+                "MarketLongitude",
+                "Adm2Name",
+                "StartDate",
+                "EndDate",
+            ],
+            "description": "Upload the final processed MFI CSV instead of selecting a Databridges survey",
         },
         "outputs": {
             "run_id": "Unique generation identifier",

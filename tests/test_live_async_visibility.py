@@ -238,6 +238,47 @@ def test_mfi_async_survey_fetch_failures_mark_run_failed(monkeypatch):
     assert run.metadata["live_outputs"]["databridges"]["status"] == "failed"
 
 
+def test_mfi_dispatcher_routes_csv_endpoints(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        dispatcher,
+        "_mfi_drafter_generate_from_csv",
+        lambda **kwargs: calls.append(("generate", kwargs)) or dispatcher._json_response({"route": "generate"}),
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "_mfi_drafter_validate_csv",
+        lambda **kwargs: calls.append(("validate", kwargs)) or dispatcher._json_response({"route": "validate"}),
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "_mfi_drafter_generate_from_csv_async",
+        lambda **kwargs: calls.append(("generate_async", kwargs)) or dispatcher._json_response({"route": "generate_async"}),
+    )
+
+    files = {"file": object()}
+    data = {"country_override": "Sudan"}
+
+    generate_response = dispatcher.dispatch_request("POST", "/mfi-drafter/generate-from-csv", data=data, files=files)
+    validate_response = dispatcher.dispatch_request("POST", "/mfi-drafter/validate-csv", files=files)
+    async_response = dispatcher.dispatch_request("POST", "/mfi-drafter/generate-from-csv-async", data=data, files=files)
+
+    assert generate_response.json()["route"] == "generate"
+    assert validate_response.json()["route"] == "validate"
+    assert async_response.json()["route"] == "generate_async"
+    assert [name for name, _kwargs in calls] == ["generate", "validate", "generate_async"]
+
+
+def test_mfi_dispatcher_info_advertises_csv_upload_support():
+    info = dispatcher._mfi_drafter_info()
+
+    assert info["supports_csv_upload"] is True
+    assert info["data_source"] == "Databridges or uploaded processed CSV"
+    assert info["csv_upload"]["endpoint"] == "/generate-from-csv"
+    assert info["databridges"]["endpoint"] == "/generate-from-survey"
+
+
 def test_ordered_live_output_sections_prioritizes_standard_order():
     ordered = ordered_live_output_sections(
         {
