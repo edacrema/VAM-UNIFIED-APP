@@ -455,7 +455,13 @@ def ordered_live_output_sections(live_outputs: Any) -> List[Tuple[str, Dict[str,
     return sections
 
 
-def render_live_outputs(live_outputs: Any, *, key_prefix: str, render_instance_id: Optional[str] = None) -> None:
+def render_live_outputs(
+    live_outputs: Any,
+    *,
+    key_prefix: str,
+    render_instance_id: Optional[str] = None,
+    enable_downloads: bool = True,
+) -> None:
     sections = ordered_live_output_sections(live_outputs)
     if not sections:
         return
@@ -483,14 +489,27 @@ def render_live_outputs(live_outputs: Any, *, key_prefix: str, render_instance_i
                     st.write(summary)
 
             if kind == "table":
-                render_live_table_section(section, key_prefix=f"{key_prefix}-{section_name}{suffix}")
+                render_live_table_section(
+                    section,
+                    key_prefix=f"{key_prefix}-{section_name}{suffix}",
+                    enable_downloads=enable_downloads,
+                )
             elif kind == "documents":
-                render_live_document_section(section, key_prefix=f"{key_prefix}-{section_name}{suffix}")
+                render_live_document_section(
+                    section,
+                    key_prefix=f"{key_prefix}-{section_name}{suffix}",
+                    enable_downloads=enable_downloads,
+                )
             else:
                 st.json(section)
 
 
-def render_live_table_section(section: Dict[str, Any], *, key_prefix: str) -> None:
+def render_live_table_section(
+    section: Dict[str, Any],
+    *,
+    key_prefix: str,
+    enable_downloads: bool = True,
+) -> None:
     columns = section.get("columns")
     rows_preview = section.get("rows_preview")
     if isinstance(columns, list) and isinstance(rows_preview, list):
@@ -502,6 +521,10 @@ def render_live_table_section(section: Dict[str, Any], *, key_prefix: str) -> No
 
     artifacts = section.get("download_artifacts")
     if not isinstance(artifacts, list) or not artifacts:
+        return
+
+    if not enable_downloads:
+        st.caption("Downloads will appear once the run reaches a final status.")
         return
 
     st.markdown("**Downloads**")
@@ -527,7 +550,12 @@ def render_live_table_section(section: Dict[str, Any], *, key_prefix: str) -> No
         )
 
 
-def render_live_document_section(section: Dict[str, Any], *, key_prefix: str) -> None:
+def render_live_document_section(
+    section: Dict[str, Any],
+    *,
+    key_prefix: str,
+    enable_downloads: bool = True,
+) -> None:
     documents = section.get("documents")
     if not isinstance(documents, list) or not documents:
         st.write("No documents available.")
@@ -564,6 +592,9 @@ def render_live_document_section(section: Dict[str, Any], *, key_prefix: str) ->
                     f"{key_prefix}-txt-{idx}",
                 ),
             ]
+            if not enable_downloads:
+                st.caption("Downloads will appear once the run reaches a final status.")
+                continue
             cols = st.columns(2)
             for col, (label, download_path, file_name, mime, button_key) in zip(cols, download_specs):
                 if not download_path:
@@ -614,7 +645,12 @@ def render_results_tabs(
             export()
 
 
-def render_run_status(status: Any, *, render_instance_id: Optional[str] = None) -> None:
+def render_run_status(
+    status: Any,
+    *,
+    render_instance_id: Optional[str] = None,
+    enable_downloads: bool = True,
+) -> None:
     if not isinstance(status, dict):
         st.write(status)
         return
@@ -643,6 +679,7 @@ def render_run_status(status: Any, *, render_instance_id: Optional[str] = None) 
                 live_outputs,
                 key_prefix=str(status.get("run_id") or status.get("current_node") or "run"),
                 render_instance_id=render_instance_id,
+                enable_downloads=enable_downloads,
             )
 
         retriever_traces = metadata.get("retriever_traces")
@@ -695,11 +732,16 @@ def run_async_and_poll(
     while True:
         status = request_json("GET", status_path_template.format(run_id=run_id), timeout=30)
         last_status = status
+        is_terminal = isinstance(status, dict) and status.get("status") in {"completed", "failed"}
         with status_placeholder.container():
-            render_run_status(status, render_instance_id=f"poll-{render_count}")
+            render_run_status(
+                status,
+                render_instance_id=None if is_terminal else f"poll-{render_count}",
+                enable_downloads=is_terminal,
+            )
         render_count += 1
 
-        if isinstance(status, dict) and status.get("status") in {"completed", "failed"}:
+        if is_terminal:
             break
 
         if time.time() - started > timeout_seconds:
