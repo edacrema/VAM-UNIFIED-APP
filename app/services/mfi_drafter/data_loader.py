@@ -74,45 +74,6 @@ def load_mfi_from_csv(
         start_date_override=start_date_override,
         end_date_override=end_date_override,
     )
-
-
-def load_mfi_from_databridges_rows(
-    rows: List[Dict[str, Any]],
-    survey: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Normalise Databridges MFI processed rows to the existing MFI graph shape."""
-    if not rows:
-        raise ValueError("Databridges returned no processed MFI rows for the selected survey.")
-
-    normalised_rows = []
-    for row in rows:
-        mapped: Dict[str, Any] = {}
-        for source, target in DATABRIDGES_COLUMN_MAP.items():
-            value = _field(row, source)
-            if value is not None:
-                mapped[target] = value
-        normalised_rows.append(mapped)
-
-    df = pd.DataFrame(normalised_rows)
-    survey = survey or {}
-    country = _field(survey, "countryName", "country_name") or (df["Adm0Name"].iloc[0] if "Adm0Name" in df.columns else None)
-    start_date = _field(survey, "surveyStartDate", "survey_start_date")
-    end_date = _field(survey, "surveyEndDate", "survey_end_date")
-
-    result = load_mfi_from_dataframe(
-        df,
-        country_override=str(country) if country else None,
-        start_date_override=_format_date(start_date) if start_date else None,
-        end_date_override=_format_date(end_date) if end_date else None,
-    )
-    result["survey_metadata"]["survey_id"] = _field(survey, "surveyID", "survey_id")
-    result["survey_metadata"]["survey_name"] = (
-        _field(survey, "surveyName", "survey_name")
-        or _field(survey, "surveyOriginalFilename", "survey_original_filename")
-    )
-    return result
-
-
 def load_mfi_from_dataframe(
     df: pd.DataFrame,
     country_override: Optional[str] = None,
@@ -440,20 +401,6 @@ def _format_date(value: Any) -> str:
         return parsed.strftime("%Y-%m-%d")
     except Exception:
         return str(value)
-
-
-def _field(row: Dict[str, Any], *names: str, default: Any = None) -> Any:
-    for name in names:
-        if name in row:
-            return row[name]
-    lowered = {str(key).lower(): value for key, value in row.items()}
-    for name in names:
-        key = name.lower()
-        if key in lowered:
-            return lowered[key]
-    return default
-
-
 def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value in (None, ""):
         return default

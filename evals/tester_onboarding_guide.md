@@ -95,7 +95,7 @@ WEEK 3-4
 - Use clean CSV/Excel files in the expected formats
 - For the MFI Validator: use RAW files with the required columns (see below)
 - For the Price Validator: supports CSV, XLSX, and XLS
-- For the MFI Drafter: either upload the final processed/elaborated MFI CSV or select a Databridges MFI survey
+- For the MFI Drafter: upload the final processed/elaborated MFI CSV
 - For the Market Monitor: select country, period, commodities, and regions; price data is retrieved from Databridges
 
 **MFI Validator RAW column requirements (exact match, no fuzzy matching):**

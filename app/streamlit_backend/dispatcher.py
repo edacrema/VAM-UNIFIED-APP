@@ -38,14 +38,7 @@ from app.shared.databridges import get_databridges_client
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
 from app.services.mfi_drafter.data_loader import (
     load_mfi_from_csv,
-    load_mfi_from_databridges_rows,
     validate_csv_structure,
-)
-from app.services.mfi_drafter.databridges_loader import (
-    find_survey,
-    list_mfi_countries,
-    list_mfi_surveys_for_country,
-    load_mfi_survey_from_databridges,
 )
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
@@ -936,14 +929,6 @@ def _dispatch_mfi_drafter(
 ) -> LocalResponse:
     if method == "POST" and parts == ["generate"]:
         return _mfi_drafter_generate(json_body=json_body)
-    if method == "GET" and parts == ["countries"]:
-        return _mfi_drafter_countries()
-    if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "surveys":
-        return _mfi_drafter_country_surveys(parts[1], params=params)
-    if method == "POST" and parts == ["generate-from-survey"]:
-        return _mfi_drafter_generate_from_survey(json_body=json_body)
-    if method == "POST" and parts == ["generate-from-survey-async"]:
-        return _mfi_drafter_generate_from_survey_async(json_body=json_body)
     if method == "POST" and parts == ["generate-from-csv"]:
         return _mfi_drafter_generate_from_csv(data=data, files=files, params=params)
     if method == "POST" and parts == ["validate-csv"]:
@@ -1001,219 +986,6 @@ def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
         data_collection_end=data_collection_end,
     )
     return _json_response(output)
-
-
-def _mfi_drafter_countries() -> LocalResponse:
-    try:
-        return _json_response({"countries": list_mfi_countries()})
-    except Exception as exc:
-        raise LocalHTTPException(502, str(exc))
-
-
-def _mfi_drafter_country_surveys(country: str, *, params: Dict[str, Any]) -> LocalResponse:
-    start_date = _get_form_value(params, "start_date", None)
-    end_date = _get_form_value(params, "end_date", None)
-    try:
-        surveys = list_mfi_surveys_for_country(
-            country,
-            start_date=str(start_date) if start_date else None,
-            end_date=str(end_date) if end_date else None,
-        )
-        return _json_response({"country": country, "surveys": surveys})
-    except Exception as exc:
-        raise LocalHTTPException(502, str(exc))
-
-
-def _mfi_drafter_generate_from_survey(*, json_body: Any) -> LocalResponse:
-    if not isinstance(json_body, dict):
-        raise LocalHTTPException(400, "Invalid JSON body")
-    survey_id = json_body.get("survey_id")
-    if survey_id is None:
-        raise LocalHTTPException(400, "survey_id is required")
-    try:
-        csv_data = load_mfi_survey_from_databridges(int(survey_id))
-        result = run_mfi_report_generation(
-            country=csv_data["country"],
-            data_collection_start=csv_data["data_collection_start"],
-            data_collection_end=csv_data["data_collection_end"],
-            markets=csv_data["markets"],
-            csv_data=csv_data,
-        )
-        output = _build_mfi_report_output(
-            result=result,
-            run_id=result.get("run_id", "unknown"),
-            country=csv_data["country"],
-            data_collection_start=csv_data["data_collection_start"],
-            data_collection_end=csv_data["data_collection_end"],
-        )
-        return _json_response(output)
-    except ValueError as exc:
-        raise LocalHTTPException(400, str(exc))
-    except Exception as exc:
-        raise LocalHTTPException(502, str(exc))
-
-
-def _mfi_drafter_generate_from_survey_async(*, json_body: Any) -> LocalResponse:
-    if not isinstance(json_body, dict):
-        raise LocalHTTPException(400, "Invalid JSON body")
-    survey_id = json_body.get("survey_id")
-    if survey_id is None:
-        raise LocalHTTPException(400, "survey_id is required")
-
-    run_id = f"mfi_{uuid.uuid4().hex[:8]}"
-    create_run(run_id)
-
-    progress_map = {
-        "databridges_fetch": 8,
-        "mfi_data_agent": 18,
-        "context_retrieval": 32,
-        "context_extractor": 46,
-        "mfi_graph_designer": 60,
-        "dimension_drafter": 75,
-        "market_recommendations_drafter": 85,
-        "executive_summary_drafter": 93,
-        "red_team": 98,
-    }
-
-    def run_in_background() -> None:
-        try:
-            update_run(run_id, status="running", error=None, traceback=None)
-            update_run_progress(run_id, current_node="databridges_fetch", progress_pct=progress_map["databridges_fetch"])
-
-            survey = find_survey(int(survey_id))
-            if survey is None:
-                raise ValueError(f"Survey ID not found: {survey_id}")
-
-            raw_rows = get_databridges_client().list_mfi_processed_data(int(survey_id), page_size=1000)
-            csv_data = load_mfi_from_databridges_rows(raw_rows, survey=survey)
-            databridges_artifacts = create_databridges_artifacts(
-                run_id=run_id,
-                service_slug="mfi-drafter",
-                label_prefix="Databridges survey rows",
-                file_stem=f"mfi-databridges-survey-{survey_id}",
-                rows=raw_rows,
-            )
-            _update_live_metadata(
-                run_id,
-                section_updates={
-                    "databridges": build_databridges_live_output(
-                        title="Databridges Data",
-                        summary=(
-                            f"{len(raw_rows)} processed survey rows retrieved for survey "
-                            f"{survey_id} ({csv_data['country']})."
-                        ),
-                        rows=raw_rows,
-                        download_artifacts=databridges_artifacts,
-                    )
-                },
-            )
-
-            def on_step(node_name: str, _state: dict) -> None:
-                progress = progress_map.get(node_name)
-                if progress is not None:
-                    update_run_progress(run_id, current_node=node_name, progress_pct=progress)
-                else:
-                    update_run(run_id, current_node=node_name)
-
-                meta_update: Dict[str, Any] = {}
-                context_counts = _state.get("context_counts")
-                if isinstance(context_counts, dict):
-                    meta_update["context_counts"] = context_counts
-
-                retriever_traces = _state.get("retriever_traces")
-                traces_list = retriever_traces if isinstance(retriever_traces, list) else []
-                if traces_list:
-                    meta_update["retriever_traces"] = traces_list
-
-                section_updates: Dict[str, Any] = {}
-                if node_name == "context_retrieval":
-                    seerist_docs = _state.get("seerist_documents") or []
-                    reliefweb_docs = _state.get("reliefweb_documents") or []
-                    if isinstance(seerist_docs, list):
-                        seerist_error = _trace_error(traces_list, "Seerist")
-                        seerist_previews = create_document_previews_with_artifacts(
-                            run_id=run_id,
-                            service_slug="mfi-drafter",
-                            source_slug="seerist",
-                            documents=seerist_docs,
-                        )
-                        section_updates["seerist"] = build_document_live_output(
-                            title="Seerist Documents",
-                            summary=(
-                                f"Seerist retrieval unavailable: {seerist_error}"
-                                if seerist_error
-                                else f"{len(seerist_docs)} Seerist documents retrieved."
-                            ),
-                            documents=seerist_previews,
-                            status="failed" if seerist_error else "completed",
-                        )
-                    if isinstance(reliefweb_docs, list):
-                        reliefweb_error = _trace_error(traces_list, "ReliefWeb")
-                        reliefweb_previews = create_document_previews_with_artifacts(
-                            run_id=run_id,
-                            service_slug="mfi-drafter",
-                            source_slug="reliefweb",
-                            documents=reliefweb_docs,
-                        )
-                        section_updates["reliefweb"] = build_document_live_output(
-                            title="ReliefWeb Documents",
-                            summary=(
-                                f"ReliefWeb retrieval unavailable: {reliefweb_error}"
-                                if reliefweb_error
-                                else f"{len(reliefweb_docs)} ReliefWeb documents retrieved."
-                            ),
-                            documents=reliefweb_previews,
-                            status="failed" if reliefweb_error else "completed",
-                        )
-
-                _update_live_metadata(
-                    run_id,
-                    section_updates=section_updates,
-                    extra_metadata=meta_update,
-                )
-
-            result = run_mfi_report_generation(
-                country=csv_data["country"],
-                data_collection_start=csv_data["data_collection_start"],
-                data_collection_end=csv_data["data_collection_end"],
-                markets=csv_data["markets"],
-                csv_data=csv_data,
-                on_step=on_step,
-            )
-            result = {
-                **(result or {}),
-                "country": csv_data["country"],
-                "data_collection_start": csv_data["data_collection_start"],
-                "data_collection_end": csv_data["data_collection_end"],
-            }
-            output = _build_mfi_report_output(
-                result=result,
-                run_id=run_id,
-                country=csv_data["country"],
-                data_collection_start=csv_data["data_collection_start"],
-                data_collection_end=csv_data["data_collection_end"],
-            )
-            set_run_completed(run_id, result=output)
-        except Exception as exc:
-            logger.exception("MFI async report generation from Databridges failed")
-            _update_live_metadata(
-                run_id,
-                section_updates={
-                    "databridges": build_databridges_live_output(
-                        title="Databridges Data",
-                        summary=f"Databridges fetch failed: {exc}",
-                        rows=[],
-                        download_artifacts=[],
-                        status="failed",
-                    )
-                },
-            )
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else "databridges_fetch"
-            set_run_failed(run_id, error=str(exc), traceback=traceback.format_exc(), current_node=current_node)
-
-    thread = threading.Thread(target=run_in_background, name=f"mfi-survey-{run_id}", daemon=True)
-    thread.start()
-    return _json_response({"run_id": run_id, "status": "pending"})
 
 
 def _mfi_drafter_generate_from_csv(
@@ -1625,29 +1397,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "visualizations, an executive summary, and recommendations.",
         "version": "1.1.0",
         "supports_csv_upload": True,
-        "data_source": "Databridges or uploaded processed CSV",
-        "inputs": [
-            {
-                "name": "country",
-                "type": "string",
-                "required": True,
-                "label": "Country",
-                "description": "Country with available MFI surveys in Databridges",
-            },
-            {
-                "name": "survey_id",
-                "type": "integer",
-                "required": True,
-                "label": "MFI Survey",
-                "description": "Databridges survey ID selected after choosing a country",
-            },
-        ],
-        "databridges": {
-            "countries_endpoint": "/countries",
-            "surveys_endpoint": "/countries/{country}/surveys",
-            "endpoint": "/generate-from-survey",
-            "async_endpoint": "/generate-from-survey-async",
-        },
+        "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
             "endpoint": "/generate-from-csv",
             "async_endpoint": "/generate-from-csv-async",
@@ -1669,7 +1419,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
                 "StartDate",
                 "EndDate",
             ],
-            "description": "Upload the final processed MFI CSV instead of selecting a Databridges survey",
+            "description": "Upload the final processed or elaborated MFI CSV to generate the report.",
         },
         "outputs": {
             "run_id": "Unique generation identifier",
