@@ -11,8 +11,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://api.wfp.org/vam-data-bridges/7.0.0"
-DEFAULT_TOKEN_URL = "https://api.wfp.org/token"
+DEFAULT_BASE_URL = "https://gateway.api.wfp.org/vam-data-bridges/v2"
+DEFAULT_TOKEN_URL = (
+    "https://login.microsoftonline.com/462ad9ae-d7d9-4206-b874-71b1e079776f/"
+    "oauth2/v2.0/token"
+)
+DEFAULT_SCOPE = "api://wfp-api-mediation-service/.default"
+DEFAULT_ENV = "prod"
 
 
 class DataBridgesAuth:
@@ -30,7 +35,8 @@ class DataBridgesAuth:
     ) -> None:
         if not api_key or not api_secret:
             raise ValueError(
-                "Databridges credentials are not configured. Set DATA_BRIDGES_KEY "
+                "Databridges credentials are not configured. Set WFP_V2_API_KEY "
+                "and WFP_V2_API_SECRET, or compatibility aliases DATA_BRIDGES_KEY "
                 "and DATA_BRIDGES_SECRET."
             )
 
@@ -51,6 +57,8 @@ class DataBridgesAuth:
 
         payload = {
             "grant_type": "client_credentials",
+            "client_id": self.api_key,
+            "client_secret": self.api_secret,
             "scope": " ".join(scope_key),
         }
 
@@ -61,7 +69,6 @@ class DataBridgesAuth:
                 response = self.session.post(
                     self.token_url,
                     data=payload,
-                    auth=(self.api_key, self.api_secret),
                     timeout=self.timeout,
                 )
                 response.raise_for_status()
@@ -71,11 +78,17 @@ class DataBridgesAuth:
                     "Timed out while requesting a Databridges access token "
                     f"for scopes {scope_key} after {self.timeout}s."
                 )
+                response = None
             except requests.exceptions.RequestException as exc:
+                detail = _safe_token_error(response)
+                suffix = f": {detail}" if detail else f": {exc}"
+                if response is not None:
+                    suffix = f" with HTTP {response.status_code}{suffix}"
                 last_error = RuntimeError(
                     "Failed to request a Databridges access token "
-                    f"for scopes {scope_key}: {exc}"
+                    f"for scopes {scope_key}{suffix}"
                 )
+                response = None
 
             if attempt < self.max_retries:
                 time.sleep(min(attempt, 5))
@@ -83,10 +96,16 @@ class DataBridgesAuth:
         if response is None:
             raise last_error or RuntimeError("Unknown Databridges token error.")
 
-        token_payload = response.json()
+        try:
+            token_payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Databridges token endpoint returned non-JSON data.") from exc
+
         access_token = token_payload.get("access_token")
         if not access_token:
-            raise RuntimeError("Databridges token response did not include access_token.")
+            detail = _format_safe_token_payload(token_payload)
+            suffix = f": {detail}" if detail else "."
+            raise RuntimeError(f"Databridges token response did not include access_token{suffix}")
 
         expires_in = int(token_payload.get("expires_in", 3600))
         granted_scopes = set(str(token_payload.get("scope", "")).split())
@@ -101,11 +120,11 @@ class DataBridgesAuth:
 
 
 class DataBridgesClient:
-    COMMODITIES_SCOPE = "vamdatabridges_commodities-list_get"
-    MARKETS_SCOPE = "vamdatabridges_markets-list_get"
-    MONTHLY_PRICES_SCOPE = "vamdatabridges_marketprices-pricemonthly_get"
-    MFI_SURVEYS_SCOPE = "vamdatabridges_mfi-surveys_get"
-    MFI_PROCESSED_SCOPE = "vamdatabridges_mfi-surveys-processeddata_get"
+    COMMODITIES_SCOPE = DEFAULT_SCOPE
+    MARKETS_SCOPE = DEFAULT_SCOPE
+    MONTHLY_PRICES_SCOPE = DEFAULT_SCOPE
+    MFI_SURVEYS_SCOPE = DEFAULT_SCOPE
+    MFI_PROCESSED_SCOPE = DEFAULT_SCOPE
 
     def __init__(
         self,
@@ -116,13 +135,15 @@ class DataBridgesClient:
         token_url: str = DEFAULT_TOKEN_URL,
         timeout: int = 60,
         max_retries: int = 3,
-        env: Optional[str] = None,
+        env: Optional[str] = DEFAULT_ENV,
+        scope: str = DEFAULT_SCOPE,
         session: Optional[requests.Session] = None,
         auth_provider: Optional[DataBridgesAuth] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.env = (env or "").strip() or None
+        self.scope = (scope or "").strip() or DEFAULT_SCOPE
         self.session = session or requests.Session()
         self.session.headers.update({"User-Agent": "UNIFIED_APP/DatabridgesConnector"})
         self.auth_provider = auth_provider or DataBridgesAuth(
@@ -144,18 +165,18 @@ class DataBridgesClient:
         if commodity_name:
             params["commodityName"] = commodity_name
         if commodity_id is not None:
-            params["commodityID"] = commodity_id
+            params["commodityId"] = commodity_id
         return self._paginate(
             "/Commodities/List",
             params=params,
-            scopes=[self.COMMODITIES_SCOPE],
+            scopes=[self.scope],
         )
 
     def list_markets(self, country_code: str) -> list[dict[str, Any]]:
         return self._paginate(
             "/Markets/List",
             params={"countryCode": country_code, "format": "json"},
-            scopes=[self.MARKETS_SCOPE],
+            scopes=[self.scope],
         )
 
     def list_monthly_prices(
@@ -174,7 +195,7 @@ class DataBridgesClient:
             "format": "json",
         }
         if commodity_id is not None:
-            params["commodityID"] = commodity_id
+            params["commodityId"] = commodity_id
         if start_date:
             params["startDate"] = start_date
         if end_date:
@@ -186,7 +207,7 @@ class DataBridgesClient:
         return self._paginate(
             "/MarketPrices/PriceMonthly",
             params=params,
-            scopes=[self.MONTHLY_PRICES_SCOPE],
+            scopes=[self.scope],
         )
 
     def list_mfi_surveys(
@@ -205,7 +226,7 @@ class DataBridgesClient:
         return self._paginate(
             "/MFI/Surveys",
             params=params,
-            scopes=[self.MFI_SURVEYS_SCOPE],
+            scopes=[self.scope],
         )
 
     def list_mfi_processed_data(
@@ -221,7 +242,7 @@ class DataBridgesClient:
         return self._paginate(
             "/MFI/Surveys/ProcessedData",
             params=params,
-            scopes=[self.MFI_PROCESSED_SCOPE],
+            scopes=[self.scope],
             page_size=page_size,
         )
 
@@ -314,13 +335,14 @@ def get_databridges_client() -> DataBridgesClient:
         timeout = int(os.getenv("DATA_BRIDGES_TIMEOUT", "60"))
         max_retries = int(os.getenv("DATA_BRIDGES_MAX_RETRIES", "3"))
         _CLIENT = DataBridgesClient(
-            os.getenv("DATA_BRIDGES_KEY", ""),
-            os.getenv("DATA_BRIDGES_SECRET", ""),
-            base_url=os.getenv("DATA_BRIDGES_API_BASE_URL", DEFAULT_BASE_URL),
-            token_url=os.getenv("DATA_BRIDGES_TOKEN_URL", DEFAULT_TOKEN_URL),
+            _env_first("WFP_V2_API_KEY", "DATA_BRIDGES_KEY"),
+            _env_first("WFP_V2_API_SECRET", "DATA_BRIDGES_SECRET"),
+            base_url=_env_first("WFP_V2_API_BASE_URL", "DATA_BRIDGES_API_BASE_URL", default=DEFAULT_BASE_URL),
+            token_url=_env_first("WFP_V2_TOKEN_URL", "DATA_BRIDGES_TOKEN_URL", default=DEFAULT_TOKEN_URL),
             timeout=timeout,
             max_retries=max_retries,
-            env=os.getenv("DATA_BRIDGES_ENV"),
+            env=_env_first("WFP_V2_API_ENV", "DATA_BRIDGES_ENV", default=DEFAULT_ENV),
+            scope=_env_first("WFP_V2_API_SCOPE", "DATA_BRIDGES_SCOPE", default=DEFAULT_SCOPE),
         )
     return _CLIENT
 
@@ -332,6 +354,37 @@ def reset_databridges_client_for_tests() -> None:
 
 def _wire_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return default
+
+
+def _safe_token_error(response: Optional[requests.Response]) -> str:
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        text = getattr(response, "text", "")[:500]
+        return text
+    return _format_safe_token_payload(payload)
+
+
+def _format_safe_token_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    safe: dict[str, Any] = {}
+    for key in ("error", "error_description", "error_codes", "timestamp", "trace_id", "correlation_id"):
+        if key in payload:
+            safe[key] = payload[key]
+    if not safe:
+        return ""
+    return "; ".join(f"{key}={value}" for key, value in safe.items())
 
 
 def _payload_items(payload: Any) -> list[dict[str, Any]]:
