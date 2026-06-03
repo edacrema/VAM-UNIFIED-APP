@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 3 Roadmap - App-Owned Cache Implementation</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #1f2933; max-width: 1080px; margin: 0 auto; padding: 40px 24px; background: #fff; }
+    h1, h2, h3 { color: #0b3d5c; line-height: 1.2; }
+    h1 { border-bottom: 3px solid #0b76bd; padding-bottom: 12px; }
+    h2 { margin-top: 36px; border-bottom: 1px solid #d9e2ec; padding-bottom: 6px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #d9e2ec; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #f0f6fb; }
+    code { background: #f4f6f8; padding: 2px 5px; border-radius: 4px; }
+    .note { border-left: 4px solid #0b76bd; background: #f5fbff; padding: 12px 16px; margin: 18px 0; }
+  </style>
+</head>
+<body>
+  <h1>Phase 3 Roadmap - App-Owned Cache Implementation</h1>
+
+  <h2>Goal</h2>
+  <p>
+    Phase 3 now delivers an application-owned Databridges price cache, a weekly asynchronous full refresh process, and shared country food baskets
+    for the Price Bulletin drafter. The app must stop depending on the unavailable external AWS cache while still keeping country selection fast.
+  </p>
+
+  <h2>Guiding Principles</h2>
+  <ol>
+    <li>Build the cache inside the app architecture, not as a dependency on the unavailable external AWS database.</li>
+    <li>Target the beta deployment on GCP, including the cache database and asynchronous worker.</li>
+    <li>Run full Databridges downloads outside the user request path.</li>
+    <li>Refresh the entire monthly price database weekly and publish it atomically.</li>
+    <li>Keep the previous cache active if the weekly refresh fails.</li>
+    <li>Use DataBridges API metadata to drive basket choices and units.</li>
+    <li>Remove fixed food basket behavior from active Price Bulletin calculations.</li>
+    <li>Record cache version and basket version on every generated bulletin.</li>
+  </ol>
+
+  <h2>Phase Overview</h2>
+  <table>
+    <thead>
+      <tr><th>Phase</th><th>Theme</th><th>Main deliverables</th><th>Exit signal</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>0</td><td>DataBridges and baseline audit</td><td>Current flow map, API endpoint map, cache schema assumptions</td><td>Implementation assumptions accepted</td></tr>
+      <tr><td>1</td><td>GCP app-owned DB foundation</td><td>Cloud SQL PostgreSQL schema, migrations, repository interface, local/test adapter</td><td>Fixture-backed and DB-backed cache reads work</td></tr>
+      <tr><td>2</td><td>DataBridges ingestion adapter</td><td>Official client wrapper, pagination, normalization, retries</td><td>Can fetch and normalize monthly price pages</td></tr>
+      <tr><td>3</td><td>GCP weekly full refresh worker</td><td>Cloud Scheduler, Cloud Run Job or worker container, staging tables, validation, atomic promotion</td><td>Weekly rebuild produces active cache version</td></tr>
+      <tr><td>4</td><td>Cache-first Price Bulletin</td><td>Country selection and report data load from active cache</td><td>No full Databridges call on country selection</td></tr>
+      <tr><td>5</td><td>Shared country food baskets</td><td>Basket storage, editor, versioning, validation</td><td>Country baskets persist and are shared</td></tr>
+      <tr><td>6</td><td>Basket calculation and graph integration</td><td>Weighted basket engine, coverage metadata, chart/report inputs</td><td>Bulletins use saved basket composition</td></tr>
+      <tr><td>7</td><td>Latest overlay and audit</td><td>Run-local recent Databridges overlay, provenance, admin sync status</td><td>Freshness and provenance visible</td></tr>
+      <tr><td>8</td><td>Hardening and rollout</td><td>Failure tests, performance checks, feature flags, rollback docs</td><td>Phase 3 is pilot-ready</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Phase 0 - DataBridges And Baseline Audit</h2>
+  <p><strong>Goal:</strong> Lock the exact current behavior and the Databridges API surfaces required for the cache.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Inventory current Price Bulletin country selection, metadata loading, row loading, stats, charting, and DOCX code paths.</li>
+    <li>Inventory fixed food basket constants, heuristics, prompts, and graph dependencies.</li>
+    <li>Confirm the current app's Databridges credential variables and host configuration.</li>
+    <li>Map DataBridges client calls needed for monthly prices, commodities, units, markets, and currencies.</li>
+    <li>Confirm required scopes for monthly prices and metadata endpoints.</li>
+    <li>Define canonical monthly price uniqueness key from DataBridges fields.</li>
+    <li>Confirm GCP beta resource choices for Cloud SQL, scheduler, worker container, and secrets.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <ul>
+    <li>Engineering has a precise list of files/endpoints to change.</li>
+    <li>DataBridges endpoint plan and cache schema assumptions are documented.</li>
+  </ul>
+
+  <h2>Phase 1 - GCP App-Owned DB Foundation</h2>
+  <p><strong>Goal:</strong> Create the persistent cache storage layer under app control.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Implement schema migrations for Cloud SQL PostgreSQL covering cache versions, active version pointer, countries, commodities, markets, currencies, and monthly prices.</li>
+    <li>Implement <code>PriceCacheRepository</code> with active-version reads.</li>
+    <li>Add local/test fixtures for countries, commodities, units, markets, and price rows.</li>
+    <li>Add indexes for country/date, country/commodity/date, and country/market/date queries.</li>
+    <li>Add config for GCP database URL or secret reference, backend type, and version retention.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Repository returns country metadata from fixtures.</li>
+    <li>Repository returns price windows by country, commodity, market, and date.</li>
+    <li>Active version pointer controls which rows are visible.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>The app can read Price Bulletin-compatible data from an app-owned cache repository.</p>
+
+  <h2>Phase 2 - DataBridges Ingestion Adapter</h2>
+  <p><strong>Goal:</strong> Wrap the official DataBridges client in a service suitable for large refresh jobs.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Add a <code>DataBridgesClientAdapter</code> using <code>data_bridges_client</code> and <code>WfpApiToken</code>.</li>
+    <li>Make host, environment, page size, worker count, and request timeout configurable.</li>
+    <li>Implement paginated fetch for <code>MarketPricesApi.market_prices_price_monthly_get</code>.</li>
+    <li>Implement metadata fetch for commodities, units, markets, and currencies.</li>
+    <li>Add retry and backoff handling for rate limits and transient API errors.</li>
+    <li>Normalize API objects into cache row dictionaries.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Adapter paginates multiple pages correctly.</li>
+    <li>Adapter refreshes or reuses access tokens correctly.</li>
+    <li>Monthly price normalization maps required fields.</li>
+    <li>Transient failures are retried and permanent failures are surfaced.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>The app can fetch and normalize Databridges monthly price data in a worker context.</p>
+
+  <h2>Phase 3 - GCP Weekly Full Refresh Worker</h2>
+  <p><strong>Goal:</strong> Build the weekly asynchronous ex novo cache rebuild.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Add a GCP scheduler entry for weekly refresh.</li>
+    <li>Package the refresh code as a Cloud Run Job or equivalent GCP worker container.</li>
+    <li>Implement a refresh lock so overlapping full refreshes cannot run.</li>
+    <li>Create a new cache version with status <code>building</code>.</li>
+    <li>Download metadata and all monthly price rows from Databridges. Prefer country-chunked ingestion if it improves resumability and monitoring.</li>
+    <li>Write rows to staging for the new cache version.</li>
+    <li>Run validation: required fields, duplicate keys, row counts, country coverage, latest dates.</li>
+    <li>Promote the new version atomically if validation passes.</li>
+    <li>Keep the old active version if validation fails.</li>
+    <li>Record refresh logs and admin-visible status.</li>
+    <li>Clean up old versions according to retention policy.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Successful refresh creates and activates a new cache version.</li>
+    <li>Failed refresh leaves previous active version unchanged.</li>
+    <li>Refresh lock blocks concurrent refreshes.</li>
+    <li>Validation catches duplicate canonical keys and missing required fields.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>A scheduled or manually invoked worker can rebuild the full cache and publish it without blocking users.</p>
+
+  <h2>Phase 4 - Cache-First Price Bulletin</h2>
+  <p><strong>Goal:</strong> Move the user-facing Price Bulletin flow onto the active cache version.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Change country list and selected-country metadata loading to use <code>PriceCacheRepository</code>.</li>
+    <li>Load commodities, units, markets, regions, date range, and latest cached date from active cache.</li>
+    <li>Replace report data loader live Databridges calls with cache reads.</li>
+    <li>Add cache status panel with active version ID, last refresh time, and warnings.</li>
+    <li>Handle empty or missing cache states with clear admin-facing and user-facing messages.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Country selection does not call Databridges.</li>
+    <li>Report generation works from fixture cache rows.</li>
+    <li>Cache status appears in the form.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>Users can generate Price Bulletin outputs from the app-owned cache.</p>
+
+  <h2>Phase 5 - Shared Country Food Baskets</h2>
+  <p><strong>Goal:</strong> Replace fixed baskets with shared country basket configurations.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Create shared basket tables and repository methods.</li>
+    <li>Implement basket versioning and active country pointer.</li>
+    <li>Add basket validation using cached commodity and unit metadata.</li>
+    <li>Add basket summary and editor inside the Price Bulletin form.</li>
+    <li>Warn users that saved changes affect future bulletins for that country.</li>
+    <li>Record who changed the basket and when.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Invalid baskets are rejected.</li>
+    <li>Saving a basket creates a new active country version.</li>
+    <li>A basket saved by one user is visible to another user.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>Users can create, view, and edit the shared basket for a country from the Price Bulletin form.</p>
+
+  <h2>Phase 6 - Basket Calculation And Graph Integration</h2>
+  <p><strong>Goal:</strong> Use saved baskets in all Price Bulletin basket values, graphs, and narrative inputs.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Remove fixed basket logic from active calculations.</li>
+    <li>Implement weighted basket calculation: price multiplied by saved weight or quantity.</li>
+    <li>Add national and regional aggregation support.</li>
+    <li>Add missing-component coverage metadata.</li>
+    <li>Update basket graph and report statistics to use calculated basket series.</li>
+    <li>Update DOCX and prompt inputs to include basket version and coverage warnings.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Known fixture basket produces expected monthly values.</li>
+    <li>Changing weights changes graph data.</li>
+    <li>Missing commodity prices produce explicit warnings.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>Generated Price Bulletins use the saved country basket in calculations, charts, and report text.</p>
+
+  <h2>Phase 7 - Latest Overlay And Audit</h2>
+  <p><strong>Goal:</strong> Preserve a controlled freshness path while keeping the weekly cache as the source of normal reads.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Add feature-flagged manual latest overlay for freshest available rows between weekly refreshes.</li>
+    <li>Fetch a bounded recent window from Databridges only after user action.</li>
+    <li>Deduplicate overlay rows against active cache rows.</li>
+    <li>Attach non-overlapping rows only to the active run unless writeback is later approved.</li>
+    <li>Record cache version, overlay rows, skipped rows, and basket version in run metadata.</li>
+    <li>Add admin sync status page or panel for weekly refresh history.</li>
+  </ul>
+  <h3>Tests</h3>
+  <ul>
+    <li>Manual overlay does not modify the active weekly cache.</li>
+    <li>Overlap rows are skipped.</li>
+    <li>Run metadata captures overlay provenance.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <p>Users and admins can see exactly which cache version and optional overlay data were used.</p>
+
+  <h2>Phase 8 - Hardening And Rollout</h2>
+  <p><strong>Goal:</strong> Make Phase 3 reliable enough for pilot use.</p>
+  <h3>Work Items</h3>
+  <ul>
+    <li>Add performance checks for country metadata and report data queries.</li>
+    <li>Add refresh observability: duration, rows fetched, rows written, failures, latest date by country.</li>
+    <li>Add operational runbook for manual refresh trigger, failed refresh, rollback, and credential rotation.</li>
+    <li>Feature-flag cache-first reads, basket editor, weekly refresh, and manual latest overlay.</li>
+    <li>Document first cache bootstrap procedure.</li>
+    <li>Define cleanup policy for old cache versions.</li>
+  </ul>
+  <h3>Exit Criteria</h3>
+  <ul>
+    <li>Weekly full refresh works and is observable.</li>
+    <li>Failed refresh leaves active cache intact.</li>
+    <li>Country selection and report generation are cache-first.</li>
+    <li>Saved country baskets drive basket calculations and graphs.</li>
+    <li>Run metadata records cache and basket provenance.</li>
+  </ul>
+
+  <h2>Open Decisions</h2>
+  <ul>
+    <li>Exact GCP resource names, deployment project, service accounts, and secret storage pattern.</li>
+    <li>Whether to activate cache versions globally only or allow per-country activation if one country fails validation.</li>
+    <li>Initial bootstrap date range for the complete historical price database if Databridges requires date bounds.</li>
+    <li>Who can edit shared country baskets.</li>
+    <li>Exact recent window for manual latest overlay.</li>
+  </ul>
+</body>
+</html>

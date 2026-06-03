@@ -11,6 +11,8 @@ pandas
 numpy
 chardet
 requests
+SQLAlchemy
+psycopg[binary]
 matplotlib
 python-docx
 google-cloud-firestore

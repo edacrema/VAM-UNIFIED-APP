@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 3 Vision - App-Owned Price Cache And Country Food Baskets</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #1f2933; max-width: 1040px; margin: 0 auto; padding: 40px 24px; background: #fff; }
+    h1, h2, h3 { color: #0b3d5c; line-height: 1.2; }
+    h1 { border-bottom: 3px solid #0b76bd; padding-bottom: 12px; }
+    h2 { margin-top: 36px; border-bottom: 1px solid #d9e2ec; padding-bottom: 6px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #d9e2ec; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #f0f6fb; }
+    code { background: #f4f6f8; padding: 2px 5px; border-radius: 4px; }
+    .note { border-left: 4px solid #0b76bd; background: #f5fbff; padding: 12px 16px; margin: 18px 0; }
+  </style>
+</head>
+<body>
+  <h1>Phase 3 Vision - App-Owned Price Cache And Country Food Baskets</h1>
+
+  <h2>Purpose</h2>
+  <p>
+    Phase 3 now has two connected objectives. First, the fixed food basket system must be removed and replaced by shared, country-level food basket
+    configurations maintained directly in each country's Price Bulletin form. Second, because the planned external AWS price cache is not available,
+    the application must own its own price cache database and keep it fresh through an asynchronous weekly rebuild process.
+  </p>
+  <p>
+    The Price Bulletin form should read from the app-owned cache by default. A separate refresh instance or worker connects to the Databridges API
+    once per week, downloads the complete monthly price dataset ex novo, normalizes it, and atomically publishes a new cache version for the app.
+    Users should not wait for full Databridges downloads during normal country selection.
+  </p>
+
+  <h2>Relationship To Earlier Phase 3 Draft</h2>
+  <div class="note">
+    <strong>Architecture change:</strong> the previous Phase 3 draft assumed an existing external AWS database synchronized from Databridges every
+    two weeks. That database is not available. Phase 3 now creates and owns the cache database inside the app architecture, with a weekly async
+    full refresh job.
+  </div>
+  <p>
+    The user-facing food basket requirement remains the same: each country has a saved basket composed from Databridges commodities available for
+    that country, with user-entered weights or quantities expressed in the units used by Databridges for those commodities. The saved basket is
+    shared for that country until another authorized user changes it.
+  </p>
+
+  <h2>DataBridges API Basis</h2>
+  <p>
+    The implementation should use the official WFP VAM DataBridges Python client repository as the API reference. The repository documents an
+    OpenAPI-generated Python package, <code>data_bridges_client</code>, requiring Python 3.10 or newer and OAuth-style application credentials.
+    The relevant endpoints for Phase 3 include:
+  </p>
+  <ul>
+    <li><code>MarketPricesApi.market_prices_price_monthly_get</code> for monthly commodity market price time series.</li>
+    <li><code>CommoditiesApi.commodities_list_get</code> for country commodity metadata.</li>
+    <li><code>MarketsApi.markets_list_get</code> and/or <code>MarketsApi.markets_geo_json_list_get</code> for market metadata.</li>
+    <li><code>CommodityUnitsApi.commodity_units_list_get</code> and conversion endpoints for units.</li>
+    <li><code>CurrencyApi.currency_list_get</code> when currency metadata is needed for price rows.</li>
+  </ul>
+  <p>
+    The monthly price endpoint returns monthly market price records and accepts filters such as country code, market ID, commodity ID, price type,
+    currency ID, price flag, start date, end date, latest-value-only, page, output format, and environment. The app cache worker should page through
+    results and respect Databridges rate limits and retry requirements.
+  </p>
+
+  <h2>Current Baseline</h2>
+  <ul>
+    <li>Country selection can be slow because Price Bulletin data is fetched live from Databridges.</li>
+    <li>The originally planned external AWS cache is unavailable.</li>
+    <li>Food basket composition is fixed or application-driven instead of manually configured per country.</li>
+    <li>Generated basket prices and charts do not yet depend on saved country basket definitions.</li>
+  </ul>
+
+  <h2>North Star</h2>
+  <p>
+    A VAM officer opens the Price Bulletin form and selects a country. The app responds quickly because all country metadata, commodities, units,
+    markets, and monthly price rows come from the app-owned cache. The form shows cache freshness, the current active country basket, and any
+    warnings from the latest weekly refresh.
+  </p>
+  <p>
+    If no basket exists for the selected country, the officer creates one by choosing commodities available in the cached Databridges metadata and
+    entering weights or quantities in the displayed Databridges unit. If a basket exists, the officer sees the saved composition and can reopen the
+    basket editor when a methodology change is needed. Saving creates a new country basket version that future bulletins use.
+  </p>
+  <p>
+    In the background, a weekly refresh worker downloads the full monthly price database from Databridges into staging tables. If validation passes,
+    the app publishes the new cache version atomically. If the refresh fails, users keep working from the last successful cache version and see a
+    clear freshness warning.
+  </p>
+
+  <h2>Core Product Changes</h2>
+  <h3>1. App-Owned Price Cache</h3>
+  <p>
+    The application will include its own durable cache database for Databridges monthly price data and supporting metadata. The Price Bulletin tool
+    reads from this cache by default. Live Databridges calls are moved out of normal form loading and into controlled sync processes.
+  </p>
+
+  <h3>2. Weekly Asynchronous Full Refresh</h3>
+  <p>
+    A scheduled background worker runs once per week. It connects to Databridges using the official client, downloads the complete monthly price
+    dataset ex novo, stores the result in staging tables, validates completeness and row quality, then promotes the new cache version.
+  </p>
+  <p>
+    The refresh must be non-blocking for users. Price Bulletin users continue reading from the currently active cache version while the new version
+    is being built.
+  </p>
+
+  <h3>2a. GCP Beta Deployment Target</h3>
+  <p>
+    The beta deployment is on GCP, so Phase 3 should be designed for GCP-native infrastructure. The preferred beta shape is a managed relational
+    cache such as Cloud SQL for PostgreSQL, plus a scheduled GCP worker such as a Cloud Scheduler-triggered Cloud Run job. Repository and worker
+    boundaries should remain clean so the cache backend can change later if deployment requirements evolve.
+  </p>
+
+  <h3>3. Atomic Cache Publication</h3>
+  <p>
+    A failed refresh must not corrupt the active cache. The preferred approach is versioned cache snapshots: build a new version in staging, run
+    validation, then update an active version pointer. Reads always use the active successful version.
+  </p>
+
+  <h3>4. Shared Country Food Baskets</h3>
+  <p>
+    The fixed global basket is removed. Each country has one active shared basket composed manually from the commodities available for that country
+    in Databridges. Each item stores the commodity ID, commodity name snapshot, Databridges unit, and user-entered weight or quantity.
+  </p>
+
+  <h3>5. Basket-Driven Calculations And Charts</h3>
+  <p>
+    Price Bulletin basket price calculations and graphs use the active saved basket version. Missing basket components must be surfaced as warnings
+    and must never be silently treated as zero.
+  </p>
+
+  <h3>6. Manual Latest Overlay</h3>
+  <p>
+    The manual latest overlay remains part of Phase 3. Because a weekly cache can still be several days behind Databridges, users should be able
+    to run a small manual "sync latest" action from the Price Bulletin form. This remains an explicit user action, not part of country selection.
+    It downloads only recent rows needed for the active run, deduplicates them against the active cache, and labels them as a run-local Databridges
+    latest overlay unless writeback is explicitly approved.
+  </p>
+
+  <h3>7. Efficient Country-Scoped Retrieval</h3>
+  <p>
+    The refresh process may download and validate the complete price dataset, but the serving path must be optimized for the Price Bulletin
+    workflow. Country selection and report generation should query by country, date range, commodity, market, and region using indexes and summary
+    metadata. Refresh internals can be country-chunked for resumability, but the user-facing priority is fast, reliable country-level retrieval.
+  </p>
+
+  <h2>Primary User Journeys</h2>
+  <h3>Journey A - Weekly Cache Refresh</h3>
+  <ol>
+    <li>The scheduler starts the weekly refresh worker.</li>
+    <li>The worker authenticates to Databridges.</li>
+    <li>The worker downloads commodities, units, markets, currencies, and monthly price rows.</li>
+    <li>Rows are normalized into the app cache schema.</li>
+    <li>The worker writes all rows into a new staging cache version.</li>
+    <li>The app validates row counts, required fields, uniqueness, and country coverage.</li>
+    <li>If validation passes, the new version becomes active.</li>
+    <li>If validation fails, the old active version remains in service and admins see the failure.</li>
+  </ol>
+
+  <h3>Journey B - Price Bulletin From Cache</h3>
+  <ol>
+    <li>User opens the Price Bulletin form and selects a country.</li>
+    <li>The app loads country metadata and price availability from the active app cache.</li>
+    <li>The app shows cache version, last successful refresh, and active country basket.</li>
+    <li>User selects reporting period, regions, and output options.</li>
+    <li>The app calculates the basket price from the saved country basket.</li>
+    <li>The app generates graphs and report text using cached data and saved basket metadata.</li>
+  </ol>
+
+  <h3>Journey C - Create Or Modify A Country Basket</h3>
+  <ol>
+    <li>User selects a country in the Price Bulletin form.</li>
+    <li>The app shows the active basket or asks the user to create one.</li>
+    <li>User opens the basket editor.</li>
+    <li>User selects commodities from the cached Databridges commodity list.</li>
+    <li>The form displays each selected commodity's Databridges unit.</li>
+    <li>User enters weights or quantities and saves.</li>
+    <li>The app validates and publishes a new basket version for the country.</li>
+  </ol>
+
+  <h2>In Scope</h2>
+  <ul>
+    <li>App-owned persistent price cache database.</li>
+    <li>Weekly asynchronous full refresh from Databridges.</li>
+    <li>Staging, validation, and atomic cache version promotion.</li>
+    <li>Admin-visible sync status, errors, and latest successful refresh timestamp.</li>
+    <li>Cache-first Price Bulletin country selection and data loading.</li>
+    <li>Shared country food basket editor, storage, versioning, and audit trail.</li>
+    <li>Basket-driven national and regional basket price calculations.</li>
+    <li>Basket graph updates and missing-coverage warnings.</li>
+    <li>Manual latest overlay for the active Price Bulletin run.</li>
+    <li>GCP beta deployment design for the cache database and weekly worker.</li>
+  </ul>
+
+  <h2>Out Of Scope</h2>
+  <ul>
+    <li>Using the unavailable external AWS cache database.</li>
+    <li>Writing data back to Databridges.</li>
+    <li>Replacing the full Streamlit frontend.</li>
+    <li>Making country baskets private to individual users.</li>
+    <li>Real-time continuous synchronization from Databridges.</li>
+    <li>Guaranteeing all Databridges domains beyond price data are cached in Phase 3.</li>
+  </ul>
+
+  <h2>Success Metrics</h2>
+  <table>
+    <thead>
+      <tr><th>Area</th><th>Success Signal</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Cache refresh</td><td>Weekly worker can rebuild the full monthly price cache and publish a validated active version.</td></tr>
+      <tr><td>Resilience</td><td>A failed refresh leaves the previous active cache available to users.</td></tr>
+      <tr><td>Country selection</td><td>Country metadata loads from the app-owned cache without a full Databridges call.</td></tr>
+      <tr><td>Basket persistence</td><td>A saved country basket is visible to all authorized users on later visits.</td></tr>
+      <tr><td>Basket correctness</td><td>Generated basket prices and graphs use the saved commodity weights and Databridges units.</td></tr>
+      <tr><td>Auditability</td><td>Each bulletin records cache version, refresh timestamp, basket version, and any run-local latest overlay.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Open Decisions</h2>
+  <ul>
+    <li>Who is allowed to edit shared country baskets: all users, admins, or country focal points?</li>
+    <li>Should the weekly refresh publish only a complete global cache version, or allow per-country activation if one country fails?</li>
+    <li>What exact recent window should the manual latest overlay fetch: current month only, previous plus current month, or user-selected reporting gap?</li>
+  </ul>
+</body>
+</html>

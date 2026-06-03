@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 3 Tech Stack - App-Owned Price Cache</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #1f2933; max-width: 1080px; margin: 0 auto; padding: 40px 24px; background: #fff; }
+    h1, h2, h3 { color: #0b3d5c; line-height: 1.2; }
+    h1 { border-bottom: 3px solid #0b76bd; padding-bottom: 12px; }
+    h2 { margin-top: 36px; border-bottom: 1px solid #d9e2ec; padding-bottom: 6px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #d9e2ec; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #f0f6fb; }
+    pre { background: #f4f6f8; border: 1px solid #d9e2ec; padding: 14px; overflow-x: auto; border-radius: 6px; }
+    code { background: #f4f6f8; padding: 2px 5px; border-radius: 4px; }
+    .note { border-left: 4px solid #0b76bd; background: #f5fbff; padding: 12px 16px; margin: 18px 0; }
+  </style>
+</head>
+<body>
+  <h1>Phase 3 Tech Stack - App-Owned Price Cache</h1>
+
+  <h2>Design Principles</h2>
+  <ul>
+    <li>Keep the existing Streamlit, FastAPI, Python, pandas, matplotlib, and DOCX stack.</li>
+    <li>Add an application-owned price cache database because the external AWS cache is unavailable.</li>
+    <li>Use a background worker or scheduled instance for weekly full Databridges refreshes.</li>
+    <li>Use staging tables and atomic promotion so failed refreshes do not break the app.</li>
+    <li>Keep Price Bulletin reads cache-first and fast.</li>
+    <li>Use the official DataBridges Python client as the API integration layer.</li>
+    <li>Store country food baskets as shared, versioned country configurations.</li>
+  </ul>
+
+  <h2>What Carries Over</h2>
+  <table>
+    <thead>
+      <tr><th>Layer</th><th>Technology</th><th>Phase 3 stance</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Frontend</td><td>Streamlit</td><td>Kept. Extend the Price Bulletin form with cache status, basket editor, and optional latest overlay.</td></tr>
+      <tr><td>Backend</td><td>FastAPI and service layer</td><td>Kept. Add cache repository, sync services, and basket services.</td></tr>
+      <tr><td>Data processing</td><td>pandas, numpy</td><td>Kept. Used for normalization, validation, aggregation, and basket calculation.</td></tr>
+      <tr><td>Visualization</td><td>matplotlib</td><td>Kept. Graphs use basket-calculated series from cached data.</td></tr>
+      <tr><td>Report export</td><td>python-docx</td><td>Kept. Reports record cache and basket metadata.</td></tr>
+      <tr><td>Databridges client</td><td><code>data_bridges_client</code></td><td>Use for weekly refresh and manual latest overlay.</td></tr>
+      <tr><td>Tests</td><td>pytest</td><td>Expand for cache rebuild, atomic promotion, basket calculation, and refresh failure cases.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Recommended Beta Architecture On GCP</h2>
+  <pre><code>Streamlit Price Bulletin page
+  -> PriceBulletinService
+      -> PriceCacheRepository
+          -> Cloud SQL for PostgreSQL price cache
+      -> CountryFoodBasketService
+          -> Shared basket tables
+      -> FoodBasketCalculator
+      -> Chart and DOCX exporters
+
+Cloud Scheduler
+  -> Cloud Run Job or worker container
+      -> PriceCacheRefreshWorker
+      -> DataBridgesClientAdapter
+          -> Databridges API
+      -> Staging tables
+      -> Cache validation
+      -> Atomic active-version promotion</code></pre>
+
+  <h2>Database Choice</h2>
+  <p>
+    For the beta deployment, target GCP-native infrastructure. Prefer Cloud SQL for PostgreSQL for the app-owned price cache. The data is
+    relational, time-series-like, and read by country, commodity, market, date, price type, and region. PostgreSQL also supports transactions,
+    indexes, staging tables, and advisory locks well.
+  </p>
+  <p>
+    For local development and tests, SQLite can be used as a lightweight adapter if the repository interface stays the same. Do not build production
+    code around SQLite-specific behavior.
+  </p>
+
+  <h2>Proposed Module Boundaries</h2>
+  <pre><code>app/services/price_cache/
+  repository.py              # cache-first read interface
+  schemas.py                 # normalized cache records
+  postgres_repository.py     # production app-owned DB adapter
+  sqlite_repository.py       # local/test adapter if useful
+  migrations/                # schema migrations
+  refresh_worker.py          # weekly full rebuild orchestration
+  databridges_adapter.py     # official client wrapper
+  staging.py                 # staging writes and version promotion
+  validation.py              # cache quality checks
+
+app/services/price_bulletin/
+  data_loader.py             # reads active cache version
+  latest_overlay.py          # optional bounded latest sync
+  food_basket.py             # basket CRUD and versioning
+  basket_calculator.py       # weighted basket values and coverage
+
+pages/3_Price_Bulletin_Drafter.py
+  # cache status, basket summary/editor, optional latest overlay</code></pre>
+
+  <h2>DataBridges Client Integration</h2>
+  <p>
+    The official client is an OpenAPI-generated Python package. It uses OAuth-style credentials through <code>WfpApiToken</code> and provides API
+    classes for commodities, commodity units, markets, currencies, and market prices. The host and environment should be configurable because the
+    repository documentation and existing local implementation reference different API gateway versions.
+  </p>
+  <pre><code>DATA_BRIDGES_KEY
+DATA_BRIDGES_SECRET
+DATA_BRIDGES_ENV=prod
+DATA_BRIDGES_HOST=https://api.wfp.org/vam-data-bridges/7.0.0
+DATA_BRIDGES_PAGE_SIZE=1000
+DATA_BRIDGES_MAX_WORKERS=5
+DATA_BRIDGES_REQUEST_TIMEOUT_SECONDS=60</code></pre>
+
+  <h3>Endpoints Needed For Cache Refresh</h3>
+  <table>
+    <thead>
+      <tr><th>Purpose</th><th>Client API</th><th>Reason</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Monthly prices</td><td><code>MarketPricesApi.market_prices_price_monthly_get</code></td><td>Primary full price database for Price Bulletin.</td></tr>
+      <tr><td>Commodities</td><td><code>CommoditiesApi.commodities_list_get</code></td><td>Commodity IDs and names used in cache rows and basket editor.</td></tr>
+      <tr><td>Units</td><td><code>CommodityUnitsApi.commodity_units_list_get</code></td><td>Units displayed for basket weights or quantities.</td></tr>
+      <tr><td>Unit conversions</td><td><code>CommodityUnitsApi.commodity_units_conversion_list_get</code></td><td>Optional normalization support if methodology later requires conversions.</td></tr>
+      <tr><td>Markets</td><td><code>MarketsApi.markets_list_get</code> or <code>markets_geo_json_list_get</code></td><td>Market metadata and regions.</td></tr>
+      <tr><td>Currencies</td><td><code>CurrencyApi.currency_list_get</code></td><td>Currency metadata and stable currency IDs.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Cache Schema</h2>
+  <p>
+    The schema should support versioned full snapshots. Reads use only the active successful version unless a run-local latest overlay is explicitly
+    attached.
+  </p>
+  <pre><code>price_cache_versions
+- cache_version_id uuid primary key
+- status enum("building", "validating", "active", "failed", "superseded")
+- refresh_type enum("weekly_full", "manual_admin_full")
+- started_at timestamp
+- completed_at timestamp nullable
+- activated_at timestamp nullable
+- triggered_by text
+- source_host text
+- source_env text
+- rows_prices integer default 0
+- rows_commodities integer default 0
+- rows_markets integer default 0
+- validation_summary_json json
+- error_message text nullable
+
+price_cache_active_version
+- singleton_id integer primary key
+- cache_version_id uuid
+- activated_at timestamp
+
+cached_countries
+- cache_version_id uuid
+- country_iso3 text
+- country_name text
+- currency_code text nullable
+- latest_price_date date nullable
+- primary key(cache_version_id, country_iso3)
+
+cached_commodities
+- cache_version_id uuid
+- country_iso3 text
+- commodity_id integer
+- commodity_name text
+- commodity_unit_id integer nullable
+- commodity_unit_name text nullable
+- active boolean
+- primary key(cache_version_id, country_iso3, commodity_id)
+
+cached_markets
+- cache_version_id uuid
+- country_iso3 text
+- market_id integer
+- market_name text
+- admin1_name text nullable
+- admin2_name text nullable
+- latitude numeric nullable
+- longitude numeric nullable
+- active boolean
+- primary key(cache_version_id, country_iso3, market_id)
+
+cached_price_monthly
+- cache_version_id uuid
+- country_iso3 text
+- commodity_id integer
+- market_id integer
+- price_date date
+- price numeric
+- currency_id integer nullable
+- currency_name text nullable
+- commodity_unit_id integer nullable
+- commodity_unit_name text nullable
+- price_type_id integer nullable
+- price_type_name text nullable
+- price_flag text nullable
+- original_frequency text nullable
+- observations integer nullable
+- source_payload_hash text nullable
+- primary key(cache_version_id, country_iso3, commodity_id, market_id, price_date, price_type_name, price_flag)</code></pre>
+
+  <h3>Recommended Indexes</h3>
+  <pre><code>idx_price_active_country_date on cached_price_monthly(cache_version_id, country_iso3, price_date)
+idx_price_active_country_commodity_date on cached_price_monthly(cache_version_id, country_iso3, commodity_id, price_date)
+idx_price_active_country_market_date on cached_price_monthly(cache_version_id, country_iso3, market_id, price_date)
+idx_commodities_country_name on cached_commodities(cache_version_id, country_iso3, commodity_name)
+idx_markets_country_admin on cached_markets(cache_version_id, country_iso3, admin1_name)</code></pre>
+
+  <h2>Weekly Refresh Worker</h2>
+  <p>
+    The refresh worker should run outside the request path on GCP. The preferred beta deployment is a Cloud Scheduler-triggered Cloud Run Job or
+    equivalent worker container. The app should treat it as asynchronous infrastructure.
+  </p>
+  <ol>
+    <li>Acquire a refresh lock so only one full refresh runs at a time.</li>
+    <li>Create a new <code>price_cache_versions</code> row with status <code>building</code>.</li>
+    <li>Authenticate to Databridges.</li>
+    <li>Fetch metadata: commodities, units, markets, currencies.</li>
+    <li>Fetch all monthly price pages. Prefer country-chunked ingestion if it improves resumability and progress reporting.</li>
+    <li>Normalize all records into staging tables for the new cache version.</li>
+    <li>Validate required fields, uniqueness, row counts, country coverage, and date ranges.</li>
+    <li>Promote the version by updating <code>price_cache_active_version</code> in one transaction.</li>
+    <li>Mark the previous active version as <code>superseded</code>.</li>
+    <li>Retain a limited number of older versions for rollback and debugging.</li>
+  </ol>
+
+  <h2>Cache Validation Rules</h2>
+  <ul>
+    <li>Monthly price rows must have country, commodity, market, date, and price.</li>
+    <li>Commodity and market references in price rows should exist in the same cache version where possible.</li>
+    <li>Duplicate canonical keys should be rejected or deterministically collapsed before promotion.</li>
+    <li>Country row counts should be compared with the previous successful version and flagged for large unexplained drops.</li>
+    <li>The latest price date by country should be computed and stored.</li>
+    <li>Refresh failure must leave the active version untouched.</li>
+  </ul>
+
+  <h2>Country Food Basket Storage</h2>
+  <pre><code>country_food_basket_current
+- country_iso3 primary key
+- active_basket_version_id uuid
+- updated_at timestamp
+- updated_by_user_id text
+
+country_food_basket_versions
+- basket_version_id uuid primary key
+- country_iso3 text
+- version_number integer
+- status enum("active", "superseded", "archived")
+- created_at timestamp
+- created_by_user_id text
+- cache_version_id_at_creation uuid nullable
+- change_note text nullable
+
+country_food_basket_items
+- basket_item_id uuid primary key
+- basket_version_id uuid
+- commodity_id integer
+- commodity_name_snapshot text
+- databridges_unit text
+- weight_quantity numeric
+- sort_order integer
+- item_note text nullable</code></pre>
+
+  <h2>Food Basket Calculation</h2>
+  <pre><code>component_value = monthly_average_price_for_commodity * saved_weight_quantity
+basket_price = sum(component_value for all available basket components)</code></pre>
+  <p>
+    Missing components must produce explicit coverage metadata. The calculation result should include total component count, available component
+    count, missing commodity names, and whether the basket is partial for that month or region.
+  </p>
+
+  <h2>Manual Latest Overlay</h2>
+  <p>
+    Manual latest sync remains enabled in Phase 3. It should not modify the weekly cache version by default. It should fetch a small recent window
+    from Databridges for the active run, normalize rows, remove keys already present in the active cache, and attach only non-overlapping rows to
+    that run.
+  </p>
+  <pre><code>manual_latest_overlay_rows
+- run_id
+- country_iso3
+- canonical_key
+- row_json
+- fetched_at
+- source_cache_version_id</code></pre>
+
+  <h2>Configuration</h2>
+  <pre><code>PRICE_CACHE_BACKEND=cloud_sql_postgres
+PRICE_CACHE_DATABASE_URL
+PRICE_CACHE_GCP_PROJECT
+PRICE_CACHE_GCP_REGION
+PRICE_CACHE_REFRESH_ENABLED=true
+PRICE_CACHE_REFRESH_CRON=weekly
+PRICE_CACHE_REFRESH_DAY=Sunday
+PRICE_CACHE_REFRESH_LOCK_TIMEOUT_MINUTES=30
+PRICE_CACHE_RETAIN_VERSIONS=3
+PRICE_CACHE_VALIDATE_MAX_COUNTRY_DROP_RATIO=0.25
+
+DATABRIDGES_FULL_REFRESH_ENABLED=true
+DATABRIDGES_LATEST_OVERLAY_ENABLED=true
+DATABRIDGES_HOST
+DATABRIDGES_ENV=prod
+DATABRIDGES_KEY
+DATABRIDGES_SECRET
+
+FOOD_BASKET_SHARED_SCOPE=country
+FOOD_BASKET_EDIT_ROLES=user,admin</code></pre>
+
+  <h2>Tests</h2>
+  <h3>Unit Tests</h3>
+  <ul>
+    <li>Databridges adapter paginates until all pages are fetched.</li>
+    <li>Normalization maps monthly price fields into the cache schema.</li>
+    <li>Duplicate canonical keys are handled deterministically.</li>
+    <li>Refresh validation blocks missing required fields.</li>
+    <li>Basket validation rejects empty, duplicate, unknown, missing-unit, and non-positive items.</li>
+    <li>Basket calculation matches known weighted fixtures.</li>
+  </ul>
+
+  <h3>Integration Tests</h3>
+  <ul>
+    <li>Weekly refresh builds a new cache version and promotes it atomically.</li>
+    <li>Failed refresh leaves old active version readable.</li>
+    <li>Country selection reads from active cache and does not call Databridges.</li>
+    <li>Basket edits by one user are visible to another user.</li>
+    <li>Generated reports record cache version and basket version.</li>
+  </ul>
+
+  <h2>Open Technical Decisions</h2>
+  <ul>
+    <li>Exact GCP resource choice and naming for Cloud SQL, scheduler, worker container, service accounts, and secrets.</li>
+    <li>Whether the worker should activate a complete global cache version only or support per-country activation.</li>
+    <li>Exact active-version retention and cleanup policy.</li>
+    <li>Exact recent window for the retained manual latest overlay.</li>
+  </ul>
+</body>
+</html>
