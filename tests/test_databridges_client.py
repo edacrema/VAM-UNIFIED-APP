@@ -361,7 +361,12 @@ def test_live_wfp_v2_gateway_smoke():
 
     commodities = client.list_commodities("SSD")
     markets = client.list_markets("SSD")
-    latest_prices = client.list_monthly_prices("SSD", latest_value_only=True)
+    commodity_id = commodities[0].get("id") or commodities[0].get("commodityId")
+    latest_prices = client.list_monthly_prices(
+        "SSD",
+        commodity_id=int(commodity_id),
+        latest_value_only=True,
+    )
 
     assert commodities
     assert markets

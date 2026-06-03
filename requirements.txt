@@ -11,6 +11,7 @@ pandas
 numpy
 chardet
 requests
+git+https://github.com/WFP-VAM/DataBridgesAPI.git@v8.0.0
 SQLAlchemy
 psycopg[binary]
 matplotlib
