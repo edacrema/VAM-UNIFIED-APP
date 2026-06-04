@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy import inspect
 
 from app.services.price_cache.config import load_price_cache_config
@@ -64,6 +65,9 @@ def test_migrations_create_sqlite_schema(tmp_path):
     assert "cached_markets" in tables
     assert "cached_currencies" in tables
     assert "cached_price_monthly" in tables
+    assert "price_cache_country_active_versions" in tables
+    assert "price_cache_version_countries" in tables
+    assert "price_cache_refresh_locks" in tables
 
 
 def test_empty_cache_returns_clear_empty_status(tmp_path):
@@ -86,12 +90,21 @@ def test_fixture_snapshot_seeds_country_metadata(tmp_path):
     status = repo.get_cache_status()
     countries = repo.list_countries()
     metadata = repo.get_country_metadata("SSD")
+    availability = repo.get_country_availability("SSD")
 
     assert status.has_active_cache is True
     assert status.active_version_id == version_id
     assert status.rows_prices == 4
     assert countries[0].country_name == "South Sudan"
     assert metadata is not None
+    assert availability is not None
+    assert availability.cache_version_id == version_id
+    assert availability.date_start.isoformat() == "2025-01-01"
+    assert availability.date_end.isoformat() == "2025-02-01"
+    assert availability.latest_price_date.isoformat() == "2025-02-01"
+    assert availability.priced_commodity_ids == [1, 2]
+    assert availability.admin1_names == ["Central Equatoria", "Western Bahr el Ghazal"]
+    assert [unit.commodity_unit_name for unit in availability.units] == ["kg"]
     assert metadata.country.country_iso3 == "SSD"
     assert [item.commodity_name for item in metadata.commodities] == ["Beans", "Maize"]
     assert [item.market_name for item in metadata.markets] == ["Juba", "Wau"]
@@ -142,3 +155,120 @@ def test_active_version_pointer_controls_visible_rows(tmp_path):
     assert repo.get_active_version_id() == new_version
     assert old_rows[0].price == 10.0
     assert new_rows[0].price == 110.0
+
+
+def test_country_active_pointer_preserves_failed_country_fallback(tmp_path):
+    repo = _repo(tmp_path)
+    old_version = seed_cache_snapshot(
+        repo,
+        cache_version_id="11111111-1111-1111-1111-111111111111",
+        country_iso3="SSD",
+        country_name="South Sudan",
+        price_offset=0,
+    )
+    new_version = seed_cache_snapshot(
+        repo,
+        cache_version_id="22222222-2222-2222-2222-222222222222",
+        country_iso3="ETH",
+        country_name="Ethiopia",
+        price_offset=100,
+    )
+
+    countries = repo.list_countries()
+    ssd_rows = repo.get_price_window("SSD", "2025-01-01", "2025-01-01", commodity_ids=[1])
+    eth_rows = repo.get_price_window("ETH", "2025-01-01", "2025-01-01", commodity_ids=[1])
+
+    assert repo.get_active_version_id() == new_version
+    assert repo.get_active_version_id_for_country("SSD") == old_version
+    assert repo.get_active_version_id_for_country("ETH") == new_version
+    assert {country.country_iso3 for country in countries} == {"ETH", "SSD"}
+    assert ssd_rows[0].price == 10.0
+    assert eth_rows[0].price == 110.0
+
+
+def test_refresh_lock_blocks_concurrent_refreshes(tmp_path):
+    repo = _repo(tmp_path)
+
+    assert repo.acquire_refresh_lock("weekly_full_refresh", "owner-a", 30) is True
+    assert repo.acquire_refresh_lock("weekly_full_refresh", "owner-b", 30) is False
+
+    repo.release_refresh_lock("weekly_full_refresh", "owner-a")
+
+    assert repo.acquire_refresh_lock("weekly_full_refresh", "owner-b", 30) is True
+
+
+def test_publish_cache_version_is_atomic_when_final_update_fails(tmp_path):
+    repo = _repo(tmp_path)
+    old_version = seed_cache_snapshot(
+        repo,
+        cache_version_id="11111111-1111-1111-1111-111111111111",
+        country_iso3="SSD",
+        country_name="South Sudan",
+    )
+    new_version = repo.create_cache_version(cache_version_id="22222222-2222-2222-2222-222222222222")
+    repo.insert_country_snapshot(
+        cache_version_id=new_version,
+        country_iso3="SSD",
+        country_name="South Sudan",
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+            }
+        ],
+        markets=[{"market_id": 10, "market_name": "Juba", "admin1_name": "Central Equatoria"}],
+        prices=[
+            {
+                "country_iso3": "SSD",
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "market_id": 10,
+                "market_name": "Juba",
+                "admin1_name": "Central Equatoria",
+                "price_date": "2025-03-01",
+                "price": 99,
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "price_flag": "actual",
+            }
+        ],
+        latest_price_date="2025-03-01",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+    )
+    repo.record_country_result(
+        cache_version_id=new_version,
+        country_iso3="SSD",
+        status="success",
+        rows_prices=1,
+        rows_commodities=1,
+        rows_markets=1,
+        latest_price_date="2025-03-01",
+    )
+    with repo.engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TRIGGER force_publish_failure
+                BEFORE UPDATE ON price_cache_versions
+                WHEN NEW.cache_version_id = '22222222-2222-2222-2222-222222222222'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced publish failure');
+                END
+                """
+            )
+        )
+
+    with pytest.raises(Exception, match="forced publish failure"):
+        repo.publish_cache_version(
+            new_version,
+            country_iso3s=["SSD"],
+            status="active",
+            validation_summary={"test": True},
+        )
+
+    assert repo.get_active_version_id() == old_version
+    assert repo.get_active_version_id_for_country("SSD") == old_version
+    assert repo.get_cache_refresh(new_version).status == "building"

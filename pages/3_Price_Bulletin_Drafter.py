@@ -38,6 +38,44 @@ st.subheader("Generate Report")
 
 countries = []
 country_currency = {}
+cache_status = {}
+
+cache_status_resp = st.session_state.get("mm_cache_status_resp")
+if cache_status_resp is None:
+    try:
+        cache_status_resp = request_json("GET", "/market-monitor/cache/status", timeout=30)
+        st.session_state["mm_cache_status_resp"] = cache_status_resp
+    except Exception as e:
+        cache_status_resp = None
+        st.session_state.pop("mm_cache_status_resp", None)
+        safe_show_error(e)
+
+if isinstance(cache_status_resp, dict):
+    cache_status = cache_status_resp
+
+st.markdown("#### Price Cache")
+status_cols = st.columns(4)
+status_cols[0].metric("Status", str(cache_status.get("status") or "inactive"))
+status_cols[1].metric("Countries", str(cache_status.get("active_country_count") or 0))
+status_cols[2].metric("Price Rows", str(cache_status.get("rows_prices") or 0))
+active_version = str(cache_status.get("active_version_id") or "")
+status_cols[3].metric("Version", active_version[:8] if active_version else "none")
+
+if cache_status.get("completed_at") or cache_status.get("activated_at"):
+    st.caption(
+        "Completed: "
+        f"{cache_status.get('completed_at') or 'n/a'} | Activated: {cache_status.get('activated_at') or 'n/a'}"
+    )
+
+cache_warnings = cache_status.get("warnings") or []
+if cache_warnings:
+    with st.expander("Cache warnings", expanded=False):
+        for warning in cache_warnings:
+            st.warning(str(warning))
+
+if not cache_status.get("has_active_cache"):
+    st.warning("No active price cache is available. Run a cache refresh before drafting a Price Bulletin.")
+    st.stop()
 
 countries_resp = st.session_state.get("mm_countries_resp")
 if countries_resp is None:
@@ -49,6 +87,8 @@ if countries_resp is None:
         st.session_state.pop("mm_countries_resp", None)
 
 if isinstance(countries_resp, dict):
+    if not cache_status and isinstance(countries_resp.get("cache_status"), dict):
+        cache_status = countries_resp["cache_status"]
     countries_list = countries_resp.get("countries") or []
     if isinstance(countries_list, list):
         for c in countries_list:
@@ -61,7 +101,8 @@ if isinstance(countries_resp, dict):
 if countries:
     country = st.selectbox("Country", countries, index=0, key="mm_country")
 else:
-    country = st.text_input("Country", key="mm_country")
+    st.warning("The active cache does not contain any countries with monthly price data.")
+    st.stop()
 
 metadata = None
 regions = []
@@ -81,53 +122,61 @@ if country:
                 timeout=30,
             )
             metadata_cache[country] = metadata
-        except Exception:
+        except Exception as e:
             metadata = None
+            safe_show_error(e)
 
-if isinstance(metadata, dict):
-    regions = metadata.get("regions") or []
-    raw_commodities = metadata.get("commodities") or []
-    commodities = [
-        item.get("name")
-        for item in raw_commodities
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    ]
-    if not commodities:
-        commodities = [item for item in raw_commodities if isinstance(item, str)]
-    default_commodities = metadata.get("default_commodities") or []
+if not isinstance(metadata, dict):
+    st.warning("Cached metadata is not available for the selected country.")
+    st.stop()
 
-    date_range = metadata.get("date_range")
-    if isinstance(date_range, dict):
-        start_s = date_range.get("start")
-        end_s = date_range.get("end")
-        if isinstance(start_s, str) and isinstance(end_s, str):
-            try:
-                start_d = datetime.strptime(start_s, "%Y-%m-%d").date().replace(day=1)
-                end_d = datetime.strptime(end_s, "%Y-%m-%d").date().replace(day=1)
-                cur = start_d
-                while cur <= end_d:
-                    time_period_options.append(cur.strftime("%Y-%m"))
-                    if cur.month == 12:
-                        cur = date(cur.year + 1, 1, 1)
-                    else:
-                        cur = date(cur.year, cur.month + 1, 1)
-                default_time_period = end_d.strftime("%Y-%m") if time_period_options else None
-            except Exception:
-                time_period_options = []
-                default_time_period = None
+regions = metadata.get("regions") or []
+raw_commodities = metadata.get("commodities") or []
+commodities = [
+    item.get("name")
+    for item in raw_commodities
+    if isinstance(item, dict) and isinstance(item.get("name"), str)
+]
+if not commodities:
+    commodities = [item for item in raw_commodities if isinstance(item, str)]
+default_commodities = metadata.get("default_commodities") or []
+
+selected_latest = metadata.get("latest_cached_date")
+selected_version = str(metadata.get("cache_version_id") or "")
+st.caption(
+    "Selected country cache: "
+    f"latest date {selected_latest or 'n/a'} | version {selected_version[:8] if selected_version else 'n/a'}"
+)
+for warning in metadata.get("warnings") or []:
+    st.warning(str(warning))
+
+date_range = metadata.get("date_range")
+if isinstance(date_range, dict):
+    start_s = date_range.get("start")
+    end_s = date_range.get("end")
+    if isinstance(start_s, str) and isinstance(end_s, str):
+        try:
+            start_d = datetime.strptime(start_s, "%Y-%m-%d").date().replace(day=1)
+            end_d = datetime.strptime(end_s, "%Y-%m-%d").date().replace(day=1)
+            cur = start_d
+            while cur <= end_d:
+                time_period_options.append(cur.strftime("%Y-%m"))
+                if cur.month == 12:
+                    cur = date(cur.year + 1, 1, 1)
+                else:
+                    cur = date(cur.year, cur.month + 1, 1)
+            default_time_period = end_d.strftime("%Y-%m") if time_period_options else None
+        except Exception:
+            time_period_options = []
+            default_time_period = None
 
 if not time_period_options:
-    today_month = date.today().replace(day=1)
-    months = []
-    cur = today_month
-    for _ in range(36):
-        months.append(cur.strftime("%Y-%m"))
-        if cur.month == 1:
-            cur = date(cur.year - 1, 12, 1)
-        else:
-            cur = date(cur.year, cur.month - 1, 1)
-    time_period_options = list(reversed(months))
-    default_time_period = today_month.strftime("%Y-%m")
+    st.warning("The selected country has no cached monthly price date range.")
+    st.stop()
+
+if not commodities:
+    st.warning("The selected country has no cached priced commodities.")
+    st.stop()
 
 with st.form("market_monitor_form"):
     time_period_index = 0
@@ -228,6 +277,11 @@ if isinstance(result, dict):
         cols[1].metric("Country", str(result.get("country") or ""))
         cols[2].metric("Time Period", str(result.get("time_period") or ""))
         cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
+
+        cache_metadata = result.get("cache_metadata")
+        if isinstance(cache_metadata, dict) and cache_metadata:
+            with st.expander("Cache metadata", expanded=False):
+                st.json(cache_metadata)
 
         render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
 

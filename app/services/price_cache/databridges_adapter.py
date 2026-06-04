@@ -339,7 +339,15 @@ class DataBridgesClientAdapter:
         pages = 0
         first_total: Optional[int] = None
         for page in range(1, self.config.max_pages + 1):
-            kwargs = _clean_params({**params, "page": page, "format": "json", "env": self.config.env})
+            kwargs = _clean_params(
+                {
+                    **params,
+                    "page": page,
+                    "format": "json",
+                    "env": self.config.env,
+                    "_request_timeout": float(self.config.request_timeout_seconds),
+                }
+            )
             payload = self._request_with_retry(method, kwargs)
             page_items = _payload_items(payload)
             pages += 1

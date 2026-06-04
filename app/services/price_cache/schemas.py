@@ -16,6 +16,7 @@ class CacheStatus:
     rows_commodities: int = 0
     rows_markets: int = 0
     rows_countries: int = 0
+    active_country_count: int = 0
     validation_summary: Dict[str, Any] = field(default_factory=dict)
     error_message: Optional[str] = None
 
@@ -105,3 +106,50 @@ class CountryMetadata:
     units: List[UnitRecord] = field(default_factory=list)
     markets: List[MarketRecord] = field(default_factory=list)
     currencies: List[CurrencyRecord] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CountryAvailability:
+    cache_version_id: str
+    country_iso3: str
+    date_start: Optional[date] = None
+    date_end: Optional[date] = None
+    latest_price_date: Optional[date] = None
+    priced_commodity_ids: List[int] = field(default_factory=list)
+    admin1_names: List[str] = field(default_factory=list)
+    units: List[UnitRecord] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CountryRefreshStatus:
+    cache_version_id: str
+    country_iso3: str
+    status: str
+    rows_prices: int = 0
+    rows_commodities: int = 0
+    rows_markets: int = 0
+    latest_price_date: Optional[date] = None
+    validation_summary: Dict[str, Any] = field(default_factory=dict)
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class CacheRefreshSummary:
+    cache_version_id: str
+    status: str
+    refresh_type: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    activated_at: Optional[datetime] = None
+    triggered_by: Optional[str] = None
+    source_host: Optional[str] = None
+    source_env: Optional[str] = None
+    rows_prices: int = 0
+    rows_commodities: int = 0
+    rows_markets: int = 0
+    rows_countries: int = 0
+    validation_summary: Dict[str, Any] = field(default_factory=dict)
+    error_message: Optional[str] = None
+    countries: List[CountryRefreshStatus] = field(default_factory=list)

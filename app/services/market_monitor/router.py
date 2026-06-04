@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
+from dataclasses import is_dataclass, asdict
+from datetime import date, datetime
 import logging
 import traceback
 
@@ -48,6 +50,32 @@ class ExportDocxOptions(BaseModel):
     include_sources: bool = True
     include_visualizations: bool = True
     template: Optional[str] = None
+
+
+def _get_price_cache_repository():
+    from app.services.price_cache.config import load_price_cache_config
+    from app.services.price_cache.migrations import apply_migrations
+    from app.services.price_cache.sql_repository import (
+        SqlPriceCacheRepository,
+        create_price_cache_engine,
+    )
+
+    config = load_price_cache_config()
+    engine = create_price_cache_engine(config)
+    apply_migrations(engine, config.backend)
+    return SqlPriceCacheRepository(engine)
+
+
+def _cache_json(value: Any) -> Any:
+    if is_dataclass(value):
+        return _cache_json(asdict(value))
+    if isinstance(value, dict):
+        return {key: _cache_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cache_json(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
 
 
 def _trace_error(traces: List[Dict[str, Any]], retriever_name: str) -> Optional[str]:
@@ -143,6 +171,7 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             module_sections=result.get("module_sections", {}),
             document_references=result.get("document_references", []),
             news_counts=result.get("news_counts", {}),
+            cache_metadata=result.get("cache_metadata", {}),
             warnings=result.get("warnings", []),
             llm_calls=result.get("llm_calls", 0),
             success=True
@@ -208,6 +237,9 @@ async def generate_market_monitor_async(
                 news_counts = _state.get("news_counts")
                 if isinstance(news_counts, dict):
                     meta_update["news_counts"] = news_counts
+                cache_metadata = _state.get("cache_metadata")
+                if isinstance(cache_metadata, dict) and cache_metadata:
+                    meta_update["cache_metadata"] = cache_metadata
 
                 retriever_traces = _state.get("retriever_traces")
                 traces_list = retriever_traces if isinstance(retriever_traces, list) else []
@@ -221,20 +253,20 @@ async def generate_market_monitor_async(
                         artifacts = create_databridges_artifacts(
                             run_id=run_id,
                             service_slug="market-monitor",
-                            label_prefix="Databridges price rows",
-                            file_stem=f"market-monitor-databridges-{input_data.country}-{input_data.time_period}",
+                            label_prefix="Price Cache price rows",
+                            file_stem=f"market-monitor-price-cache-{input_data.country}-{input_data.time_period}",
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Databridges Data",
-                            summary=f"{len(rows)} Databridges price rows retrieved for {input_data.country} ({input_data.time_period}).",
+                            title="Price Cache Data",
+                            summary=f"{len(rows)} cached price rows retrieved for {input_data.country} ({input_data.time_period}).",
                             rows=rows,
                             download_artifacts=artifacts,
                         )
                     elif input_data.use_mock_data:
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Databridges Data",
-                            summary="Mock data is enabled for this run, so no Databridges price call was made.",
+                            title="Price Cache Data",
+                            summary="Mock data is enabled for this run, so no cached price rows were read.",
                             rows=[],
                             download_artifacts=[],
                             status="skipped",
@@ -342,6 +374,39 @@ def check_data_availability_endpoint(
     return availability
 
 
+@router.get("/cache/status")
+def get_price_cache_status():
+    try:
+        repository = _get_price_cache_repository()
+        return _cache_json(repository.get_cache_status())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/cache/refreshes")
+def list_price_cache_refreshes(limit: int = 20):
+    try:
+        repository = _get_price_cache_repository()
+        safe_limit = min(max(int(limit), 1), 100)
+        return {"refreshes": _cache_json(repository.list_cache_refreshes(limit=safe_limit))}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/cache/refreshes/{cache_version_id}")
+def get_price_cache_refresh(cache_version_id: str):
+    try:
+        repository = _get_price_cache_repository()
+        refresh = repository.get_cache_refresh(cache_version_id)
+        if refresh is None:
+            raise HTTPException(status_code=404, detail=f"Cache refresh not found: {cache_version_id}")
+        return _cache_json(refresh)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/status/{run_id}", response_model=ReportStatusOutput)
 async def get_report_status(run_id: str):
     """
@@ -393,6 +458,7 @@ async def get_report_result(run_id: str):
         module_sections=result.get("module_sections", {}),
         document_references=result.get("document_references", []),
         news_counts=result.get("news_counts", {}),
+        cache_metadata=result.get("cache_metadata", {}),
         warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
         success=True
@@ -549,7 +615,7 @@ def health_check():
 def get_price_data_dataset_status():
     raise HTTPException(
         status_code=404,
-        detail="The processed Price Bulletin dataset upload/status path has been removed. Data is loaded from Databridges.",
+        detail="The processed Price Bulletin dataset upload/status path has been removed. Data is loaded from PriceCache.",
     )
 
 
@@ -557,25 +623,30 @@ def get_price_data_dataset_status():
 async def upload_price_data_dataset():
     raise HTTPException(
         status_code=404,
-        detail="The processed Price Bulletin dataset upload path has been removed. Data is loaded from Databridges.",
+        detail="The processed Price Bulletin dataset upload path has been removed. Data is loaded from PriceCache.",
     )
 
 
 @router.get("/countries")
 def get_supported_countries():
     """
-    Returns the list of configured Databridges country options with currencies.
+    Returns the list of countries available in the active PriceCache.
     """
-    from .data_loader import get_supported_countries as get_databridges_countries
+    from .data_loader import get_cache_status_snapshot, get_supported_countries as get_cached_countries
 
-    return {"countries": get_databridges_countries()}
+    cache_status = get_cache_status_snapshot()
+    return {
+        "countries": get_cached_countries(),
+        "cache_status": cache_status,
+        "warnings": cache_status.get("warnings") or [],
+    }
 
 
 
 @router.get("/commodities")
 def get_commodities(country: Optional[str] = None):
     """
-    Returns Databridges commodities available for a country.
+    Returns PriceCache commodities available for a country.
     """
     from .data_loader import (
         get_available_commodities,
@@ -597,7 +668,7 @@ def get_commodities(country: Optional[str] = None):
     return {
         "commodities": [],
         "categories": {},
-        "warning": "Select a country to load Databridges commodity options.",
+        "warning": "Select a country to load PriceCache commodity options.",
     }
 
 
@@ -611,11 +682,15 @@ def get_country_metadata(country: str):
     - Date range of available data
     """
     try:
-        from .data_loader import get_country_metadata as get_databridges_country_metadata
+        from .data_loader import PriceCacheUnavailableError, get_country_metadata as get_cached_country_metadata
 
-        return get_databridges_country_metadata(country)
+        return get_cached_country_metadata(country)
+    except PriceCacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def _get_food_basket_commodities(available: List[str]) -> List[str]:

@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import date
 from typing import List, Optional, Protocol, Sequence
 
-from .schemas import CacheStatus, CountryMetadata, CountryRecord, MonthlyPriceRecord
+from .schemas import (
+    CacheStatus,
+    CountryAvailability,
+    CountryMetadata,
+    CountryRecord,
+    MonthlyPriceRecord,
+)
 
 
 class PriceCacheRepository(Protocol):
@@ -13,10 +19,16 @@ class PriceCacheRepository(Protocol):
     def get_active_version_id(self) -> Optional[str]:
         ...
 
+    def get_active_version_id_for_country(self, country_iso3: str) -> Optional[str]:
+        ...
+
     def list_countries(self) -> List[CountryRecord]:
         ...
 
     def get_country_metadata(self, country_iso3: str) -> Optional[CountryMetadata]:
+        ...
+
+    def get_country_availability(self, country_iso3: str) -> Optional[CountryAvailability]:
         ...
 
     def get_price_window(

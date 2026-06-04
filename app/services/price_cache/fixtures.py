@@ -281,6 +281,41 @@ def seed_cache_snapshot(
                 ),
                 {"cache_version_id": cache_version_id, "now": now},
             )
+            if conn.dialect.name == "sqlite":
+                table_rows = conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type = 'table'")
+                ).mappings().all()
+            else:
+                table_rows = conn.execute(
+                    text("SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public'")
+                ).mappings().all()
+            table_names = {str(row["name"]) for row in table_rows}
+            if "price_cache_country_active_versions" in table_names:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM price_cache_country_active_versions
+                        WHERE country_iso3 = :country_iso3
+                        """
+                    ),
+                    {"country_iso3": country_iso3},
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO price_cache_country_active_versions (
+                            country_iso3,
+                            cache_version_id,
+                            activated_at
+                        ) VALUES (
+                            :country_iso3,
+                            :cache_version_id,
+                            :now
+                        )
+                        """
+                    ),
+                    {"country_iso3": country_iso3, "cache_version_id": cache_version_id, "now": now},
+                )
     return cache_version_id
 
 

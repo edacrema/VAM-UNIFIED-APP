@@ -116,6 +116,7 @@ class MarketReportState(TypedDict):
     time_series_data_regional: Optional[str]  # JSON
     data_statistics: Optional[Dict[str, Any]]
     databridges_rows: List[Dict[str, Any]]
+    cache_metadata: Dict[str, Any]
     visualizations: Dict[str, str]  # Base64 images
 
     # ===== BRANCH 2 OUTPUTS (Contextual Intelligence) =====
@@ -172,6 +173,7 @@ def create_initial_state(
         time_series_data_regional=None,
         data_statistics=None,
         databridges_rows=[],
+        cache_metadata={},
         visualizations={},
         documents=[],
         document_references=[],
@@ -676,9 +678,9 @@ def node_data_agent(state: MarketReportState) -> dict:
     
     Supports two modes:
     - use_mock_data=True: Uses generated mock data for explicit testing only
-    - use_mock_data=False: Loads Databridges price data
+    - use_mock_data=False: Loads cached PriceCache price data
 
-    Databridges failures are raised so users see actionable errors instead of
+    PriceCache failures are raised so users see actionable errors instead of
     silently receiving generated data.
     """
     logger.info(f"[DataAgent] Processing data for {state['country']}")
@@ -696,10 +698,11 @@ def node_data_agent(state: MarketReportState) -> dict:
             commodity_list = _select_default_commodities(available)
             logger.info(f"[DataAgent] Auto-selected commodities: {commodity_list}")
         except Exception as e:
-            raise RuntimeError(f"Could not auto-select Databridges commodities: {e}") from e
+            raise RuntimeError(f"Could not auto-select PriceCache commodities: {e}") from e
 
     warnings = []
     databridges_rows: List[Dict[str, Any]] = []
+    cache_metadata: Dict[str, Any] = {}
     
     if use_mock:
         # =====================================================================
@@ -716,9 +719,9 @@ def node_data_agent(state: MarketReportState) -> dict:
         
     else:
         # =====================================================================
-        # DATABRIDGES DATA MODE
+        # PRICECACHE DATA MODE
         # =====================================================================
-        logger.info("[DataAgent] Loading data from Databridges")
+        logger.info("[DataAgent] Loading data from PriceCache")
         
         try:
             # First, check what data is available
@@ -734,12 +737,13 @@ def node_data_agent(state: MarketReportState) -> dict:
                     f"Country '{state['country']}' not found in price data. "
                     f"Available countries: {availability['countries']}"
                 )
+            cache_metadata = availability.get("cache_metadata") or {}
             
             # Add any warnings from availability check
             if availability.get("warnings"):
                 warnings.extend(availability["warnings"])
             
-            # Extract time series from Databridges
+            # Extract time series from PriceCache
             df_national, df_regional, df_raw = extract_time_series_from_csv(
                 country=state["country"],
                 time_period=state["time_period"],
@@ -773,7 +777,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             )
             
         except Exception as e:
-            logger.exception(f"[DataAgent] Failed to load Databridges price data: {e}")
+            logger.exception(f"[DataAgent] Failed to load PriceCache price data: {e}")
             raise
     
     # =========================================================================
@@ -785,6 +789,7 @@ def node_data_agent(state: MarketReportState) -> dict:
         "time_series_data_regional": df_regional.to_json(date_format='iso'),
         "data_statistics": stats,
         "databridges_rows": databridges_rows,
+        "cache_metadata": cache_metadata,
         "warnings": warnings,
         "current_node": "data_agent"
     }

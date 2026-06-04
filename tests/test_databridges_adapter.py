@@ -259,6 +259,7 @@ def test_monthly_pagination_normalizes_rows_and_omits_page_size():
     assert fake.calls[0]["format"] == "json"
     assert fake.calls[0]["env"] == "prod"
     assert fake.calls[0]["latest_value_only"] is True
+    assert fake.calls[0]["_request_timeout"] == 60.0
 
 
 def test_metadata_fetches_normalize_cache_compatible_rows():

@@ -155,6 +155,7 @@ class GenerateReportOutput(BaseModel):
     module_sections: Dict[str, str] = {}
     document_references: List[Dict[str, Any]] = []
     news_counts: Dict[str, int] = {}
+    cache_metadata: Dict[str, Any] = {}
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True

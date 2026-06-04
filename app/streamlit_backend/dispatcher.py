@@ -45,8 +45,10 @@ from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
 from app.services.market_monitor.graph import AVAILABLE_MODULES, CURRENCY_SYMBOLS, run_report_generation
 from app.services.market_monitor.data_loader import (
+    PriceCacheUnavailableError,
     check_data_availability,
     get_available_commodities,
+    get_cache_status_snapshot,
     get_country_metadata as get_market_monitor_country_metadata,
     get_commodity_categories,
     get_supported_countries as get_market_monitor_supported_countries,
@@ -398,6 +400,7 @@ def _build_market_monitor_output(
         "module_sections": result.get("module_sections", {}),
         "document_references": result.get("document_references", []),
         "news_counts": result.get("news_counts", {}),
+        "cache_metadata": result.get("cache_metadata", {}),
         "warnings": result.get("warnings", []),
         "llm_calls": result.get("llm_calls", 0),
         "success": True,
@@ -1533,6 +1536,8 @@ def _dispatch_market_monitor(
         return _market_monitor_generate_async(json_body=json_body)
     if method == "GET" and parts == ["data-availability"]:
         return _market_monitor_data_availability(params=params)
+    if method == "GET" and parts == ["cache", "status"]:
+        return _json_response(get_cache_status_snapshot())
     if method == "GET" and len(parts) == 2 and parts[0] == "status":
         return _market_monitor_status(parts[1])
     if method == "GET" and len(parts) == 2 and parts[0] == "result":
@@ -1637,6 +1642,9 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                 news_counts = _state.get("news_counts")
                 if isinstance(news_counts, dict):
                     meta_update["news_counts"] = news_counts
+                cache_metadata = _state.get("cache_metadata")
+                if isinstance(cache_metadata, dict) and cache_metadata:
+                    meta_update["cache_metadata"] = cache_metadata
 
                 retriever_traces = _state.get("retriever_traces")
                 traces_list = retriever_traces if isinstance(retriever_traces, list) else []
@@ -1650,14 +1658,14 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                         artifacts = create_databridges_artifacts(
                             run_id=run_id,
                             service_slug="market-monitor",
-                            label_prefix="Databridges price rows",
-                            file_stem=f"market-monitor-databridges-{json_body.get('country')}-{json_body.get('time_period')}",
+                            label_prefix="Price Cache price rows",
+                            file_stem=f"market-monitor-price-cache-{json_body.get('country')}-{json_body.get('time_period')}",
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Databridges Data",
+                            title="Price Cache Data",
                             summary=(
-                                f"{len(rows)} Databridges price rows retrieved for "
+                                f"{len(rows)} cached price rows retrieved for "
                                 f"{json_body.get('country')} ({json_body.get('time_period')})."
                             ),
                             rows=rows,
@@ -1665,8 +1673,8 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                         )
                     elif bool(json_body.get("use_mock_data", False)):
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Databridges Data",
-                            summary="Mock data is enabled for this run, so no Databridges price call was made.",
+                            title="Price Cache Data",
+                            summary="Mock data is enabled for this run, so no cached price rows were read.",
                             rows=[],
                             download_artifacts=[],
                             status="skipped",
@@ -1931,19 +1939,26 @@ def _market_monitor_info() -> Dict[str, Any]:
 def _market_monitor_dataset_status() -> LocalResponse:
     raise LocalHTTPException(
         404,
-        "The processed Price Bulletin dataset upload/status path has been removed. Data is loaded from Databridges.",
+        "The processed Price Bulletin dataset upload/status path has been removed. Data is loaded from PriceCache.",
     )
 
 
 def _market_monitor_dataset_upload(*, files: Any) -> LocalResponse:
     raise LocalHTTPException(
         404,
-        "The processed Price Bulletin dataset upload path has been removed. Data is loaded from Databridges.",
+        "The processed Price Bulletin dataset upload path has been removed. Data is loaded from PriceCache.",
     )
 
 
 def _market_monitor_countries() -> LocalResponse:
-    return _json_response({"countries": get_market_monitor_supported_countries()})
+    cache_status = get_cache_status_snapshot()
+    return _json_response(
+        {
+            "countries": get_market_monitor_supported_countries(),
+            "cache_status": cache_status,
+            "warnings": cache_status.get("warnings") or [],
+        }
+    )
 
 
 def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
@@ -1953,7 +1968,7 @@ def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
             {
                 "commodities": [],
                 "categories": {},
-                "warning": "Select a country to load Databridges commodity options.",
+                "warning": "Select a country to load PriceCache commodity options.",
             }
         )
 
@@ -1972,8 +1987,12 @@ def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
 def _market_monitor_country_metadata(country: str) -> LocalResponse:
     try:
         return _json_response(get_market_monitor_country_metadata(country))
+    except PriceCacheUnavailableError as exc:
+        raise LocalHTTPException(503, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
     except Exception as exc:
-        raise LocalHTTPException(502, str(exc))
+        raise LocalHTTPException(500, str(exc))
 
 
 def _get_food_basket_commodities(available: List[str]) -> List[str]:
