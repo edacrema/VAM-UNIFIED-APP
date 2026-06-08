@@ -206,6 +206,27 @@ def test_refresh_worker_unit_endpoint_failure_derives_units_and_warns(tmp_path):
     assert "CommodityUnits/List" in refresh.validation_summary["warnings"][0]["warning"]
 
 
+def test_refresh_worker_deduplicates_monthly_price_rows_before_validation(tmp_path):
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(duplicate_countries={"AAA"}),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    summary = worker.run(triggered_by="pytest")
+    prices = repo.get_price_window("AAA", "2025-01-01", "2025-01-01")
+    refresh = repo.get_cache_refresh(summary["cache_version_id"])
+
+    assert summary["status"] == "active"
+    assert summary["countries_successful"] == 1
+    assert summary["rows_prices"] == 1
+    assert len(prices) == 1
+    assert any("Deduplicated 1 duplicate monthly price row" in warning["warnings"][0] for warning in summary["warnings"])
+    assert refresh is not None
+    assert "Deduplicated 1 duplicate monthly price row" in refresh.countries[0].validation_summary["warnings"][0]
+
+
 def test_refresh_worker_lock_contention_raises(tmp_path):
     repo = _repo(tmp_path)
     repo.acquire_refresh_lock("weekly_full_refresh", "other-owner", 30)

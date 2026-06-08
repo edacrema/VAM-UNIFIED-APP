@@ -15,7 +15,7 @@ from .config import PriceCacheConfig, load_price_cache_config
 from .databridges_adapter import DataBridgesClientAdapter
 from .migrations import apply_migrations
 from .sql_repository import SqlPriceCacheRepository, create_price_cache_engine
-from .validation import CountryCacheValidationResult, validate_country_snapshot
+from .validation import CANONICAL_PRICE_KEY_FIELDS, CountryCacheValidationResult, validate_country_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,14 @@ class CountryRefreshOutcome:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
+
+
+@dataclass(frozen=True)
+class PriceDeduplicationResult:
+    rows: list[dict[str, Any]]
+    duplicate_rows: int = 0
+    duplicate_keys: int = 0
+    conflicting_price_keys: int = 0
 
 
 class PriceCacheRefreshWorker:
@@ -232,6 +240,8 @@ class PriceCacheRefreshWorker:
                 start_date=start_date,
                 end_date=end_date,
             )
+            deduplication = _deduplicate_monthly_price_rows(prices)
+            prices = deduplication.rows
             unit_lookup.update(_collect_units(commodities, prices))
             previous_count = 0 if dry_run else self.repository.count_active_country_price_rows(country_iso3)
             validation = validate_country_snapshot(
@@ -242,6 +252,7 @@ class PriceCacheRefreshWorker:
                 previous_rows_prices=previous_count,
                 max_country_drop_ratio=self.config.validate_max_country_drop_ratio,
             )
+            validation.warnings.extend(_deduplication_warnings(country_iso3, deduplication))
             if not validation.valid:
                 self._record_country_failure(
                     cache_version_id=cache_version_id,
@@ -437,6 +448,112 @@ def _outcome(
         errors=tuple(validation.errors),
         warnings=tuple(validation.warnings),
     )
+
+
+def _deduplicate_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceDeduplicationResult:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    key_order: list[tuple[Any, ...]] = []
+    for row in rows:
+        key = _price_deduplication_key(row)
+        if key not in grouped:
+            grouped[key] = []
+            key_order.append(key)
+        grouped[key].append(dict(row))
+
+    duplicate_keys = 0
+    duplicate_rows = 0
+    conflicting_price_keys = 0
+    deduplicated: list[dict[str, Any]] = []
+
+    for key in key_order:
+        group = grouped[key]
+        if len(group) == 1:
+            deduplicated.append(group[0])
+            continue
+
+        duplicate_keys += 1
+        duplicate_rows += len(group) - 1
+        if len({_price_value(row) for row in group}) > 1:
+            conflicting_price_keys += 1
+        deduplicated.append(max(group, key=_price_row_rank))
+
+    return PriceDeduplicationResult(
+        rows=deduplicated,
+        duplicate_rows=duplicate_rows,
+        duplicate_keys=duplicate_keys,
+        conflicting_price_keys=conflicting_price_keys,
+    )
+
+
+def _deduplication_warnings(country_iso3: str, result: PriceDeduplicationResult) -> list[str]:
+    if result.duplicate_rows <= 0:
+        return []
+    warning = (
+        f"Deduplicated {result.duplicate_rows} duplicate monthly price row(s) across "
+        f"{result.duplicate_keys} canonical key(s) for {country_iso3.upper()}; kept the row "
+        "with the most complete metadata and highest observation count per key."
+    )
+    warnings = [warning]
+    if result.conflicting_price_keys:
+        warnings.append(
+            f"{result.conflicting_price_keys} duplicate monthly price key(s) for {country_iso3.upper()} "
+            "had conflicting price values; the deterministic best-ranked row was kept."
+        )
+    return warnings
+
+
+def _price_deduplication_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    values: list[Any] = []
+    for field_name in CANONICAL_PRICE_KEY_FIELDS:
+        value = row.get(field_name)
+        if field_name == "country_iso3":
+            value = str(value or "").upper()
+        elif field_name in {"commodity_id", "market_id"}:
+            value = _maybe_int(value)
+        elif field_name == "price_date":
+            value = str(value)[:10] if value not in (None, "") else ""
+        else:
+            value = str(value or "")
+        values.append(value)
+    return tuple(values)
+
+
+def _price_row_rank(row: dict[str, Any]) -> tuple[Any, ...]:
+    metadata_fields = (
+        "currency_id",
+        "currency_code",
+        "currency_name",
+        "commodity_unit_id",
+        "commodity_unit_name",
+        "price_type_id",
+        "price_type_name",
+        "price_flag",
+        "original_frequency",
+        "data_source",
+        "commodity_name",
+        "market_name",
+        "admin1_name",
+        "admin2_name",
+    )
+    completeness = sum(1 for field in metadata_fields if row.get(field) not in (None, ""))
+    observations = _maybe_int(row.get("observations")) or 0
+    stable_payload = json.dumps(row, sort_keys=True, default=str, separators=(",", ":"))
+    return (
+        completeness,
+        observations,
+        str(row.get("source_payload_hash") or ""),
+        stable_payload,
+    )
+
+
+def _price_value(row: dict[str, Any]) -> str:
+    value = row.get("price")
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{float(value):.12g}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _first_present(values: Sequence[Any], *, fallback: Any = None) -> Optional[str]:
