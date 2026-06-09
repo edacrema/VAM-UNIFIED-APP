@@ -35,10 +35,11 @@ def _config():
 
 
 class FakeAdapter:
-    def __init__(self, *, fail_countries=None, duplicate_countries=None, fail_units=False):
+    def __init__(self, *, fail_countries=None, duplicate_countries=None, forecast_countries=None, fail_units=False):
         self.config = SimpleNamespace(base_url="https://databridges.test", env="prod")
         self.fail_countries = set(fail_countries or [])
         self.duplicate_countries = set(duplicate_countries or [])
+        self.forecast_countries = set(forecast_countries or [])
         self.fail_units = fail_units
 
     def fetch_units(self):
@@ -100,6 +101,16 @@ class FakeAdapter:
         ]
         if country_iso3 in self.duplicate_countries:
             rows.append(dict(rows[0], source_payload_hash=f"{country_iso3}-duplicate"))
+        if country_iso3 in self.forecast_countries:
+            rows.append(
+                dict(
+                    rows[0],
+                    price_date="2026-10-01",
+                    price=30.0,
+                    price_flag="forecast",
+                    source_payload_hash=f"{country_iso3}-forecast",
+                )
+            )
         return rows
 
     def _maybe_fail(self, country_iso3):
@@ -225,6 +236,28 @@ def test_refresh_worker_deduplicates_monthly_price_rows_before_validation(tmp_pa
     assert any("Deduplicated 1 duplicate monthly price row" in warning["warnings"][0] for warning in summary["warnings"])
     assert refresh is not None
     assert "Deduplicated 1 duplicate monthly price row" in refresh.countries[0].validation_summary["warnings"][0]
+
+
+def test_refresh_worker_excludes_forecast_price_rows_before_caching(tmp_path):
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(forecast_countries={"AAA"}),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    summary = worker.run(triggered_by="pytest")
+    prices = repo.get_price_window("AAA", "2025-01-01", "2026-10-01")
+    refresh = repo.get_cache_refresh(summary["cache_version_id"])
+
+    assert summary["status"] == "active"
+    assert summary["rows_prices"] == 1
+    assert len(prices) == 1
+    assert prices[0].price_date.isoformat() == "2025-01-01"
+    assert prices[0].price_flag == "actual"
+    assert any("Excluded 1 non-real monthly price row" in warning["warnings"][0] for warning in summary["warnings"])
+    assert refresh is not None
+    assert "forecast=1" in refresh.countries[0].validation_summary["warnings"][0]
 
 
 def test_refresh_worker_lock_contention_raises(tmp_path):

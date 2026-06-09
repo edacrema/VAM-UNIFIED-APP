@@ -242,6 +242,7 @@ def test_cache_warning_summary_aggregates_global_noise():
                     "country_iso3": "LBN",
                     "warnings": [
                         "Found 194 price metadata references not present in fetched commodities/markets.",
+                        "Excluded 16335 non-real monthly price row(s) for LBN based on price_flag (forecast=16335); only actual/aggregate rows are cached.",
                         "Deduplicated 13689 duplicate monthly price row(s) across 12211 canonical key(s) for LBN; kept the row with the most complete metadata and highest observation count per key.",
                     ],
                 },
@@ -261,8 +262,10 @@ def test_cache_warning_summary_aggregates_global_noise():
 
     assert any("CommodityUnits/List could not be fetched" in warning for warning in global_warnings)
     assert any("2 country/countries" in warning for warning in global_warnings)
+    assert any("16335 non-real monthly price row" in warning for warning in global_warnings)
     assert any("13689 duplicate monthly price row" in warning for warning in global_warnings)
     assert any("CommodityUnits/List could not be fetched" in warning for warning in lebanon_warnings)
+    assert any("16335 non-real monthly price row" in warning for warning in lebanon_warnings)
     assert any("13689 duplicate monthly price row" in warning for warning in lebanon_warnings)
     assert not any("BOL" in warning for warning in lebanon_warnings)
 

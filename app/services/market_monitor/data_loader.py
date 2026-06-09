@@ -1029,6 +1029,8 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
     metadata_reference_count = 0
     dedup_countries: set[str] = set()
     dedup_rows = 0
+    excluded_non_real_countries: set[str] = set()
+    excluded_non_real_rows = 0
     conflict_countries: set[str] = set()
     conflict_keys = 0
     other_warnings: list[str] = []
@@ -1066,6 +1068,12 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
                 if item_country:
                     dedup_countries.add(item_country)
                 continue
+            excluded_match = re.search(r"Excluded\s+(\d+)\s+non-real monthly price row", text)
+            if excluded_match:
+                excluded_non_real_rows += int(excluded_match.group(1))
+                if item_country:
+                    excluded_non_real_countries.add(item_country)
+                continue
             conflict_match = re.search(r"(\d+)\s+duplicate monthly price key\(s\).*conflicting price values", text)
             if conflict_match:
                 conflict_keys += int(conflict_match.group(1))
@@ -1089,6 +1097,12 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
         warnings.append(
             f"Deduplicated {dedup_rows} duplicate monthly price row(s) across "
             f"{len(dedup_countries)} country/countries before cache publication."
+        )
+    if excluded_non_real_rows:
+        warnings.append(
+            f"Excluded {excluded_non_real_rows} non-real monthly price row(s) across "
+            f"{len(excluded_non_real_countries)} country/countries before cache publication; "
+            "only actual/aggregate rows are cached."
         )
     if conflict_keys:
         warnings.append(

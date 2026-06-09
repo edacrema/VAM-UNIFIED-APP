@@ -59,6 +59,13 @@ class PriceDeduplicationResult:
     conflicting_price_keys: int = 0
 
 
+@dataclass(frozen=True)
+class PriceFlagFilterResult:
+    rows: list[dict[str, Any]]
+    excluded_rows: int = 0
+    excluded_flags: tuple[tuple[str, int], ...] = ()
+
+
 class PriceCacheRefreshWorker:
     def __init__(
         self,
@@ -240,6 +247,8 @@ class PriceCacheRefreshWorker:
                 start_date=start_date,
                 end_date=end_date,
             )
+            flag_filter = _filter_real_monthly_price_rows(prices)
+            prices = flag_filter.rows
             deduplication = _deduplicate_monthly_price_rows(prices)
             prices = deduplication.rows
             unit_lookup.update(_collect_units(commodities, prices))
@@ -252,6 +261,7 @@ class PriceCacheRefreshWorker:
                 previous_rows_prices=previous_count,
                 max_country_drop_ratio=self.config.validate_max_country_drop_ratio,
             )
+            validation.warnings.extend(_price_flag_filter_warnings(country_iso3, flag_filter))
             validation.warnings.extend(_deduplication_warnings(country_iso3, deduplication))
             if not validation.valid:
                 self._record_country_failure(
@@ -483,6 +493,35 @@ def _deduplicate_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceDedu
         duplicate_keys=duplicate_keys,
         conflicting_price_keys=conflicting_price_keys,
     )
+
+
+def _filter_real_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceFlagFilterResult:
+    real_flags = {"", "actual", "aggregate", "aggregated"}
+    kept: list[dict[str, Any]] = []
+    excluded: dict[str, int] = {}
+    for row in rows:
+        flag = str(row.get("price_flag") or "").strip().lower()
+        if flag in real_flags:
+            kept.append(dict(row))
+        else:
+            excluded[flag or "unknown"] = excluded.get(flag or "unknown", 0) + 1
+    return PriceFlagFilterResult(
+        rows=kept,
+        excluded_rows=sum(excluded.values()),
+        excluded_flags=tuple(sorted(excluded.items())),
+    )
+
+
+def _price_flag_filter_warnings(country_iso3: str, result: PriceFlagFilterResult) -> list[str]:
+    if result.excluded_rows <= 0:
+        return []
+    flag_summary = ", ".join(f"{flag}={count}" for flag, count in result.excluded_flags)
+    return [
+        (
+            f"Excluded {result.excluded_rows} non-real monthly price row(s) for {country_iso3.upper()} "
+            f"based on price_flag ({flag_summary}); only actual/aggregate rows are cached."
+        )
+    ]
 
 
 def _deduplication_warnings(country_iso3: str, result: PriceDeduplicationResult) -> list[str]:
