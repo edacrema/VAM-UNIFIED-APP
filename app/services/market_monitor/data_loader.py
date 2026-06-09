@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -98,8 +99,11 @@ def get_supported_countries() -> List[Dict[str, Any]]:
         cache_version_id = country.cache_version_id
         if availability is not None:
             cache_version_id = availability.cache_version_id
-            date_range = _date_range_dict(availability.date_start, availability.date_end)
-            latest_cached_date = _date_wire(availability.latest_price_date)
+            date_range, latest_cached_date, _ = _bounded_cache_dates(
+                availability.date_start,
+                availability.date_end,
+                availability.latest_price_date,
+            )
         countries.append(
             {
                 "name": country.country_name,
@@ -336,10 +340,19 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     regions = availability.admin1_names or sorted(
         {str(item["admin1_name"]) for item in markets if item.get("admin1_name")}
     )
-    date_range = _date_range_dict(availability.date_start, availability.date_end)
-    warnings = _cache_warnings(status)
+    date_range, latest_cached_date, has_future_dates = _bounded_cache_dates(
+        availability.date_start,
+        availability.date_end,
+        availability.latest_price_date,
+    )
+    warnings = _cache_warnings(status, country_iso3=iso3)
     if date_range is None:
         warnings.append(f"PriceCache has no monthly price date range for {country_name}.")
+    if has_future_dates:
+        warnings.append(
+            "PriceCache contains future-dated monthly prices for this country; "
+            f"time period options are capped at the current month ({_current_month_start().strftime('%Y-%m')})."
+        )
     if not units:
         warnings.append(
             "No commodity unit metadata is available in the active cache for this country; report rows may show blank units."
@@ -363,7 +376,7 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
             "bounded": False,
             "source": "PriceCache",
         },
-        "latest_cached_date": _date_wire(availability.latest_price_date),
+        "latest_cached_date": latest_cached_date,
         "cache_version_id": availability.cache_version_id,
         "source": "PriceCache",
         "cache_status": _cache_status_dict(status),
@@ -1004,22 +1017,174 @@ def _cache_status_dict(status: CacheStatus) -> dict[str, Any]:
     }
 
 
-def _cache_warnings(status: CacheStatus) -> list[str]:
-    warnings: list[str] = []
+def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> list[str]:
     summary = status.validation_summary or {}
-    for item in summary.get("warnings") or []:
+    raw_items = list(summary.get("warnings") or [])
+    if country_iso3:
+        return _country_cache_warnings(raw_items, country_iso3=country_iso3, error_message=status.error_message)
+
+    warnings: list[str] = []
+    unit_warning = False
+    metadata_reference_countries = 0
+    metadata_reference_count = 0
+    dedup_countries: set[str] = set()
+    dedup_rows = 0
+    conflict_countries: set[str] = set()
+    conflict_keys = 0
+    other_warnings: list[str] = []
+
+    for item in raw_items:
         if isinstance(item, str):
-            warnings.append(item)
-        elif isinstance(item, dict):
-            warning = item.get("warning")
-            if warning:
-                warnings.append(str(warning))
-            nested = item.get("warnings")
-            if isinstance(nested, list):
-                warnings.extend(str(value) for value in nested if value)
+            other_warnings.append(_sanitize_cache_warning(item))
+            continue
+        if not isinstance(item, dict):
+            other_warnings.append(_sanitize_cache_warning(str(item)))
+            continue
+
+        warning = item.get("warning")
+        if warning:
+            sanitized = _sanitize_cache_warning(str(warning))
+            if "CommodityUnits/List" in sanitized:
+                unit_warning = True
+            else:
+                other_warnings.append(sanitized)
+
+        nested = item.get("warnings")
+        if not isinstance(nested, list):
+            continue
+        item_country = str(item.get("country_iso3") or "").upper()
+        for nested_warning in nested:
+            text = str(nested_warning)
+            metadata_match = re.search(r"Found\s+(\d+)\s+price metadata references", text)
+            if metadata_match:
+                metadata_reference_countries += 1
+                metadata_reference_count += int(metadata_match.group(1))
+                continue
+            dedup_match = re.search(r"Deduplicated\s+(\d+)\s+duplicate monthly price row", text)
+            if dedup_match:
+                dedup_rows += int(dedup_match.group(1))
+                if item_country:
+                    dedup_countries.add(item_country)
+                continue
+            conflict_match = re.search(r"(\d+)\s+duplicate monthly price key\(s\).*conflicting price values", text)
+            if conflict_match:
+                conflict_keys += int(conflict_match.group(1))
+                if item_country:
+                    conflict_countries.add(item_country)
+                continue
+            other_warnings.append(_sanitize_cache_warning(text))
+
+    if unit_warning:
+        warnings.append(
+            "CommodityUnits/List could not be fetched from Databridges (403 Forbidden); "
+            "commodity units were derived from commodity and monthly price rows where available."
+        )
+    if metadata_reference_countries:
+        warnings.append(
+            "Price metadata references were missing from current commodity/market metadata for "
+            f"{metadata_reference_countries} country/countries ({metadata_reference_count} reference(s)); "
+            "historical price rows were still cached."
+        )
+    if dedup_rows:
+        warnings.append(
+            f"Deduplicated {dedup_rows} duplicate monthly price row(s) across "
+            f"{len(dedup_countries)} country/countries before cache publication."
+        )
+    if conflict_keys:
+        warnings.append(
+            f"{conflict_keys} duplicate monthly price key(s) across {len(conflict_countries)} "
+            "country/countries had conflicting price values; deterministic best-ranked rows were kept."
+        )
+    warnings.extend(other_warnings[:10])
+    if len(other_warnings) > 10:
+        warnings.append(f"{len(other_warnings) - 10} additional cache warning(s) omitted from this summary.")
     if status.error_message:
         warnings.append(str(status.error_message))
-    return warnings
+    return _dedupe_preserve_order(warnings)
+
+
+def _country_cache_warnings(
+    raw_items: list[Any],
+    *,
+    country_iso3: str,
+    error_message: str | None = None,
+) -> list[str]:
+    country = country_iso3.upper()
+    warnings: list[str] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            warnings.append(_sanitize_cache_warning(item))
+            continue
+        if not isinstance(item, dict):
+            warnings.append(_sanitize_cache_warning(str(item)))
+            continue
+
+        item_country = str(item.get("country_iso3") or "").upper()
+        warning = item.get("warning")
+        if warning and not item_country:
+            warnings.append(_sanitize_cache_warning(str(warning)))
+        if item_country != country:
+            continue
+        nested = item.get("warnings")
+        if isinstance(nested, list):
+            warnings.extend(_sanitize_cache_warning(str(value)) for value in nested if value)
+    if error_message:
+        warnings.append(str(error_message))
+    return _dedupe_preserve_order(warnings)
+
+
+def _sanitize_cache_warning(warning: str) -> str:
+    if "CommodityUnits/List" in warning:
+        return (
+            "CommodityUnits/List could not be fetched from Databridges (403 Forbidden); "
+            "commodity units were derived from commodity and monthly price rows where available."
+        )
+    return warning
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _bounded_cache_dates(start: Any, end: Any, latest: Any) -> tuple[Optional[dict[str, str]], Optional[str], bool]:
+    start_d = _date_obj(start)
+    end_d = _date_obj(end)
+    latest_d = _date_obj(latest) or end_d
+    current_month = _current_month_start()
+    has_future_dates = any(value is not None and value > current_month for value in (end_d, latest_d))
+
+    if end_d and end_d > current_month:
+        end_d = current_month
+    if latest_d and latest_d > current_month:
+        latest_d = end_d or current_month
+    if start_d and end_d and start_d > end_d:
+        return None, _date_wire(latest_d), has_future_dates
+    return _date_range_dict(start_d, end_d), _date_wire(latest_d), has_future_dates
+
+
+def _current_month_start() -> date:
+    today = date.today()
+    return date(today.year, today.month, 1)
+
+
+def _date_obj(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
 
 
 def _safe_cache_metadata() -> dict[str, Any]:

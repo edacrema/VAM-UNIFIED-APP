@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import date
 
 import pandas as pd
 
@@ -163,6 +164,107 @@ def test_country_metadata_uses_price_cache(monkeypatch, tmp_path):
     assert metadata["units"] == [
         {"id": 100, "name": "kg", "conversion_to_kg_l": 1.0, "source": "cached_units"}
     ]
+
+
+def test_country_metadata_caps_future_price_dates(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    version_id = repo.create_cache_version()
+    repo.insert_currencies(
+        version_id,
+        [{"currency_id": 200, "currency_code": "LBP", "currency_name": "Lebanese Pound"}],
+    )
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3="LBN",
+        country_name="Lebanon",
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Wheat flour",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            }
+        ],
+        markets=[{"market_id": 10, "market_name": "Beirut", "admin1_name": "Beirut"}],
+        prices=[
+            {
+                **_price(1, "Wheat flour", 10, "Beirut", "Beirut", "2026-05-01", 10),
+                "country_iso3": "LBN",
+                "currency_code": "LBP",
+                "currency_name": "Lebanese Pound",
+            },
+            {
+                **_price(1, "Wheat flour", 10, "Beirut", "Beirut", "2026-10-01", 12),
+                "country_iso3": "LBN",
+                "currency_code": "LBP",
+                "currency_name": "Lebanese Pound",
+            },
+        ],
+        latest_price_date="2026-10-01",
+        currency_code="LBP",
+        currency_name="Lebanese Pound",
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3="LBN",
+        status="success",
+        rows_prices=2,
+        rows_commodities=1,
+        rows_markets=1,
+        latest_price_date="2026-10-01",
+    )
+    repo.insert_units(
+        version_id,
+        [{"commodity_unit_id": 100, "commodity_unit_name": "kg", "conversion_to_kg_l": 1.0, "active": True}],
+    )
+    repo.publish_cache_version(version_id, country_iso3s=["LBN"], status="active")
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2026, 6, 1))
+
+    metadata = data_loader.get_country_metadata("Lebanon")
+
+    assert metadata["date_range"] == {"start": "2026-05-01", "end": "2026-06-01"}
+    assert metadata["latest_cached_date"] == "2026-06-01"
+    assert any("future-dated monthly prices" in warning for warning in metadata["warnings"])
+
+
+def test_cache_warning_summary_aggregates_global_noise():
+    status = data_loader.CacheStatus(
+        has_active_cache=True,
+        validation_summary={
+            "warnings": [
+                {
+                    "scope": "units",
+                    "warning": "CommodityUnits/List could not be fetched; Error: (403) huge headers",
+                },
+                {
+                    "country_iso3": "LBN",
+                    "warnings": [
+                        "Found 194 price metadata references not present in fetched commodities/markets.",
+                        "Deduplicated 13689 duplicate monthly price row(s) across 12211 canonical key(s) for LBN; kept the row with the most complete metadata and highest observation count per key.",
+                    ],
+                },
+                {
+                    "country_iso3": "BOL",
+                    "warnings": [
+                        "Found 4678 price metadata references not present in fetched commodities/markets.",
+                        "222 duplicate monthly price key(s) for BOL had conflicting price values; the deterministic best-ranked row was kept.",
+                    ],
+                },
+            ]
+        },
+    )
+
+    global_warnings = data_loader._cache_warnings(status)
+    lebanon_warnings = data_loader._cache_warnings(status, country_iso3="LBN")
+
+    assert any("CommodityUnits/List could not be fetched" in warning for warning in global_warnings)
+    assert any("2 country/countries" in warning for warning in global_warnings)
+    assert any("13689 duplicate monthly price row" in warning for warning in global_warnings)
+    assert any("CommodityUnits/List could not be fetched" in warning for warning in lebanon_warnings)
+    assert any("13689 duplicate monthly price row" in warning for warning in lebanon_warnings)
+    assert not any("BOL" in warning for warning in lebanon_warnings)
 
 
 def test_time_series_preserves_missing_months_and_current_statistics(monkeypatch, tmp_path):
