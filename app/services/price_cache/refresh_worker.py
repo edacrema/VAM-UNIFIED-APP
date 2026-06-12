@@ -6,7 +6,7 @@ import logging
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional, Sequence
 
 from app.shared.countries import supported_country_options
@@ -15,7 +15,15 @@ from .config import PriceCacheConfig, load_price_cache_config
 from .databridges_adapter import DataBridgesClientAdapter
 from .migrations import apply_migrations
 from .sql_repository import SqlPriceCacheRepository, create_price_cache_engine
-from .validation import CANONICAL_PRICE_KEY_FIELDS, CountryCacheValidationResult, validate_country_snapshot
+from .validation import (
+    CANONICAL_PRICE_KEY_FIELDS,
+    CANONICAL_PRICE_KEY_INT_FIELDS,
+    CountryCacheValidationResult,
+    validate_country_snapshot,
+)
+
+
+REAL_PRICE_FLAG_COMPONENTS = {"actual", "aggregate", "aggregated"}
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +72,13 @@ class PriceFlagFilterResult:
     rows: list[dict[str, Any]]
     excluded_rows: int = 0
     excluded_flags: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class FuturePriceFilterResult:
+    rows: list[dict[str, Any]]
+    excluded_rows: int = 0
+    max_excluded_date: Optional[str] = None
 
 
 class PriceCacheRefreshWorker:
@@ -249,6 +264,9 @@ class PriceCacheRefreshWorker:
             )
             flag_filter = _filter_real_monthly_price_rows(prices)
             prices = flag_filter.rows
+            future_filter = _filter_future_monthly_price_rows(prices, current_month_start=_current_month_start())
+            prices = future_filter.rows
+            prices = _enrich_price_rows_with_metadata(prices, markets=markets, commodities=commodities)
             deduplication = _deduplicate_monthly_price_rows(prices)
             prices = deduplication.rows
             unit_lookup.update(_collect_units(commodities, prices))
@@ -262,6 +280,7 @@ class PriceCacheRefreshWorker:
                 max_country_drop_ratio=self.config.validate_max_country_drop_ratio,
             )
             validation.warnings.extend(_price_flag_filter_warnings(country_iso3, flag_filter))
+            validation.warnings.extend(_future_price_filter_warnings(country_iso3, future_filter))
             validation.warnings.extend(_deduplication_warnings(country_iso3, deduplication))
             if not validation.valid:
                 self._record_country_failure(
@@ -495,13 +514,20 @@ def _deduplicate_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceDedu
     )
 
 
+def _is_real_price_flag(flag: Any) -> bool:
+    normalized = str(flag or "").strip().lower()
+    if not normalized:
+        return True
+    components = [component.strip() for component in normalized.split(",") if component.strip()]
+    return bool(components) and all(component in REAL_PRICE_FLAG_COMPONENTS for component in components)
+
+
 def _filter_real_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceFlagFilterResult:
-    real_flags = {"", "actual", "aggregate", "aggregated"}
     kept: list[dict[str, Any]] = []
     excluded: dict[str, int] = {}
     for row in rows:
         flag = str(row.get("price_flag") or "").strip().lower()
-        if flag in real_flags:
+        if _is_real_price_flag(flag):
             kept.append(dict(row))
         else:
             excluded[flag or "unknown"] = excluded.get(flag or "unknown", 0) + 1
@@ -510,6 +536,103 @@ def _filter_real_monthly_price_rows(rows: Sequence[dict[str, Any]]) -> PriceFlag
         excluded_rows=sum(excluded.values()),
         excluded_flags=tuple(sorted(excluded.items())),
     )
+
+
+def _current_month_start() -> date:
+    today = datetime.now(timezone.utc).date()
+    return date(today.year, today.month, 1)
+
+
+def _filter_future_monthly_price_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    current_month_start: date,
+) -> FuturePriceFilterResult:
+    kept: list[dict[str, Any]] = []
+    excluded_rows = 0
+    max_excluded: Optional[date] = None
+    for row in rows:
+        parsed = _price_date_obj(row.get("price_date"))
+        if parsed is not None and parsed > current_month_start:
+            excluded_rows += 1
+            if max_excluded is None or parsed > max_excluded:
+                max_excluded = parsed
+            continue
+        kept.append(dict(row))
+    return FuturePriceFilterResult(
+        rows=kept,
+        excluded_rows=excluded_rows,
+        max_excluded_date=max_excluded.isoformat() if max_excluded else None,
+    )
+
+
+def _future_price_filter_warnings(country_iso3: str, result: FuturePriceFilterResult) -> list[str]:
+    if result.excluded_rows <= 0:
+        return []
+    return [
+        (
+            f"Excluded {result.excluded_rows} future-dated monthly price row(s) for {country_iso3.upper()} "
+            f"(latest excluded date {result.max_excluded_date}); only months up to the current month are cached."
+        )
+    ]
+
+
+def _enrich_price_rows_with_metadata(
+    rows: Sequence[dict[str, Any]],
+    *,
+    markets: Sequence[dict[str, Any]],
+    commodities: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fill admin/market/commodity fields the PriceMonthly DTO does not carry.
+
+    The Databridges monthly price payload has no admin1/admin2 fields, so region
+    metadata must come from the Markets/List rows fetched in the same refresh.
+    """
+    market_lookup: dict[int, dict[str, Any]] = {}
+    for market in markets or []:
+        market_id = _maybe_int(market.get("market_id"))
+        if market_id is not None:
+            market_lookup[market_id] = market
+    commodity_lookup: dict[int, dict[str, Any]] = {}
+    for commodity in commodities or []:
+        commodity_id = _maybe_int(commodity.get("commodity_id"))
+        if commodity_id is not None:
+            commodity_lookup[commodity_id] = commodity
+
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        market = market_lookup.get(_maybe_int(item.get("market_id")))
+        if market:
+            if item.get("admin1_name") in (None, ""):
+                item["admin1_name"] = market.get("admin1_name")
+            if item.get("admin2_name") in (None, ""):
+                item["admin2_name"] = market.get("admin2_name")
+            if item.get("market_name") in (None, ""):
+                item["market_name"] = market.get("market_name")
+        commodity = commodity_lookup.get(_maybe_int(item.get("commodity_id")))
+        if commodity:
+            if item.get("commodity_name") in (None, ""):
+                item["commodity_name"] = commodity.get("commodity_name")
+            if item.get("commodity_unit_id") in (None, ""):
+                item["commodity_unit_id"] = commodity.get("commodity_unit_id")
+            if item.get("commodity_unit_name") in (None, ""):
+                item["commodity_unit_name"] = commodity.get("commodity_unit_name")
+        enriched.append(item)
+    return enriched
+
+
+def _price_date_obj(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def _price_flag_filter_warnings(country_iso3: str, result: PriceFlagFilterResult) -> list[str]:
@@ -547,7 +670,7 @@ def _price_deduplication_key(row: dict[str, Any]) -> tuple[Any, ...]:
         value = row.get(field_name)
         if field_name == "country_iso3":
             value = str(value or "").upper()
-        elif field_name in {"commodity_id", "market_id"}:
+        elif field_name in CANONICAL_PRICE_KEY_INT_FIELDS:
             value = _maybe_int(value)
         elif field_name == "price_date":
             value = str(value)[:10] if value not in (None, "") else ""

@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit Report - Implementation Status And Databridges Price Cache System</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; line-height: 1.55; color: #1f2933; max-width: 1120px; margin: 0 auto; padding: 40px 24px; background: #fff; }
+    h1, h2, h3, h4 { color: #0b3d5c; line-height: 1.2; }
+    h1 { border-bottom: 3px solid #0b76bd; padding-bottom: 12px; }
+    h2 { margin-top: 40px; border-bottom: 1px solid #d9e2ec; padding-bottom: 6px; }
+    h3 { margin-top: 28px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #d9e2ec; padding: 9px 10px; text-align: left; vertical-align: top; }
+    th { background: #f0f6fb; }
+    pre { background: #f4f6f8; border: 1px solid #d9e2ec; padding: 14px; overflow-x: auto; border-radius: 6px; font-size: 13px; }
+    code { background: #f4f6f8; padding: 2px 5px; border-radius: 4px; font-size: 0.92em; }
+    pre code { padding: 0; background: none; }
+    .note { border-left: 4px solid #0b76bd; background: #f5fbff; padding: 12px 16px; margin: 18px 0; }
+    .critical { border-left: 4px solid #c0392b; background: #fdf3f2; padding: 12px 16px; margin: 18px 0; }
+    .ok { border-left: 4px solid #1e8e3e; background: #f2faf4; padding: 12px 16px; margin: 18px 0; }
+    .sev-critical { color: #fff; background: #c0392b; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; white-space: nowrap; }
+    .sev-high { color: #fff; background: #d35400; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; white-space: nowrap; }
+    .sev-medium { color: #1f2933; background: #f1c40f; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; white-space: nowrap; }
+    .sev-low { color: #fff; background: #7f8c8d; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; white-space: nowrap; }
+    .sev-info { color: #fff; background: #2980b9; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; white-space: nowrap; }
+    .status-done { color: #1e8e3e; font-weight: bold; }
+    .status-partial { color: #d35400; font-weight: bold; }
+    .status-missing { color: #c0392b; font-weight: bold; }
+    .filepath { font-family: Consolas, monospace; font-size: 0.9em; color: #4a5568; }
+    .toc li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>Audit Report — Implementation Status And Databridges Price Cache System</h1>
+  <p>
+    <strong>Date:</strong> 2026-06-10 &nbsp;|&nbsp;
+    <strong>Branch:</strong> <code>phase_3</code> (HEAD <code>337cafb</code>) &nbsp;|&nbsp;
+    <strong>Auditor:</strong> Claude (Fable 5), automated code audit<br>
+    <strong>Scope:</strong> (1) full implementation audit against <code>specs/phase_1</code>, <code>specs/phase_2</code>, and <code>specs/phase_3</code>;
+    (2) deep diagnosis of the deployed Databridges price cache system, including the warning messages and report-generation failures observed in the
+    latest GCP deployment for Bangladesh, Afghanistan, and Lebanon.
+  </p>
+
+  <h2>Table Of Contents</h2>
+  <ul class="toc">
+    <li><a href="#exec">1. Executive Summary</a></li>
+    <li><a href="#general">2. Part A — General Implementation Audit (Phases 1 → 3)</a></li>
+    <li><a href="#cachearch">3. Part B — Cache System As Implemented</a></li>
+    <li><a href="#symptoms">4. Part C — Symptom-By-Symptom Diagnosis Of The Reported Issues</a></li>
+    <li><a href="#findings">5. Part D — Full Findings Register</a></li>
+    <li><a href="#remediation">6. Remediation Plan (Prioritized)</a></li>
+    <li><a href="#testing">7. Test Gaps And Verification Plan</a></li>
+    <li><a href="#appendix">8. Appendix — Evidence And Method</a></li>
+  </ul>
+
+  <h2 id="exec">1. Executive Summary</h2>
+
+  <div class="critical">
+    <strong>Headline finding (F1 — Critical):</strong> report generation fails for <em>every</em> country because the Databridges monthly price
+    endpoint (<code>ViewExtendedMonthlyAggregatedPrice</code> DTO) <strong>does not contain admin1/admin2 fields at all</strong>. The refresh worker
+    stores every cached price row with <code>admin1_name = NULL</code>, the serving path renders <code>NULL</code> as <code>"Unknown"</code>, and the
+    Price Bulletin form (which builds its region list from <em>market</em> metadata, where admin1 <em>is</em> present) therefore submits region names
+    that can never match. The pre-cache implementation joined market metadata onto price rows to obtain Admin 1; that join was dropped when the
+    cache pipeline was introduced. <strong>No re-download is required to fix the deployed database</strong> — a single SQL backfill joining
+    <code>cached_markets</code> onto <code>cached_price_monthly</code> repairs the active cache immediately (see <a href="#remediation">Section 6</a>).
+  </div>
+
+  <p>The audit confirms the overall cache architecture (versioned snapshots, atomic per-country activation, refresh lock, validation, retention) is
+  sound and well tested at the unit level. However, five distinct defects/gaps combine to produce the symptoms observed in production:</p>
+
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Severity</th><th>Finding</th><th>User-visible symptom it explains</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>F1</td><td><span class="sev-critical">CRITICAL</span></td>
+        <td>Price rows cached with NULL <code>admin1_name</code>/<code>admin2_name</code>; market-metadata join dropped during cache migration</td>
+        <td><em>"Requested regions are not available… Available regions: ['Unknown']"</em> — report generation broken for all countries</td>
+      </tr>
+      <tr>
+        <td>F2</td><td><span class="sev-high">HIGH</span></td>
+        <td>Canonical monthly-price key omits <code>currency_id</code>, <code>commodity_unit_id</code>, <code>price_type_id</code>; deduplication silently collapses genuinely distinct series (e.g. dual-currency Lebanon)</td>
+        <td><em>"Deduplicated 960/7119/9401 duplicate monthly price row(s)…"</em> warnings; silent data loss</td>
+      </tr>
+      <tr>
+        <td>F3</td><td><span class="sev-medium">MEDIUM</span></td>
+        <td>Composite price flags (<code>"actual,aggregate"</code>) are treated as non-real and excluded at ingest <em>and</em> read time</td>
+        <td><em>"Excluded … (actual,aggregate=3 / =431 …)"</em> — real observations dropped</td>
+      </tr>
+      <tr>
+        <td>F4</td><td><span class="sev-medium">MEDIUM</span></td>
+        <td><code>CommodityUnits/List</code> returns 403 — the gateway subscription/scope does not include that endpoint; fallback works but warning is shown to every officer</td>
+        <td><em>"CommodityUnits/List could not be fetched (403 Forbidden)…"</em> on every country</td>
+      </tr>
+      <tr>
+        <td>F5</td><td><span class="sev-medium">MEDIUM</span></td>
+        <td>Future-dated price rows survive ingestion (after forecast exclusion) and are only capped in the UI</td>
+        <td><em>"PriceCache contains future-dated monthly prices… capped at 2026-06"</em> (Bangladesh)</td>
+      </tr>
+      <tr>
+        <td>F6</td><td><span class="sev-medium">MEDIUM</span></td>
+        <td>Internal ETL telemetry (dedup counts, flag exclusions, 403s) is surfaced verbatim to end users on the bulletin form; the planned admin sync-status panel does not exist yet</td>
+        <td>The wall of warnings reported for every country</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Beyond the cache focus, the broader audit (Part A) finds that the Phase 1 spec (chat agent, Claude-on-Vertex) and the Phase 2 spec
+  (authentication, workspaces, model registry) are <strong>not implemented</strong> — the app remains the four-wizard alpha with a
+  Gemini/Vertex singleton — and Phase 3 itself is roughly half done: its roadmap phases 0–4 (audit, DB foundation, ingestion adapter, refresh
+  worker, cache-first bulletin) are delivered; phases 5–8 (shared country food baskets, basket-driven calculations, manual latest overlay,
+  admin status UI, hardening) are not started. Two security/operations items also need attention: a plaintext Google API key in
+  <code>app/docker.env</code> is copied into the production container image, and a dead 151&nbsp;MB CSV is baked into every image build.</p>
+
+  <div class="ok">
+    <strong>Remediation status (2026-06-10, same branch):</strong> findings F1–F6 have been fixed in code following this audit.
+    <ul>
+      <li><strong>F1:</strong> the refresh worker now enriches price rows with admin1/admin2/market/commodity metadata from the markets and
+      commodities fetched in the same pass (<code>_enrich_price_rows_with_metadata</code>); <code>get_price_window()</code> and the availability
+      regions query LEFT JOIN <code>cached_markets</code> with COALESCE as defense in depth; and migration
+      <code>003_admin_backfill_and_price_key</code> backfills the <em>deployed</em> database automatically on the next app/worker start — no
+      re-download needed.</li>
+      <li><strong>F2:</strong> the canonical key now includes <code>price_type_id</code>, <code>currency_id</code>, and
+      <code>commodity_unit_id</code> (dedup + a new unique index replacing the old primary key); dual-currency series are both cached, and the
+      report path selects a single currency per run (requested currency → country default → most frequent) instead of averaging across
+      currencies, with an officer-visible note when multiple currencies exist.</li>
+      <li><strong>F3:</strong> composite flags such as <code>"actual,aggregate"</code> are now parsed component-wise and kept, at both ingest and
+      read time.</li>
+      <li><strong>F4 (code side):</strong> the warning sanitizer no longer hardcodes "403 Forbidden"; it surfaces the actual stored error. The
+      gateway entitlement request for <code>CommodityUnits/List</code> remains an external action.</li>
+      <li><strong>F5:</strong> future-dated rows are excluded at ingest with an explicit per-country warning; the UI month cap remains as
+      defense for older cache versions.</li>
+      <li><strong>F6:</strong> cache warnings are now split by audience — officers see freshness/coverage warnings; ETL telemetry (dedup counts,
+      flag exclusions, units fetch errors) moves to <code>operator_warnings</code>, rendered on the bulletin form inside a collapsed
+      "Cache processing notes (for administrators)" expander.</li>
+    </ul>
+    Verified by 7 new regression tests (DTO-faithful worker fixtures, market-join enrichment, dual-currency retention and read-time currency
+    selection, composite flags, future-date exclusion, legacy-database migration backfill); full suite: 69 passed, 2 skipped.
+  </div>
+
+  <h2 id="general">2. Part A — General Implementation Audit (Phases 1 → 3)</h2>
+
+  <h3>2.1 What the application is today</h3>
+  <p>The deployed application is a Streamlit multipage app (entry <span class="filepath">Home.py</span>, started by <span class="filepath">start.sh</span>
+  as a Streamlit-only Cloud Run service) with four wizard tools — MFI Validator, Price Validator, Price Bulletin Drafter, MFI Drafter — backed by an
+  in-process dispatcher (<span class="filepath">app/streamlit_backend/dispatcher.py</span>) that mirrors the FastAPI routers in
+  <span class="filepath">app/services/*</span>. Pipelines are LangGraph graphs; the LLM is a <code>ChatVertexAI</code> singleton defaulting to
+  <code>gemini-2.5-pro</code> (<span class="filepath">app/shared/llm.py</span>). Phase 3 added the app-owned price cache
+  (<span class="filepath">app/services/price_cache/</span>) with a Cloud SQL PostgreSQL backend, a Cloud Run Job refresh worker, and a cache-first
+  Price Bulletin data loader.</p>
+
+  <h3>2.2 Status against each spec generation</h3>
+  <table>
+    <thead><tr><th>Spec</th><th>Key commitments</th><th>Status</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Phase 1</strong> (mission/roadmap/tech-stack)</td>
+        <td>Chat-based agent, Claude on Vertex behind a provider abstraction, fine-grained tool library, citations/guardrails, auth + credit ledger, EN/FR/ES</td>
+        <td><span class="status-missing">Not implemented</span></td>
+        <td>No chat page, no tool layer, no agent loop. <span class="filepath">app/shared/llm.py</span> is still a Gemini-oriented singleton with no
+        provider abstraction. No credits, no multilingual drafting. The Phase 1 direction appears superseded by Phases 2–3 rather than abandoned mid-build —
+        worth stating explicitly in the specs to avoid confusion.</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 2</strong> (vision/roadmap/tech_stack)</td>
+        <td>Auth + admin whitelist, per-user persistent workspaces, Vertex model registry, AWS-hosted Databridges cache, custom food baskets, Data Explorer, Climate Drafter</td>
+        <td><span class="status-missing">Not implemented</span> (cache re-scoped)</td>
+        <td>No authentication gate exists anywhere — every page and every dispatcher/API route is anonymous. No workspace persistence, no model
+        registry/resolver, no basket storage, no Data Explorer, no Climate Drafter. The AWS cache dependency was explicitly replaced by the Phase 3
+        app-owned cache (documented in the Phase 3 vision). The unprotected surface now includes cache operator endpoints
+        (<code>/market-monitor/cache/refreshes</code> etc.).</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 3</strong> — roadmap phase 0 (audit)</td>
+        <td>Baseline audit, endpoint map, canonical key assumptions, GCP defaults</td>
+        <td><span class="status-done">Done</span></td>
+        <td><span class="filepath">specs/phase_3/phase_0_audit.md</span> is thorough and accurate. Notably it <em>predicted</em> finding F2: "Official DTOs may
+        expose stable price_type_id, currency_id, commodity_unit_id… that should be added to the canonical key." That risk was not acted on.</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 1 (DB foundation)</td>
+        <td>Versioned schema, migrations, repository, fixtures, indexes, config</td>
+        <td><span class="status-done">Done</span></td>
+        <td><span class="filepath">migrations/postgres|sqlite/001+002</span>, <span class="filepath">sql_repository.py</span>, <span class="filepath">fixtures.py</span>.
+        Schema matches the tech-stack spec, plus a per-country active-version table (good addition).</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 2 (ingestion adapter)</td>
+        <td>Official <code>data_bridges_client</code> wrapper, pagination, normalization, retries</td>
+        <td><span class="status-done">Done</span> (with F1/F3 defects)</td>
+        <td><span class="filepath">databridges_adapter.py</span>; official client pinned via <code>git+…DataBridgesAPI.git@v8.0.0</code>. Token refresh on 401,
+        backoff on transient codes, permanent-error fast-fail, secret redaction.</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 3 (weekly refresh worker)</td>
+        <td>Lock, staging version, validation, atomic promotion, retention, scheduler</td>
+        <td><span class="status-done">Done</span> (with F2/F7/F9 caveats)</td>
+        <td><span class="filepath">refresh_worker.py</span> + Cloud Scheduler/Cloud Run Job per <span class="filepath">specs/phase_3/gcp_refresh_deployment.md</span>.
+        Per-country publication implemented (failed countries keep their previous active version).</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 4 (cache-first bulletin)</td>
+        <td>Country list/metadata/report data from active cache; cache status panel; no Databridges call on selection</td>
+        <td><span class="status-done">Done</span> (broken by F1)</td>
+        <td><span class="filepath">market_monitor/data_loader.py</span> fully rewritten cache-first; cache status panel on the form; live Databridges calls removed from the user path.</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 5 (shared country food baskets)</td>
+        <td>Basket tables, versioning, editor, validation</td>
+        <td><span class="status-missing">Not started</span></td>
+        <td>No basket tables/migrations, no <span class="filepath">app/services/price_bulletin/</span> module. <code>FoodBasket</code> is still the unweighted sum of the
+        user-selected commodities (<span class="filepath">data_loader.py:465</span>).</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 6 (basket calculation/graphs)</td>
+        <td>Weighted basket engine, coverage metadata, chart/report integration</td>
+        <td><span class="status-missing">Not started</span></td>
+        <td>Coverage fields exist from the alpha (selected/historical/latest component counts) but no weights, no saved baskets.</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 7 (latest overlay + admin sync status)</td>
+        <td>Manual bounded overlay, provenance, admin status page</td>
+        <td><span class="status-partial">Partial</span></td>
+        <td>Operator JSON endpoints exist (<code>/market-monitor/cache/status</code>, <code>/cache/refreshes</code>, <code>/cache/refreshes/{id}</code>); no overlay, no admin UI. The absence of the admin panel is why ETL warnings are pushed at officers (F6).</td>
+      </tr>
+      <tr>
+        <td>Phase 3 — phase 8 (hardening/rollout)</td>
+        <td>Perf checks, observability, runbook, feature flags, bootstrap doc</td>
+        <td><span class="status-partial">Partial</span></td>
+        <td>Deployment note exists; no feature flags, no runbook for rollback/credential rotation, no performance checks (see F8/F10).</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="ok">
+    <strong>What is genuinely good in the current implementation:</strong> versioned snapshot design with atomic activation and per-country pointers;
+    refresh lock with expiry; row-drop validation guard; retention cleanup that never deletes referenced versions; dry-run mode for both adapter and
+    worker; secret redaction in adapter error messages; deterministic dedup (even if the key is wrong, the collapse is at least reproducible);
+    39 unit/integration tests passing; the Phase 0 audit document is high quality and was largely followed.
+  </div>
+
+  <h3>2.3 Cross-cutting gaps (not cache-specific)</h3>
+  <ul>
+    <li><strong>No authentication anywhere.</strong> Both Phase 2 and Phase 3 assume a pilot; today any visitor can run reports, download artifacts, and hit cache operator endpoints.</li>
+    <li><strong>LLM singleton.</strong> Still Gemini-only; the Phase 1/2 provider abstraction and model registry were never built.</li>
+    <li><strong>Async runs are in-memory.</strong> <span class="filepath">app/shared/async_runs.py</span> keeps run state in process memory; on Cloud Run with &gt;1 instance or restarts, polling a run created on another instance 404s. Acceptable single-instance, fragile beyond it.</li>
+    <li><strong>Dead alpha artifacts.</strong> <span class="filepath">app/price_data.csv</span> (151&nbsp;MB) and <span class="filepath">app/services/market_monitor/data/price_data.csv</span> are no longer read by any active code path (the CSV loader now raises) but remain on disk and in the Docker build context.</li>
+  </ul>
+
+  <h2 id="cachearch">3. Part B — Cache System As Implemented</h2>
+  <p>Confirmed data flow in the deployed system:</p>
+  <pre><code>Cloud Scheduler ──&gt; Cloud Run Job: python -m app.services.price_cache.refresh_worker run
+  worker.run()
+    ├─ acquire_refresh_lock("weekly_full_refresh", 30 min expiry)
+    ├─ create_cache_version(status='building')
+    ├─ adapter.fetch_units()        ──&gt; 403 ⇒ warning, fall back to units derived from commodities/prices
+    ├─ adapter.fetch_currencies()   ──&gt; hard requirement (failure fails the whole version)
+    └─ per country (SEQUENTIAL):
+         fetch_commodities / fetch_markets / fetch_monthly_price_rows   (official client, paginated)
+         _filter_real_monthly_price_rows   (keep flags: "", actual, aggregate, aggregated)
+         _deduplicate_monthly_price_rows   (key: country, commodity_id, market_id, price_date, price_type_name, price_flag)
+         validate_country_snapshot         (required fields, dup keys, refs, row-drop guard)
+         insert_country_snapshot + record_country_result
+    └─ publish_cache_version: per-country active pointers + global pointer, retention cleanup
+
+Streamlit form ──&gt; dispatcher/router ──&gt; market_monitor/data_loader
+    get_country_metadata():  regions = availability.admin1_names (DISTINCT admin1 from PRICE rows)
+                                        or fallback {admin1 from cached_markets}     ← real names come from here
+    extract_time_series_from_csv():  df["Admin 1"] = price_row.admin1_name or "Unknown"   ← NULL in production
+                                     available_regions = {"Unknown"} ⇒ ValueError</code></pre>
+
+  <p>The schema (<span class="filepath">migrations/postgres/001_initial_cache.sql</span>) stores denormalized price rows including
+  <code>admin1_name</code>, <code>admin2_name</code>, <code>market_name</code>, <code>commodity_name</code> — i.e. the schema was designed for
+  enriched rows, but the enrichment step was never written.</p>
+
+  <h2 id="symptoms">4. Part C — Symptom-By-Symptom Diagnosis Of The Reported Issues</h2>
+
+  <h3>4.1 "Requested regions are not available… Available regions: ['Unknown']" — all countries (→ F1)</h3>
+  <p><strong>Root cause chain, fully verified in code:</strong></p>
+  <ol>
+    <li>The official monthly price model
+    <span class="filepath">venv/…/data_bridges_client/models/view_extended_monthly_aggregated_price.py</span> contains <em>no</em> admin1/admin2
+    properties — its full field list is commodity/market/priceType/unit/currency IDs and names, country, dates, price, observations, flag, source,
+    frequency.</li>
+    <li><code>normalize_monthly_price_row()</code> (<span class="filepath">app/services/price_cache/databridges_adapter.py:505-506</span>) looks for
+    <code>admin1Name/adm1Name/admin1_name/adm1_name</code> — never present — so every normalized row carries <code>admin1_name=None</code>.</li>
+    <li><code>insert_country_snapshot()</code> (<span class="filepath">sql_repository.py:649</span>) writes the NULL through to
+    <code>cached_price_monthly.admin1_name</code>. The worker fetches markets (which <em>do</em> have admin1) into <code>cached_markets</code> but never
+    joins them onto the price rows.</li>
+    <li>At read time, <code>_normalise_cached_price_rows()</code> (<span class="filepath">market_monitor/data_loader.py:745</span>) maps
+    <code>row.admin1_name or "Unknown"</code> — so the report dataframe has <code>Admin 1 == "Unknown"</code> for every row, and
+    <code>get_price_window()</code> (<span class="filepath">sql_repository.py:344</span>) reads only <code>cached_price_monthly</code>, no join.</li>
+    <li>The form's region multiselect, however, is populated from <code>get_country_metadata()</code> →
+    <code>availability.admin1_names</code> (empty, because all price-row admin1 are NULL) → <em>fallback to market metadata</em>
+    (<span class="filepath">data_loader.py:340-342</span>), which returns the real names (Barisal, Kabul, Akkar, …). All regions are selected by
+    default (<span class="filepath">pages/3_Price_Bulletin_Drafter.py:221-226</span>).</li>
+    <li><code>extract_time_series_from_csv()</code> then intersects the submitted names with <code>{"Unknown"}</code> and raises
+    (<span class="filepath">data_loader.py:471-478</span>) — exactly the error reported for BGD, AFG, and LBN.</li>
+  </ol>
+  <p><strong>Why this regressed:</strong> the pre-cache loader explicitly enriched each price row from a market lookup —
+  <code>"Admin 1": market.get("admin1_name") …</code> via <code>_market_lookup()</code> (verified in <code>git show 17a398f~1</code>). The cache
+  migration (commit <code>17a398f</code> "Implement cache-first price bulletin") dropped that join; <code>_market_lookup()</code> survives in the new
+  loader as dead code (<span class="filepath">data_loader.py:837</span>).</p>
+  <p><strong>Why tests did not catch it:</strong> every fixture invents <code>admin1_name</code> directly on price rows
+  (<span class="filepath">fixtures.py:197-202</span>, <span class="filepath">tests/test_price_cache_refresh_worker.py:73-87</span>), a shape the real
+  API never returns. See Section 7.</p>
+
+  <h3>4.2 "Deduplicated N duplicate monthly price row(s) across K canonical key(s)" (→ F2)</h3>
+  <p>The dedup key (<code>CANONICAL_PRICE_KEY_FIELDS</code>, <span class="filepath">validation.py:8-15</span>) and the table primary key
+  (<span class="filepath">migrations/…/001:105-113</span>) are
+  <code>(country, commodity_id, market_id, price_date, price_type_name, price_flag)</code>. They exclude <code>currency_id</code>,
+  <code>commodity_unit_id</code> and <code>price_type_id</code>. Databridges legitimately publishes multiple rows per that key — most obviously
+  dual-currency quotes (Lebanon: LBP and USD for the same commodity/market/month/price-type) and unit variants. The numbers reported are consistent
+  with this: <strong>Lebanon 960 duplicate rows across exactly 960 keys = one dropped row per key = currency pairs</strong>; Afghanistan 9,401/8,377;
+  Bangladesh 7,119/6,624. Commit <code>1092625</code> added the dedup to stop <code>IntegrityError</code> on insert — i.e. the symptom (PK violation)
+  was fixed by silently discarding one of the conflicting series per key, keeping whichever row ranks higher on metadata completeness/observations
+  (<span class="filepath">refresh_worker.py:560-585</span>). Besides losing data, the survivor per key is currency-arbitrary, so a commodity's monthly
+  series can mix currencies across months. The Phase 0 audit explicitly flagged this exact collision risk ("Name-only fields… may not be sufficient
+  for durable uniqueness") — the risk materialized unmodified.</p>
+
+  <h3>4.3 "Excluded N non-real monthly price row(s) … (actual,aggregate=…, forecast=…)" (→ F3, plus by-design behavior)</h3>
+  <p>Two different things are inside these messages:</p>
+  <ul>
+    <li><strong>By design:</strong> <code>forecast</code> rows are excluded (commit <code>337cafb</code>), which is correct for a bulletin grounded in
+    observed prices (AFG 29,366; BGD 11,934; LBN 15,900 forecast rows).</li>
+    <li><strong>Defect:</strong> the flag filter (<span class="filepath">refresh_worker.py:498-512</span>) tests the <em>whole string</em> against
+    <code>{"", "actual", "aggregate", "aggregated"}</code>. Databridges emits composite flags such as <code>"actual,aggregate"</code>; these are real
+    observations but are excluded (BGD 3 rows, AFG 431 rows). The same whole-string test exists at read time
+    (<code>_ALLOWED_PRICE_FLAGS</code>, <span class="filepath">data_loader.py:34</span> and <span class="filepath">:727-729</span>), so even after a
+    backfill these rows would be dropped from reports. The filter should split the flag on commas and check that every component is real.</li>
+  </ul>
+
+  <h3>4.4 "CommodityUnits/List could not be fetched from Databridges (403 Forbidden)" (→ F4)</h3>
+  <p>The Cloud Run job's API credentials are rejected with 403 specifically on <code>CommodityUnits/List</code> (the adapter correctly treats 403 as
+  permanent, <span class="filepath">databridges_adapter.py:20</span>). Commodities, markets, monthly prices, and currencies succeed with the same
+  token, so this is an <strong>API gateway subscription/product entitlement gap</strong> for the CommodityUnits endpoints, not a code bug — it must be
+  resolved with the WFP API gateway team (the Phase 0 audit lists <code>CommodityUnits/List</code> and <code>Conversion/List</code> as required
+  endpoints). The worker's fallback (derive units from commodity and price rows, <span class="filepath">refresh_worker.py:127-139, 607-628</span>)
+  keeps unit <em>names</em> flowing but loses <code>conversion_to_kg_l</code>, which Phase 3's basket work (roadmap phase 5/6) will need.
+  Two cosmetic issues: the sanitizer (<span class="filepath">data_loader.py:1150-1156</span>) hardcodes "(403 Forbidden)" into the user-facing string
+  whatever the actual error was, and the warning is repeated to every officer on every country (see F6).</p>
+
+  <h3>4.5 "Found 66 price metadata references not present in fetched commodities/markets" — Bangladesh (→ F-INFO)</h3>
+  <p>Counted in <span class="filepath">validation.py:98-103</span>: each price row whose <code>commodity_id</code> is missing from
+  <code>Commodities/List</code> counts one reference, and likewise for <code>market_id</code> vs <code>Markets/List</code> — 66 is a reference count,
+  not a row count. Rows are still cached (warning, not error), which is reasonable. Two consequences worth knowing: (a) such commodities cannot be
+  selected in the form (the metadata commodity list comes from <code>cached_commodities</code> filtered to priced IDs,
+  <span class="filepath">data_loader.py:321-324</span>); (b) price rows referencing unknown <code>market_id</code>s will keep
+  <code>admin1=NULL</code> even after the F1 join fix and should be reported per-market in the warning to make triage possible.</p>
+
+  <h3>4.6 "PriceCache contains future-dated monthly prices… capped at the current month (2026-06)" — Bangladesh (→ F5)</h3>
+  <p>After forecast exclusion, BGD still has rows dated after June 2026 with flags in the allowed set (most plausibly <code>aggregate</code> rows built
+  from forecasts upstream, or upstream data-quality slips). Commit <code>3a1a9da</code> handles this at the UI layer only: month options and the
+  latest-cached-date are capped (<span class="filepath">data_loader.py:1170-1183</span>), but the future rows remain in the cache and in
+  <code>cached_countries.latest_price_date</code>, and <code>get_price_window()</code> will happily return them for a window that includes them.
+  Recommended: investigate the offending BGD rows (one SQL query, see Section 6), then either exclude future-dated rows at ingest (with a warning) or
+  store both raw and capped latest dates.</p>
+
+  <h3>4.7 The overall "wall of warnings" (→ F6)</h3>
+  <p>All of the above strings are written into the cache version's <code>validation_summary_json</code> by the worker and re-surfaced verbatim per
+  country by <code>_country_cache_warnings()</code> → <code>metadata.warnings</code> → <code>st.warning(...)</code> on the form
+  (<span class="filepath">pages/3_Price_Bulletin_Drafter.py:150-151</span>) and again inside report generation warnings. These are ETL operator
+  telemetry, not officer-actionable information. The Phase 3 roadmap (phase 7) plans an admin sync-status panel — that is the right home. Officers
+  should see only: cache freshness, coverage of the selected period, and anything affecting <em>their</em> selected commodities/regions.</p>
+
+  <h2 id="findings">5. Part D — Full Findings Register</h2>
+
+  <table>
+    <thead><tr><th>ID</th><th>Severity</th><th>Area</th><th>Finding (evidence)</th><th>Recommendation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>F1</td><td><span class="sev-critical">CRITICAL</span></td><td>Cache ingest / serving</td>
+        <td>Price rows cached with NULL admin1/admin2; market join dropped in cache migration. Evidence: DTO field list; <span class="filepath">databridges_adapter.py:505</span>; <span class="filepath">sql_repository.py:344-382</span> (no join); dead <code>_market_lookup()</code> at <span class="filepath">data_loader.py:837</span>; error raised at <span class="filepath">data_loader.py:471-478</span>.</td>
+        <td>Backfill deployed DB via SQL join (6.1); enrich rows from fetched markets in <code>_refresh_country()</code>; optionally LEFT JOIN + COALESCE in <code>get_price_window()</code> as defense in depth. Add DTO-faithful regression test.</td>
+      </tr>
+      <tr>
+        <td>F2</td><td><span class="sev-high">HIGH</span></td><td>Canonical key / dedup</td>
+        <td>Key omits <code>currency_id</code>, <code>commodity_unit_id</code>, <code>price_type_id</code>; dedup silently collapses distinct series (LBN 960 exact pairs ⇒ dual currency). <span class="filepath">validation.py:8-15</span>, <span class="filepath">refresh_worker.py:463-495</span>, PK in <span class="filepath">migrations 001:105-113</span>. Risk was pre-flagged in <span class="filepath">phase_0_audit.md</span>.</td>
+        <td>Migration 003: extend PK (or unique index) with <code>currency_id</code>, <code>commodity_unit_id</code>, <code>price_type_id</code> (COALESCE for NULLs); extend <code>CANONICAL_PRICE_KEY_FIELDS</code>; keep dedup only for byte-identical residual duplicates; report conflicting-currency keys separately. Decide currency-selection policy at <em>read</em> time (e.g. prefer country currency, surface choice in UI).</td>
+      </tr>
+      <tr>
+        <td>F3</td><td><span class="sev-medium">MEDIUM</span></td><td>Flag filtering</td>
+        <td>Composite flags (<code>"actual,aggregate"</code>) excluded as non-real at ingest (<span class="filepath">refresh_worker.py:498-512</span>) and read (<span class="filepath">data_loader.py:34, 727-729</span>). BGD 3 rows, AFG 431 rows lost.</td>
+        <td>Parse flags as comma-separated sets; keep a row iff all components ∈ {actual, aggregate, aggregated}. Apply in both places; add unit test with <code>"actual,aggregate"</code>.</td>
+      </tr>
+      <tr>
+        <td>F4</td><td><span class="sev-medium">MEDIUM</span></td><td>API entitlement</td>
+        <td><code>CommodityUnits/List</code> 403 with credentials that work for prices/markets/commodities/currencies ⇒ gateway product/scope gap. Fallback loses <code>conversion_to_kg_l</code> (needed for basket phases). Sanitizer hardcodes "403 Forbidden" (<span class="filepath">data_loader.py:1150</span>).</td>
+        <td>Request CommodityUnits endpoints on the gateway subscription (WFP API team). Keep fallback; demote the warning to admin surface; make the sanitizer echo the real status.</td>
+      </tr>
+      <tr>
+        <td>F5</td><td><span class="sev-medium">MEDIUM</span></td><td>Data quality</td>
+        <td>Future-dated rows (BGD) survive ingest after forecast exclusion; only capped in UI (<span class="filepath">data_loader.py:1170-1183</span>); raw future dates persist in rows and <code>cached_countries.latest_price_date</code>.</td>
+        <td>Inspect offending rows (6.4); exclude or cap future-dated rows at ingest with an explicit per-country warning; store capped latest date.</td>
+      </tr>
+      <tr>
+        <td>F6</td><td><span class="sev-medium">MEDIUM</span></td><td>Warnings UX</td>
+        <td>ETL telemetry shown verbatim to officers per country (<span class="filepath">pages/3_…py:150</span>, <span class="filepath">data_loader.py:1020-1147</span>); planned admin sync-status panel (roadmap ph. 7) absent.</td>
+        <td>Split warning audiences: operator warnings → admin panel/<code>/cache/refreshes</code> UI; officer warnings → freshness + coverage of current selection only.</td>
+      </tr>
+      <tr>
+        <td>F7</td><td><span class="sev-medium">MEDIUM</span></td><td>Validation guard</td>
+        <td>Row-drop guard compares post-filter counts against the previous active version's stored counts (<span class="filepath">refresh_worker.py:255-263</span>). The first refresh after adding the forecast filter compares filtered vs unfiltered totals — for forecast-heavy countries (LBN: ~89% forecast) the drop exceeds 25% and the country stays pinned to the stale pre-filter version with no obvious operator signal.</td>
+        <td>Compare like-with-like (store and compare post-filter counts, or version the counting rules); on guard trips, make the operator action explicit (force flag e.g. <code>--accept-drop COUNTRY</code>).</td>
+      </tr>
+      <tr>
+        <td>F8</td><td><span class="sev-medium">MEDIUM</span></td><td>Performance / connections</td>
+        <td><code>_get_price_cache_repository()</code> creates a <em>new</em> SQLAlchemy engine and runs the migration check on <em>every call</em> (<span class="filepath">data_loader.py:936-940</span>, <span class="filepath">router.py:55-66</span>) — connection churn against Cloud SQL on every form interaction; <code>get_supported_countries()</code> issues ~5 queries per country (~75 countries) per cold cache (<span class="filepath">data_loader.py:93-122</span>).</td>
+        <td>Module-level engine singleton (pool) + run migrations once at startup/worker start; replace the N+1 country loop with one aggregate query over <code>cached_countries</code>/availability.</td>
+      </tr>
+      <tr>
+        <td>F9</td><td><span class="sev-low">LOW</span></td><td>Worker throughput / lock</td>
+        <td><code>PRICE_CACHE_REFRESH_MAX_WORKERS</code> is loaded (<span class="filepath">config.py:63</span>) and set in the GCP doc, but the worker loops countries sequentially (<span class="filepath">refresh_worker.py:167-176</span>); only the adapter dry-run is parallel. The 30-min lock lease is never renewed during multi-hour full refreshes, so an overlapping trigger can start a second refresh mid-run.</td>
+        <td>Either honor the setting with a ThreadPoolExecutor over countries, or remove it from config/doc. Renew the lock lease periodically (heartbeat) or size the timeout to worst-case duration.</td>
+      </tr>
+      <tr>
+        <td>F10</td><td><span class="sev-low">LOW</span></td><td>Dead code / shims</td>
+        <td><code>_market_lookup()</code> dead (<span class="filepath">data_loader.py:837</span>); deprecated CSV shims; <code>router._get_food_basket_commodities()</code> unused.</td>
+        <td>Delete after F1 fix lands (or reuse <code>_market_lookup</code> for the enrichment).</td>
+      </tr>
+      <tr>
+        <td>F11</td><td><span class="sev-high">HIGH</span></td><td>Security / build hygiene</td>
+        <td><span class="filepath">app/docker.env</span> contains a plaintext Google API key (<code>AIzaSy…</code>) and is not in <span class="filepath">.dockerignore</span>; <code>COPY . /app</code> bakes it into the Artifact Registry image. Also baked in: the 151&nbsp;MB dead <span class="filepath">app/price_data.csv</span>, <span class="filepath">tests/</span>, <span class="filepath">specs/</span>, <span class="filepath">evals/</span>. Cache operator endpoints are unauthenticated (no auth gate app-wide).</td>
+        <td>Rotate the exposed key; delete <span class="filepath">app/docker.env</span>; extend <span class="filepath">.dockerignore</span> (<code>*.csv</code> data dumps, tests, specs, evals, docs); move secrets to Secret Manager only. Prioritize the Phase 2 auth gate before widening the pilot.</td>
+      </tr>
+      <tr>
+        <td>F12</td><td><span class="sev-low">LOW</span></td><td>Test fidelity</td>
+        <td>Suite green (39 passed) while production is broken: fixtures put <code>admin1_name</code> on price rows (<span class="filepath">fixtures.py:197-202</span>, <span class="filepath">tests/test_price_cache_refresh_worker.py:73-87</span>), a shape the real DTO cannot produce.</td>
+        <td>Make worker/adapter fixtures DTO-faithful (only fields in <code>ViewExtendedMonthlyAggregatedPrice</code>); add end-to-end test "refresh from DTO-shaped rows → metadata regions == report regions".</td>
+      </tr>
+      <tr>
+        <td>F13</td><td><span class="sev-info">INFO</span></td><td>Status semantics</td>
+        <td>After a country-scoped refresh (<code>--country SSD</code>), the <em>global</em> active pointer moves to the new version containing only that country; <code>/cache/status</code> then reports the global version's row totals, under-stating the fleet. Per-country pointers keep serving correct data (reads are safe); only status reporting is misleading.</td>
+        <td>Report fleet status from <code>price_cache_country_active_versions</code> aggregates instead of the global version row.</td>
+      </tr>
+      <tr>
+        <td>F14</td><td><span class="sev-info">INFO</span></td><td>Run-state durability</td>
+        <td>Async run state is in-process memory (<span class="filepath">app/shared/async_runs.py</span>); multi-instance Cloud Run or restarts break status polling mid-generation.</td>
+        <td>Acceptable for single-instance beta; document the constraint (max instances = 1) or move run state to Firestore/DB before scaling.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="remediation">6. Remediation Plan (Prioritized)</h2>
+
+  <h3>6.1 P0 — Unblock report generation today (F1), no re-download needed</h3>
+  <p><strong>Step 1 — backfill the deployed Cloud SQL database</strong> (run once; idempotent; covers every retained version):</p>
+  <pre><code>UPDATE cached_price_monthly p
+SET    admin1_name = m.admin1_name,
+       admin2_name = COALESCE(NULLIF(p.admin2_name, ''), m.admin2_name),
+       market_name = COALESCE(NULLIF(p.market_name, ''), m.market_name)
+FROM   cached_markets m
+WHERE  m.cache_version_id = p.cache_version_id
+  AND  m.country_iso3     = p.country_iso3
+  AND  m.market_id        = p.market_id
+  AND  (p.admin1_name IS NULL OR p.admin1_name = '');</code></pre>
+  <p>Then clear the in-process TTL caches (restart the Cloud Run service, or wait 15 minutes) and verify with:</p>
+  <pre><code>SELECT country_iso3,
+       COUNT(*) FILTER (WHERE admin1_name IS NULL OR admin1_name = '') AS rows_without_admin1,
+       COUNT(*) AS rows_total
+FROM   cached_price_monthly
+GROUP  BY country_iso3 ORDER BY rows_without_admin1 DESC;</code></pre>
+  <p><strong>Step 2 — durable fix in the worker</strong> (<span class="filepath">refresh_worker.py::_refresh_country</span>): after fetching
+  <code>markets</code>, build <code>{market_id: market}</code> and set <code>admin1_name</code>/<code>admin2_name</code> (and
+  <code>market_name</code>/<code>commodity_name</code> fallbacks) on each price row before validation/insert — this restores exactly what the
+  pre-cache loader did via <code>_market_lookup()</code>.</p>
+  <p><strong>Step 3 (optional, defense in depth)</strong> — in <code>get_price_window()</code>, LEFT JOIN <code>cached_markets</code> and
+  <code>COALESCE(p.admin1_name, m.admin1_name)</code> so a future ingest regression cannot blank regions again.</p>
+
+  <h3>6.2 P1 — Stop silent data loss (F2, F3)</h3>
+  <ul>
+    <li>Migration <code>003</code>: extend the <code>cached_price_monthly</code> uniqueness to include <code>currency_id</code>,
+    <code>commodity_unit_id</code>, <code>price_type_id</code> (use <code>COALESCE(x, -1)</code> in a unique index if NULLs are possible); extend
+    <code>CANONICAL_PRICE_KEY_FIELDS</code> identically.</li>
+    <li>Keep <code>_deduplicate_monthly_price_rows</code> only for residual exact duplicates; log keys whose duplicates differ in price as data-quality
+    diagnostics, per market/currency.</li>
+    <li>Define the read-time currency policy before re-running a full refresh (multi-currency countries like Lebanon will then have both series in the
+    cache): simplest is to prefer the country's configured currency in <code>extract_time_series_from_csv</code> and surface the choice in metadata; the
+    bulletin currency field already exists in the form.</li>
+    <li>Fix the flag filter (both worker and loader) to treat comma-composite flags componentwise.</li>
+    <li>Re-run the full refresh after these land. Note F7 first: the drop-ratio guard will compare against pre-fix counts — expect to need the
+    like-for-like comparison fix (or a one-time override) to avoid countries failing validation spuriously.</li>
+  </ul>
+
+  <h3>6.3 P1 — API entitlement (F4)</h3>
+  <p>Open a request with the WFP API gateway team to add <code>CommodityUnits/List</code> (and <code>CommodityUnits/Conversion/List</code>) to the
+  application's subscription for the <code>api://wfp-api-mediation-service/.default</code> scope. The basket phases (roadmap 5–6) need unit
+  conversions; the current fallback only yields unit names.</p>
+
+  <h3>6.4 P2 — Data quality and operator visibility (F5, F6, F7, F13)</h3>
+  <ul>
+    <li>Diagnose BGD future rows:
+    <pre><code>SELECT price_date, price_flag, price_type_name, commodity_name, market_name, COUNT(*)
+FROM cached_price_monthly
+WHERE country_iso3='BGD' AND price_date > date_trunc('month', CURRENT_DATE)
+GROUP BY 1,2,3,4,5 ORDER BY price_date;</code></pre>
+    then decide: exclude at ingest (recommended) or keep + cap (current behavior) with the warning demoted to admin.</li>
+    <li>Build the admin sync-status panel (roadmap phase 7) on top of the existing <code>/market-monitor/cache/refreshes</code> endpoints and move all
+    ETL warnings there; reduce officer-facing warnings to freshness and selection coverage.</li>
+    <li>Fix the drop-guard comparison semantics and the global-pointer status reporting.</li>
+  </ul>
+
+  <h3>6.5 P2 — Security and build hygiene (F11)</h3>
+  <ul>
+    <li><strong>Rotate the Google API key found in <span class="filepath">app/docker.env</span> now</strong> (it ships inside every pushed image), then delete the file.</li>
+    <li>Extend <span class="filepath">.dockerignore</span>: <code>app/price_data.csv</code>, <code>app/services/market_monitor/data/</code>, <code>tests/</code>, <code>specs/</code>, <code>evals/</code>, <code>docs/</code>, <code>*.env</code> except <code>.env.example</code>. Image shrinks by ~150&nbsp;MB.</li>
+    <li>Schedule the auth gate (Phase 2 roadmap phase 1) before widening the pilot; at minimum protect the cache endpoints and bug-report surface.</li>
+  </ul>
+
+  <h3>6.6 P3 — Performance and robustness (F8, F9, F14)</h3>
+  <ul>
+    <li>Cache the SQLAlchemy engine at module level; run migrations once at process start.</li>
+    <li>Replace the per-country availability loop in <code>get_supported_countries()</code> with one aggregate query.</li>
+    <li>Honor <code>PRICE_CACHE_REFRESH_MAX_WORKERS</code> (parallelize per-country refresh) or delete the setting; add lock-lease renewal.</li>
+    <li>Document the single-instance constraint for async runs, or persist run state.</li>
+  </ul>
+
+  <h2 id="testing">7. Test Gaps And Verification Plan</h2>
+  <p>Current state: <code>39 passed, 1 skipped</code> (price cache repository/worker/API, adapter, market-monitor loader) — green while production is
+  broken, because fixtures are not DTO-faithful (F12). Add, in this order:</p>
+  <table>
+    <thead><tr><th>Test</th><th>Asserts</th><th>Guards</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>DTO-faithful refresh → report round trip</td>
+        <td>Worker fed price rows containing <em>only</em> <code>ViewExtendedMonthlyAggregatedPrice</code> fields + markets with admin1; after refresh, <code>get_country_metadata().regions</code> equals the distinct <code>Admin 1</code> values in <code>extract_time_series_from_csv()</code> output, and generation with those regions succeeds.</td>
+        <td>F1 regression</td>
+      </tr>
+      <tr>
+        <td>Dual-currency ingestion</td>
+        <td>Two rows differing only by <code>currency_id</code> both survive refresh and are both retrievable; report path applies the documented currency policy.</td>
+        <td>F2</td>
+      </tr>
+      <tr>
+        <td>Composite flag handling</td>
+        <td><code>"actual,aggregate"</code> rows are kept at ingest and at read; <code>"forecast"</code> and <code>"actual,forecast"</code> are excluded.</td>
+        <td>F3</td>
+      </tr>
+      <tr>
+        <td>Drop-guard like-for-like</td>
+        <td>A refresh whose raw fetch shrinks only because of the flag filter does not trip the 25% guard.</td>
+        <td>F7</td>
+      </tr>
+      <tr>
+        <td>Backfill SQL idempotency (integration, optional)</td>
+        <td>Running the 6.1 UPDATE twice changes zero additional rows; rows with unknown <code>market_id</code> remain NULL and are counted in a warning.</td>
+        <td>Deploy safety</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><strong>Acceptance for closing the incident:</strong> after P0+P1, for BGD/AFG/LBN: (a) form regions equal report-data regions; (b) generation
+  completes; (c) officer-facing warnings reduced to freshness/coverage; (d) Lebanon shows both currencies or the documented selected currency, with no
+  "Deduplicated" warning for currency pairs.</p>
+
+  <h2 id="appendix">8. Appendix — Evidence And Method</h2>
+  <h3>8.1 Files examined</h3>
+  <p>All of: <span class="filepath">specs/phase_1/*, specs/phase_2/*, specs/phase_3/*</span>;
+  <span class="filepath">app/services/price_cache/</span> (config, schemas, repository, sql_repository, databridges_adapter, refresh_worker,
+  validation, fixtures, migrations 001–002 sqlite+postgres); <span class="filepath">app/services/market_monitor/</span> (data_loader, router,
+  graph §data_agent, schemas); <span class="filepath">app/shared/</span> (databridges, countries, llm, async_runs);
+  <span class="filepath">app/streamlit_backend/dispatcher.py</span> (cache routes); <span class="filepath">pages/3_Price_Bulletin_Drafter.py</span>;
+  <span class="filepath">tests/test_price_cache_*.py, test_databridges_adapter.py, test_market_monitor_databridges_loader.py</span>;
+  <span class="filepath">Dockerfile, .dockerignore, cloudbuild.yaml, start.sh, requirements.txt, .env.example, app/docker.env</span>;
+  installed <span class="filepath">data_bridges_client</span> models (monthly price DTO); git history (notably
+  <code>17a398f</code>, <code>1092625</code>, <code>3a1a9da</code>, <code>337cafb</code>, and the pre-cache loader at <code>17a398f~1</code>).</p>
+
+  <h3>8.2 Key evidence chain for F1</h3>
+  <ol>
+    <li>Official DTO <code>ViewExtendedMonthlyAggregatedPrice</code> field list contains no admin fields (package pinned at <code>DataBridgesAPI v8.0.0</code>).</li>
+    <li><code>normalize_monthly_price_row()</code> admin lookups can therefore never match → <code>admin1_name=None</code> on all normalized rows.</li>
+    <li>Worker inserts rows verbatim; no enrichment from the markets it fetched in the same country pass.</li>
+    <li>Serving path maps NULL → "Unknown"; form regions come from market metadata; intersection is empty → the exact ValueError reported.</li>
+    <li>Pre-cache loader (git <code>17a398f~1</code>) enriched price rows via <code>_market_lookup()</code> — confirming the regression point.</li>
+  </ol>
+
+  <h3>8.3 Test run</h3>
+  <pre><code>venv\Scripts\python.exe -m pytest tests\test_price_cache_repository.py tests\test_price_cache_refresh_worker.py \
+    tests\test_price_cache_api.py tests\test_databridges_adapter.py tests\test_market_monitor_databridges_loader.py -q
+→ 39 passed, 1 skipped (17.2s)</code></pre>
+
+  <h3>8.4 Interpretation key for the reported warning counts</h3>
+  <table>
+    <thead><tr><th>Country</th><th>Excluded (forecast)</th><th>Excluded (composite "actual,aggregate")</th><th>Dedup rows / keys</th><th>Reading</th></tr></thead>
+    <tbody>
+      <tr><td>Bangladesh</td><td>11,934</td><td>3</td><td>7,119 / 6,624</td><td>Heavy forecast share; duplicates likely unit/price-type-id variants; 66 dangling metadata references; future-dated rows present.</td></tr>
+      <tr><td>Afghanistan</td><td>29,366</td><td>431</td><td>9,401 / 8,377</td><td>Largest composite-flag loss observed; duplicates likely currency/unit variants.</td></tr>
+      <tr><td>Lebanon</td><td>15,900 (≈89% of fetch)</td><td>0</td><td>960 / 960 (exact pairs)</td><td>Pair-per-key pattern ⇒ dual-currency (LBP/USD) series collapsed to one arbitrary survivor each.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Bottom line:</strong> the cache architecture is the right design and most of it works; the system is failing on one dropped join (F1 —
+    fixable today with a single UPDATE plus a ~15-line worker change), one too-coarse uniqueness key the Phase 0 audit had already warned about (F2),
+    and a handful of filter/UX/guard refinements. None of the findings require abandoning the current approach.
+  </div>
+</body>
+</html>

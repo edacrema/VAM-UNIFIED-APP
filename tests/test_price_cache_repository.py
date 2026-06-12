@@ -6,7 +6,12 @@ from sqlalchemy import inspect
 
 from app.services.price_cache.config import load_price_cache_config
 from app.services.price_cache.fixtures import seed_cache_snapshot
-from app.services.price_cache.migrations import apply_migrations
+from app.services.price_cache.migrations import (
+    MIGRATIONS_ROOT,
+    _ensure_migration_table,
+    _split_sql,
+    apply_migrations,
+)
 from app.services.price_cache.sql_repository import SqlPriceCacheRepository, create_price_cache_engine
 
 
@@ -68,6 +73,71 @@ def test_migrations_create_sqlite_schema(tmp_path):
     assert "price_cache_country_active_versions" in tables
     assert "price_cache_version_countries" in tables
     assert "price_cache_refresh_locks" in tables
+    assert "country_food_basket_current" in tables
+    assert "country_food_basket_versions" in tables
+    assert "country_food_basket_items" in tables
+
+
+def test_migration_003_backfills_admin_metadata_on_legacy_databases(tmp_path):
+    config = load_price_cache_config(
+        {
+            "PRICE_CACHE_BACKEND": "sqlite",
+            "PRICE_CACHE_SQLITE_PATH": str(tmp_path / "legacy_cache.sqlite3"),
+        }
+    )
+    engine = create_price_cache_engine(config)
+
+    # Build a database at schema version 002 with rows shaped like the broken
+    # deployment: price rows whose admin1/admin2 are NULL.
+    with engine.begin() as conn:
+        _ensure_migration_table(conn, "sqlite")
+        for version in ("001_initial_cache", "002_phase3_refresh_worker"):
+            for statement in _split_sql((MIGRATIONS_ROOT / "sqlite" / f"{version}.sql").read_text(encoding="utf-8")):
+                conn.execute(text(statement))
+            conn.execute(
+                text("INSERT INTO price_cache_schema_migrations(version) VALUES (:version)"),
+                {"version": version},
+            )
+        conn.execute(
+            text(
+                """
+                INSERT INTO price_cache_versions (cache_version_id, status, refresh_type, started_at)
+                VALUES ('legacy-version', 'active', 'weekly_full', '2026-06-01T00:00:00+00:00')
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO cached_markets (cache_version_id, country_iso3, market_id, market_name, admin1_name, admin2_name)
+                VALUES ('legacy-version', 'SSD', 10, 'Juba', 'Central Equatoria', 'Juba County')
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO cached_price_monthly (
+                    cache_version_id, country_iso3, commodity_id, market_id, price_date, price,
+                    price_type_name, price_flag, admin1_name, admin2_name, market_name
+                ) VALUES (
+                    'legacy-version', 'SSD', 1, 10, '2025-01-01', 20.0,
+                    'Retail', 'actual', NULL, NULL, NULL
+                )
+                """
+            )
+        )
+
+    applied = apply_migrations(engine, config.backend)
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT admin1_name, admin2_name, market_name FROM cached_price_monthly")
+        ).mappings().first()
+    assert "003_admin_backfill_and_price_key" in applied
+    assert row["admin1_name"] == "Central Equatoria"
+    assert row["admin2_name"] == "Juba County"
+    assert row["market_name"] == "Juba"
 
 
 def test_empty_cache_returns_clear_empty_status(tmp_path):

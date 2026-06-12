@@ -54,6 +54,15 @@ from app.services.market_monitor.data_loader import (
     get_supported_countries as get_market_monitor_supported_countries,
     normalize_country_name,
 )
+from app.services.market_monitor.food_basket import (
+    BasketNotConfigured,
+    BasketValidationError,
+    BasketVersionConflict,
+    get_active_basket_for_report,
+    get_country_basket_response,
+    list_country_basket_history,
+    save_country_basket,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +410,7 @@ def _build_market_monitor_output(
         "document_references": result.get("document_references", []),
         "news_counts": result.get("news_counts", {}),
         "cache_metadata": result.get("cache_metadata", {}),
+        "food_basket": result.get("food_basket", {}),
         "warnings": result.get("warnings", []),
         "llm_calls": result.get("llm_calls", 0),
         "success": True,
@@ -1556,6 +1566,12 @@ def _dispatch_market_monitor(
         return _market_monitor_commodities(params=params)
     if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "metadata":
         return _market_monitor_country_metadata(parts[1])
+    if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
+        return _market_monitor_country_basket(parts[1])
+    if method == "POST" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
+        return _market_monitor_save_country_basket(parts[1], json_body=json_body)
+    if method == "GET" and len(parts) == 4 and parts[0] == "countries" and parts[2] == "basket" and parts[3] == "history":
+        return _market_monitor_country_basket_history(parts[1], params=params)
     raise LocalHTTPException(404, f"Unknown Market Monitor endpoint: {'/'.join(parts)}")
 
 
@@ -1589,7 +1605,14 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
             news_end_date=news_end_date,
             previous_report_text=previous_report_text,
             use_mock_data=use_mock_data,
+            basket_version_id=json_body.get("basket_version_id"),
         )
+    except BasketVersionConflict as exc:
+        raise LocalHTTPException(409, str(exc))
+    except BasketNotConfigured as exc:
+        raise LocalHTTPException(409, str(exc))
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1606,6 +1629,19 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
 def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
     if not isinstance(json_body, dict):
         raise LocalHTTPException(400, "Invalid JSON body")
+
+    if not bool(json_body.get("use_mock_data", False)):
+        try:
+            get_active_basket_for_report(
+                json_body.get("country"),
+                basket_version_id=json_body.get("basket_version_id"),
+            )
+        except BasketVersionConflict as exc:
+            raise LocalHTTPException(409, str(exc))
+        except BasketNotConfigured as exc:
+            raise LocalHTTPException(409, str(exc))
+        except BasketValidationError as exc:
+            raise LocalHTTPException(400, str(exc))
 
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
@@ -1737,6 +1773,7 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                 news_end_date=json_body.get("news_end_date"),
                 previous_report_text=json_body.get("previous_report_text") or "",
                 use_mock_data=bool(json_body.get("use_mock_data", False)),
+                basket_version_id=json_body.get("basket_version_id"),
                 on_step=on_step,
             )
 
@@ -1874,10 +1911,17 @@ def _market_monitor_info() -> Dict[str, Any]:
                 "name": "commodity_list",
                 "type": "array",
                 "required": False,
-                "label": "Commodities",
-                "description": "List of commodities to analyze. Use /countries/{country}/metadata endpoint to get available commodities for a specific country.",
+                "label": "Additional commodities",
+                "description": "Optional commodities to analyze in addition to the active country food basket. Basket commodities are always included.",
                 "default": [],
-                "note": "Defaults are country-specific. Query /countries/{country}/metadata for recommended defaults.",
+                "note": "Query /countries/{country}/basket for the active basket and /countries/{country}/metadata for available additional commodities.",
+            },
+            {
+                "name": "basket_version_id",
+                "type": "string",
+                "required": False,
+                "label": "Basket Version ID",
+                "description": "Optional active basket version guard. Stale versions return a conflict so clients can refresh.",
             },
             {
                 "name": "admin1_list",
@@ -1989,6 +2033,38 @@ def _market_monitor_country_metadata(country: str) -> LocalResponse:
         return _json_response(get_market_monitor_country_metadata(country))
     except PriceCacheUnavailableError as exc:
         raise LocalHTTPException(503, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_country_basket(country: str) -> LocalResponse:
+    try:
+        return _json_response(get_country_basket_response(country))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_save_country_basket(country: str, *, json_body: Any) -> LocalResponse:
+    if not isinstance(json_body, dict):
+        raise LocalHTTPException(400, "Invalid JSON body")
+    try:
+        return _json_response(save_country_basket(country, json_body))
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_country_basket_history(country: str, *, params: Dict[str, Any]) -> LocalResponse:
+    limit = _get_form_value(params, "limit", 20)
+    try:
+        return _json_response(list_country_basket_history(country, limit=int(limit)))
     except ValueError as exc:
         raise LocalHTTPException(404, str(exc))
     except Exception as exc:

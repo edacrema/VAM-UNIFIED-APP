@@ -20,6 +20,30 @@ from streamlit_shared import (
     safe_show_error,
 )
 
+
+def _dedupe_text(values):
+    seen = set()
+    items = []
+    for value in values or []:
+        text = str(value or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            items.append(text)
+    return items
+
+
+def _basket_item_name(item):
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("commodity_name_snapshot") or item.get("commodity_name") or "").strip()
+
+
+def _short_id(value):
+    text = str(value or "")
+    return text[:8] if text else "n/a"
+
+
 st.set_page_config(page_title="Price Bulletin Drafter", layout="wide")
 apply_wfp_theme()
 
@@ -150,6 +174,12 @@ st.caption(
 for warning in metadata.get("warnings") or []:
     st.warning(str(warning))
 
+operator_warnings = metadata.get("operator_warnings") or []
+if operator_warnings:
+    with st.expander("Cache processing notes (for administrators)", expanded=False):
+        for warning in operator_warnings:
+            st.info(str(warning))
+
 date_range = metadata.get("date_range")
 if isinstance(date_range, dict):
     start_s = date_range.get("start")
@@ -177,6 +207,164 @@ if not time_period_options:
 if not commodities:
     st.warning("The selected country has no cached priced commodities.")
     st.stop()
+
+basket_resp = None
+basket_cache = st.session_state.setdefault("mm_country_basket", {})
+if country:
+    basket_resp = basket_cache.get(country)
+    if basket_resp is None:
+        try:
+            basket_resp = request_json(
+                "GET",
+                f"/market-monitor/countries/{quote_path_param(country)}/basket",
+                timeout=30,
+            )
+            basket_cache[country] = basket_resp
+        except Exception as e:
+            basket_resp = None
+            safe_show_error(e)
+
+active_basket = None
+if isinstance(basket_resp, dict):
+    active_basket = basket_resp.get("active_basket")
+    if not isinstance(active_basket, dict):
+        active_basket = None
+
+basket_items = active_basket.get("items") if isinstance(active_basket, dict) else []
+if not isinstance(basket_items, list):
+    basket_items = []
+basket_item_names = _dedupe_text(_basket_item_name(item) for item in basket_items)
+basket_items_by_id = {}
+for item in basket_items:
+    if isinstance(item, dict):
+        try:
+            basket_items_by_id[int(item.get("commodity_id"))] = item
+        except Exception:
+            pass
+
+st.markdown("#### Country Food Basket")
+if active_basket:
+    basket_cols = st.columns(4)
+    basket_cols[0].metric("Basket Version", str(active_basket.get("version_number") or "n/a"))
+    basket_cols[1].metric("Items", str(len(basket_items)))
+    basket_cols[2].metric("Created By", str(active_basket.get("created_by_user_id") or "unknown"))
+    basket_cols[3].metric("Cache Version", _short_id(active_basket.get("cache_version_id_at_creation")))
+    st.caption(
+        "Created: "
+        f"{active_basket.get('created_at') or 'n/a'} | "
+        f"Basket ID: {_short_id(active_basket.get('basket_version_id'))}"
+    )
+    summary_rows = [
+        {
+            "Commodity": _basket_item_name(item),
+            "Quantity": item.get("weight_quantity"),
+            "Unit": item.get("databridges_unit") or item.get("unit"),
+            "Note": item.get("item_note") or "",
+        }
+        for item in basket_items
+        if isinstance(item, dict)
+    ]
+    if summary_rows:
+        st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+else:
+    st.warning("No active food basket exists for this country. Save a basket before generating a bulletin.")
+
+editor_rows = []
+for commodity in raw_commodities:
+    if not isinstance(commodity, dict):
+        continue
+    commodity_id = commodity.get("id")
+    if commodity_id in (None, ""):
+        continue
+    try:
+        commodity_id_int = int(commodity_id)
+    except Exception:
+        continue
+    saved_item = basket_items_by_id.get(commodity_id_int) or {}
+    editor_rows.append(
+        {
+            "Include": bool(saved_item),
+            "Commodity ID": commodity_id_int,
+            "Commodity": str(commodity.get("name") or ""),
+            "Unit": str(commodity.get("unit") or commodity.get("unit_name") or ""),
+            "Quantity": float(saved_item.get("weight_quantity") or 0.0),
+            "Note": str(saved_item.get("item_note") or ""),
+        }
+    )
+
+with st.expander("Edit country food basket", expanded=not bool(active_basket)):
+    st.caption("Saved baskets are shared across users and publish immediately.")
+    column_config = {}
+    if hasattr(st, "column_config"):
+        column_config = {
+            "Include": st.column_config.CheckboxColumn("Include"),
+            "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.1, format="%.3f"),
+            "Note": st.column_config.TextColumn("Note"),
+        }
+    edited_rows = st.data_editor(
+        editor_rows,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=["Commodity ID", "Commodity", "Unit"],
+        column_config=column_config,
+        key=f"mm_basket_editor_{country}_{active_basket.get('basket_version_id') if active_basket else 'new'}",
+    )
+    change_note = st.text_input(
+        "Change note",
+        value="",
+        key=f"mm_basket_change_note_{country}",
+        placeholder="Optional note for this published basket version",
+    )
+    if st.button("Save food basket", type="primary", key=f"mm_save_food_basket_{country}"):
+        save_items = []
+        invalid_rows = []
+        for row in edited_rows or []:
+            if not isinstance(row, dict) or not row.get("Include"):
+                continue
+            try:
+                quantity = float(row.get("Quantity") or 0)
+                commodity_id = int(row.get("Commodity ID"))
+            except Exception:
+                invalid_rows.append(str(row.get("Commodity") or row.get("Commodity ID") or "Unknown"))
+                continue
+            if quantity <= 0:
+                invalid_rows.append(str(row.get("Commodity") or commodity_id))
+                continue
+            save_items.append(
+                {
+                    "commodity_id": commodity_id,
+                    "weight_quantity": quantity,
+                    "item_note": str(row.get("Note") or "").strip() or None,
+                }
+            )
+
+        if invalid_rows:
+            st.error("Selected commodities need a positive quantity: " + ", ".join(invalid_rows))
+        elif not save_items:
+            st.error("Select at least one commodity for the basket.")
+        else:
+            try:
+                basket_resp = request_json(
+                    "POST",
+                    f"/market-monitor/countries/{quote_path_param(country)}/basket",
+                    json_body={
+                        "items": save_items,
+                        "change_note": change_note or None,
+                        "created_by_user_id": "streamlit",
+                    },
+                    timeout=60,
+                )
+                basket_cache[country] = basket_resp
+                active_basket = basket_resp.get("active_basket") if isinstance(basket_resp, dict) else None
+                basket_items = active_basket.get("items") if isinstance(active_basket, dict) else []
+                basket_item_names = _dedupe_text(_basket_item_name(item) for item in basket_items)
+                st.success("Food basket saved and published.")
+            except Exception as e:
+                safe_show_error(e)
+
+if not active_basket:
+    st.info("Report generation is disabled until the country food basket is saved.")
 
 with st.form("market_monitor_form"):
     time_period_index = 0
@@ -211,12 +399,18 @@ with st.form("market_monitor_form"):
 
     valid_commodities = [c for c in commodities if isinstance(c, str)]
     default_candidates = [c for c in default_commodities if c in valid_commodities]
-    commodity_list = st.multiselect(
-        "Commodities",
-        options=valid_commodities,
-        default=default_candidates or valid_commodities,
-        key=f"mm_commodities_{country}" if isinstance(country, str) and country else "mm_commodities",
+    locked_basket_names = [name for name in basket_item_names if name]
+    additional_options = [name for name in valid_commodities if name not in locked_basket_names]
+    default_additional = [name for name in default_candidates if name in additional_options]
+    if locked_basket_names:
+        st.caption("Basket commodities are locked into every run: " + ", ".join(locked_basket_names))
+    additional_commodities = st.multiselect(
+        "Additional commodities",
+        options=additional_options,
+        default=default_additional,
+        key=f"mm_additional_commodities_{country}" if isinstance(country, str) and country else "mm_additional_commodities",
     )
+    commodity_list = _dedupe_text(locked_basket_names + additional_commodities)
 
     admin1_list = st.multiselect(
         "Regions (Admin1)",
@@ -232,7 +426,7 @@ with st.form("market_monitor_form"):
 
     previous_report_text = st.text_area("Previous Report Text (optional)", value="", height=120)
 
-    submitted = st.form_submit_button("Run")
+    submitted = st.form_submit_button("Run", disabled=not bool(active_basket))
 
 if submitted:
     try:
@@ -247,6 +441,7 @@ if submitted:
             "news_end_date": news_end_date or None,
             "previous_report_text": previous_report_text or "",
             "use_mock_data": False,
+            "basket_version_id": active_basket.get("basket_version_id") if isinstance(active_basket, dict) else None,
         }
 
         run_id, final_status, result = run_async_and_poll(

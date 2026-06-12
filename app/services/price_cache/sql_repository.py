@@ -280,12 +280,16 @@ class SqlPriceCacheRepository:
             admin1_rows = conn.execute(
                 text(
                     """
-                    SELECT DISTINCT admin1_name
-                    FROM cached_price_monthly
-                    WHERE cache_version_id = :cache_version_id
-                      AND country_iso3 = :country_iso3
-                      AND admin1_name IS NOT NULL
-                      AND admin1_name <> ''
+                    SELECT DISTINCT
+                        COALESCE(NULLIF(p.admin1_name, ''), m.admin1_name) AS admin1_name
+                    FROM cached_price_monthly p
+                    LEFT JOIN cached_markets m
+                      ON m.cache_version_id = p.cache_version_id
+                     AND m.country_iso3 = p.country_iso3
+                     AND m.market_id = p.market_id
+                    WHERE p.cache_version_id = :cache_version_id
+                      AND p.country_iso3 = :country_iso3
+                      AND COALESCE(NULLIF(p.admin1_name, ''), m.admin1_name) IS NOT NULL
                     ORDER BY admin1_name
                     """
                 ),
@@ -356,10 +360,10 @@ class SqlPriceCacheRepository:
             return []
 
         clauses = [
-            "cache_version_id = :cache_version_id",
-            "country_iso3 = :country_iso3",
-            "price_date >= :start_date",
-            "price_date <= :end_date",
+            "p.cache_version_id = :cache_version_id",
+            "p.country_iso3 = :country_iso3",
+            "p.price_date >= :start_date",
+            "p.price_date <= :end_date",
         ]
         params: Dict[str, Any] = {
             "cache_version_id": active_version_id,
@@ -367,15 +371,44 @@ class SqlPriceCacheRepository:
             "start_date": _date_wire(start_date),
             "end_date": _date_wire(end_date),
         }
-        _add_in_clause(clauses, params, "commodity_id", commodity_ids, "commodity_id")
-        _add_in_clause(clauses, params, "market_id", market_ids, "market_id")
-        _add_in_clause(clauses, params, "admin1_name", admin1_names, "admin1_name")
+        admin1_expr = "COALESCE(NULLIF(p.admin1_name, ''), m.admin1_name)"
+        _add_in_clause(clauses, params, "p.commodity_id", commodity_ids, "commodity_id")
+        _add_in_clause(clauses, params, "p.market_id", market_ids, "market_id")
+        _add_in_clause(clauses, params, admin1_expr, admin1_names, "admin1_name")
 
+        # The PriceMonthly payload has no admin fields, so older cache versions can
+        # hold NULL admin1/admin2 on price rows; market metadata fills the gap.
         query = f"""
-            SELECT *
-            FROM cached_price_monthly
+            SELECT
+                p.cache_version_id,
+                p.country_iso3,
+                p.commodity_id,
+                p.market_id,
+                p.price_date,
+                p.price,
+                p.currency_id,
+                p.currency_code,
+                p.currency_name,
+                p.commodity_unit_id,
+                p.commodity_unit_name,
+                p.price_type_id,
+                p.price_type_name,
+                p.price_flag,
+                p.original_frequency,
+                p.observations,
+                p.source_payload_hash,
+                {admin1_expr} AS admin1_name,
+                COALESCE(NULLIF(p.admin2_name, ''), m.admin2_name) AS admin2_name,
+                COALESCE(NULLIF(p.market_name, ''), m.market_name) AS market_name,
+                p.commodity_name,
+                p.data_source
+            FROM cached_price_monthly p
+            LEFT JOIN cached_markets m
+              ON m.cache_version_id = p.cache_version_id
+             AND m.country_iso3 = p.country_iso3
+             AND m.market_id = p.market_id
             WHERE {' AND '.join(clauses)}
-            ORDER BY price_date, admin1_name, market_name, commodity_name
+            ORDER BY p.price_date, admin1_name, market_name, p.commodity_name
         """
         with self.engine.begin() as conn:
             rows = conn.execute(text(query), params).mappings().all()

@@ -205,3 +205,107 @@ def test_country_metadata_endpoint_reads_cache_without_databridges(monkeypatch):
         {"id": 100, "name": "kg", "conversion_to_kg_l": None, "source": "cached_units"}
     ]
     assert payload["markets"][0]["market_name"] == "Juba"
+
+
+def test_country_basket_endpoint_returns_needs_setup(monkeypatch):
+    monkeypatch.setattr(
+        market_router,
+        "get_country_basket_response",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "needs_setup": True,
+            "active_basket": None,
+        },
+    )
+    client = _client(monkeypatch)
+
+    response = client.get("/countries/South%20Sudan/basket")
+
+    assert response.status_code == 200
+    assert response.json()["needs_setup"] is True
+
+
+def test_country_basket_save_endpoint_validates_payload_shape(monkeypatch):
+    captured = {}
+
+    def fake_save(country, input_data):
+        captured["country"] = country
+        captured["commodity_id"] = input_data.items[0].commodity_id
+        captured["weight_quantity"] = input_data.items[0].weight_quantity
+        captured["created_by_user_id"] = input_data.created_by_user_id
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "needs_setup": False,
+            "active_basket": {
+                "basket_version_id": "new-version",
+                "version_number": 1,
+                "items": [],
+            },
+        }
+
+    monkeypatch.setattr(market_router, "save_country_basket", fake_save)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/countries/South%20Sudan/basket",
+        json={
+            "items": [{"commodity_id": 1, "weight_quantity": 2}],
+            "created_by_user_id": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["active_basket"]["basket_version_id"] == "new-version"
+    assert captured == {
+        "country": "South Sudan",
+        "commodity_id": 1,
+        "weight_quantity": 2.0,
+        "created_by_user_id": "tester",
+    }
+
+
+def test_country_basket_history_endpoint_returns_newest_first(monkeypatch):
+    monkeypatch.setattr(
+        market_router,
+        "list_country_basket_history",
+        lambda country, limit=20: {
+            "country": country,
+            "iso3": "SSD",
+            "versions": [
+                {"basket_version_id": "v2", "version_number": 2},
+                {"basket_version_id": "v1", "version_number": 1},
+            ],
+        },
+    )
+    client = _client(monkeypatch)
+
+    response = client.get("/countries/South%20Sudan/basket/history?limit=2")
+
+    assert response.status_code == 200
+    assert [item["version_number"] for item in response.json()["versions"]] == [2, 1]
+
+
+def test_generate_async_returns_conflict_for_stale_basket_version(monkeypatch):
+    def stale_basket(_country, _basket_version_id=None):
+        raise market_router.BasketVersionConflict("refresh basket")
+
+    monkeypatch.setattr(market_router, "get_active_basket_for_report", stale_basket)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/generate-async",
+        json={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "commodity_list": ["Maize"],
+            "admin1_list": [],
+            "currency_code": "SSP",
+            "enabled_modules": [],
+            "basket_version_id": "old-version",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "refresh basket" in response.json()["detail"]

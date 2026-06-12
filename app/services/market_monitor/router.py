@@ -13,6 +13,16 @@ import logging
 import traceback
 
 from .graph import run_report_generation, AVAILABLE_MODULES
+from .food_basket import (
+    BasketNotConfigured,
+    BasketSaveInput,
+    BasketValidationError,
+    BasketVersionConflict,
+    get_active_basket_for_report,
+    get_country_basket_response,
+    list_country_basket_history,
+    save_country_basket,
+)
 from .schemas import (
     GenerateReportInput,
     GenerateReportOutput,
@@ -149,6 +159,7 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             admin1_list=admin1_list,
             currency_code=input_data.currency_code,
             enabled_modules=input_data.enabled_modules,
+            basket_version_id=input_data.basket_version_id,
             news_start_date=input_data.news_start_date,
             news_end_date=input_data.news_end_date,
             previous_report_text=input_data.previous_report_text,
@@ -172,6 +183,7 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             document_references=result.get("document_references", []),
             news_counts=result.get("news_counts", {}),
             cache_metadata=result.get("cache_metadata", {}),
+            food_basket=result.get("food_basket", {}),
             warnings=result.get("warnings", []),
             llm_calls=result.get("llm_calls", 0),
             success=True
@@ -181,6 +193,10 @@ async def generate_market_monitor(input_data: GenerateReportInput):
 
         return output
 
+    except (BasketNotConfigured, BasketVersionConflict) as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except BasketValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -199,6 +215,14 @@ async def generate_market_monitor_async(
         run_id for polling status
     """
     import uuid
+    if not input_data.use_mock_data:
+        try:
+            get_active_basket_for_report(input_data.country, input_data.basket_version_id)
+        except (BasketNotConfigured, BasketVersionConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except BasketValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     run_id = f"run_{uuid.uuid4().hex[:8]}"
 
     create_run(run_id)
@@ -325,6 +349,7 @@ async def generate_market_monitor_async(
                 admin1_list=admin1_list,
                 currency_code=input_data.currency_code,
                 enabled_modules=input_data.enabled_modules,
+                basket_version_id=input_data.basket_version_id,
                 news_start_date=input_data.news_start_date,
                 news_end_date=input_data.news_end_date,
                 previous_report_text=input_data.previous_report_text,
@@ -459,6 +484,7 @@ async def get_report_result(run_id: str):
         document_references=result.get("document_references", []),
         news_counts=result.get("news_counts", {}),
         cache_metadata=result.get("cache_metadata", {}),
+        food_basket=result.get("food_basket", {}),
         warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
         success=True
@@ -543,10 +569,17 @@ def get_service_info():
                 "name": "commodity_list",
                 "type": "array",
                 "required": False,
-                "label": "Commodities",
-                "description": "List of commodities to analyze. Use /countries/{country}/metadata endpoint to get available commodities for a specific country.",
+                "label": "Additional commodities",
+                "description": "Optional commodities to analyze in addition to the active country food basket. Basket commodities are always included.",
                 "default": [],
-                "note": "Defaults are country-specific. Query /countries/{country}/metadata for recommended defaults."
+                "note": "Query /countries/{country}/basket for the active basket and /countries/{country}/metadata for available additional commodities."
+            },
+            {
+                "name": "basket_version_id",
+                "type": "string",
+                "required": False,
+                "label": "Basket Version ID",
+                "description": "Optional active basket version guard. Stale versions return a conflict so clients can refresh."
             },
             {
                 "name": "admin1_list",
@@ -687,6 +720,38 @@ def get_country_metadata(country: str):
         return get_cached_country_metadata(country)
     except PriceCacheUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/countries/{country}/basket")
+def get_country_food_basket(country: str):
+    try:
+        return get_country_basket_response(country)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/countries/{country}/basket")
+def save_country_food_basket(country: str, input_data: BasketSaveInput):
+    try:
+        return save_country_basket(country, input_data)
+    except BasketValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/countries/{country}/basket/history")
+def get_country_food_basket_history(country: str, limit: int = 20):
+    try:
+        return list_country_basket_history(country, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:

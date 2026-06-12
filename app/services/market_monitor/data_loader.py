@@ -31,7 +31,18 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 _CACHE_TTL_SECONDS = 15 * 60
 _RECENT_METADATA_MONTHS = 36
-_ALLOWED_PRICE_FLAGS = {"actual", "aggregate", "aggregated", ""}
+_REAL_PRICE_FLAG_COMPONENTS = {"actual", "aggregate", "aggregated"}
+
+# Worker-side ETL telemetry that operators need but officers should not be
+# shown as report warnings.
+_OPERATOR_WARNING_MARKERS = (
+    "CommodityUnits/List",
+    "price metadata references",
+    "non-real monthly price row",
+    "future-dated monthly price row",
+    "duplicate monthly price",
+    "conflicting price values",
+)
 
 _COUNTRY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _COMMODITY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -345,7 +356,7 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
         availability.date_end,
         availability.latest_price_date,
     )
-    warnings = _cache_warnings(status, country_iso3=iso3)
+    warnings, operator_warnings = _split_warning_audiences(_cache_warnings(status, country_iso3=iso3))
     if date_range is None:
         warnings.append(f"PriceCache has no monthly price date range for {country_name}.")
     if has_future_dates:
@@ -381,6 +392,7 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
         "source": "PriceCache",
         "cache_status": _cache_status_dict(status),
         "warnings": warnings,
+        "operator_warnings": operator_warnings,
     }
     _cache_set(_METADATA_CACHE, iso3, metadata)
     return dict(metadata)
@@ -401,6 +413,7 @@ def get_cache_metadata_for_report(country: str) -> Dict[str, Any]:
         "activated_at": status.get("activated_at"),
         "completed_at": status.get("completed_at"),
         "warnings": metadata.get("warnings") or [],
+        "operator_warnings": metadata.get("operator_warnings") or [],
     }
 
 
@@ -412,6 +425,8 @@ def extract_time_series_from_csv(
     csv_path: Optional[Path] = None,
     lookback_months: int = 13,
     return_raw_rows: bool = False,
+    currency_code: Optional[str] = None,
+    basket_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame] | Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Compatibility wrapper that returns PriceCache price time series."""
     if csv_path is not None:
@@ -424,6 +439,14 @@ def extract_time_series_from_csv(
     full_date_index = pd.date_range(start=start_date, end=target_date, freq="MS")
 
     valid_names, commodity_ids, missing = _resolve_commodities(canonical, iso3, commodities)
+    basket_components = _normalise_basket_components(basket_items)
+    for component in basket_components:
+        name = component["commodity_name"]
+        commodity_id = component["commodity_id"]
+        if name not in valid_names:
+            valid_names.append(name)
+        if commodity_id not in commodity_ids:
+            commodity_ids.append(commodity_id)
     if missing:
         logger.warning("Requested commodities not available in PriceCache for %s: %s", canonical, missing)
     if not valid_names:
@@ -449,6 +472,23 @@ def extract_time_series_from_csv(
     if df.empty:
         raise ValueError(f"No PriceCache price rows matched the requested commodities: {valid_names}")
 
+    df, selected_currency, excluded_currencies = _select_report_currency(
+        df,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    if excluded_currencies:
+        logger.warning(
+            "Multiple currencies present in PriceCache rows for %s; report uses %s and excludes %s.",
+            canonical,
+            selected_currency,
+            excluded_currencies,
+        )
+    if df.empty:
+        raise ValueError(
+            f"No PriceCache price rows remained for {canonical} after selecting a single report currency."
+        )
+
     df["Month"] = df["Price Date"].dt.to_period("M").dt.to_timestamp()
 
     national_pivot = df.pivot_table(
@@ -462,8 +502,25 @@ def extract_time_series_from_csv(
         if name not in national_pivot.columns:
             national_pivot[name] = np.nan
     national_pivot = national_pivot[valid_names].round(2)
-    national_pivot["FoodBasket"] = national_pivot[valid_names].sum(axis=1, skipna=True).round(2)
-    national_pivot.loc[national_pivot[valid_names].isna().all(axis=1), "FoodBasket"] = np.nan
+    if basket_components:
+        basket_by_id = df.pivot_table(
+            index="Month",
+            columns="Commodity ID",
+            values="Price",
+            aggfunc="mean",
+        ).reindex(full_date_index)
+        basket_component_ids = [component["commodity_id"] for component in basket_components]
+        weighted_components = pd.DataFrame(index=full_date_index)
+        for component in basket_components:
+            commodity_id = component["commodity_id"]
+            if commodity_id not in basket_by_id.columns:
+                basket_by_id[commodity_id] = np.nan
+            weighted_components[commodity_id] = basket_by_id[commodity_id] * component["weight_quantity"]
+        national_pivot["FoodBasket"] = weighted_components.sum(axis=1, skipna=True).round(2)
+        national_pivot.loc[basket_by_id[basket_component_ids].isna().all(axis=1), "FoodBasket"] = np.nan
+    else:
+        national_pivot["FoodBasket"] = national_pivot[valid_names].sum(axis=1, skipna=True).round(2)
+        national_pivot.loc[national_pivot[valid_names].isna().all(axis=1), "FoodBasket"] = np.nan
     national_pivot["ExchangeRate"] = np.nan
     national_pivot["FuelPrice"] = np.nan
     national_pivot.index.name = "Date"
@@ -480,15 +537,37 @@ def extract_time_series_from_csv(
         valid_regions = available_regions
 
     df_regional_data = df[df["Admin 1"].isin(valid_regions)].copy()
-    regional_agg = (
-        df_regional_data.groupby(["Month", "Admin 1", "Commodity"], dropna=True)["Price"]
-        .mean()
-        .reset_index()
-        .groupby(["Month", "Admin 1"], dropna=True)["Price"]
-        .sum()
-        .reset_index()
-    )
-    regional_agg.columns = ["Date", "Region", "FoodBasket"]
+    if basket_components:
+        weights_by_id = {component["commodity_id"]: component["weight_quantity"] for component in basket_components}
+        regional_components = (
+            df_regional_data[df_regional_data["Commodity ID"].isin(weights_by_id.keys())]
+            .groupby(["Month", "Admin 1", "Commodity ID"], dropna=True)["Price"]
+            .mean()
+            .reset_index()
+        )
+        if not regional_components.empty:
+            regional_components["ComponentValue"] = regional_components.apply(
+                lambda row: float(row["Price"]) * weights_by_id.get(int(row["Commodity ID"]), 0.0),
+                axis=1,
+            )
+            regional_agg = (
+                regional_components.groupby(["Month", "Admin 1"], dropna=True)["ComponentValue"]
+                .sum()
+                .reset_index()
+            )
+        else:
+            regional_agg = pd.DataFrame(columns=["Month", "Admin 1", "ComponentValue"])
+        regional_agg.columns = ["Date", "Region", "FoodBasket"]
+    else:
+        regional_agg = (
+            df_regional_data.groupby(["Month", "Admin 1", "Commodity"], dropna=True)["Price"]
+            .mean()
+            .reset_index()
+            .groupby(["Month", "Admin 1"], dropna=True)["Price"]
+            .sum()
+            .reset_index()
+        )
+        regional_agg.columns = ["Date", "Region", "FoodBasket"]
     regional_agg["FoodBasket"] = regional_agg["FoodBasket"].round(2)
 
     regional_index = pd.MultiIndex.from_product(
@@ -534,6 +613,7 @@ extract_time_series_from_databridges = extract_time_series_from_csv
 def calculate_statistics_from_csv(
     df_national: pd.DataFrame,
     commodities: List[str],
+    food_basket_components: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     stats: Dict[str, Any] = {
         "food_basket": {},
@@ -549,7 +629,17 @@ def calculate_statistics_from_csv(
     current = df_national.iloc[current_idx]
     mom = df_national.iloc[mom_idx]
     yoy = df_national.iloc[yoy_idx]
-    selected_components = [commodity for commodity in commodities if commodity in df_national.columns]
+    basket_components = _normalise_basket_components(food_basket_components)
+    if basket_components:
+        selected_components = [
+            component["commodity_name"]
+            for component in basket_components
+            if component["commodity_name"] in df_national.columns
+        ]
+        configured_components = [component["commodity_name"] for component in basket_components]
+    else:
+        selected_components = [commodity for commodity in commodities if commodity in df_national.columns]
+        configured_components = list(selected_components)
     historical_components = [
         commodity for commodity in selected_components if df_national[commodity].notna().any()
     ]
@@ -577,10 +667,17 @@ def calculate_statistics_from_csv(
             item.update(
                 {
                     "selected_component_count": len(selected_components),
+                    "selected_component_names": selected_components,
+                    "configured_component_count": len(configured_components),
+                    "configured_component_names": configured_components,
                     "historical_component_count": len(historical_components),
+                    "historical_component_names": historical_components,
                     "latest_component_count": len(latest_components),
                     "latest_component_names": latest_components,
+                    "available_component_count": len(latest_components),
+                    "available_component_names": latest_components,
                     "missing_latest_component_names": missing_latest_components,
+                    "missing_component_names": missing_latest_components,
                 }
             )
             stats["food_basket"] = item
@@ -596,6 +693,7 @@ def check_data_availability(
     time_period: str,
     commodities: List[str],
     csv_path: Optional[Path] = None,
+    currency_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     if csv_path is not None:
         logger.info("Ignoring csv_path=%s because PriceCache is now the price source.", csv_path)
@@ -628,6 +726,22 @@ def check_data_availability(
             warnings.append(f"PriceCache price data has gaps in {len(data_gaps)} month(s): {data_gaps}.")
         if metadata.get("date_range") is None:
             warnings.append(f"PriceCache returned no monthly price date range for {metadata.get('country')}.")
+
+        if not df.empty and "Currency" in df.columns:
+            currencies_present = sorted(
+                {str(value) for value in df["Currency"].dropna().astype(str) if str(value).strip()}
+            )
+            if len(currencies_present) > 1:
+                _, selected_currency, _excluded = _select_report_currency(
+                    df,
+                    requested_code=currency_code,
+                    country=canonical,
+                )
+                warnings.append(
+                    f"Cached prices for {metadata.get('country')} are quoted in multiple currencies "
+                    f"({', '.join(currencies_present)}). Report calculations use a single currency "
+                    f"({selected_currency}); rows in other currencies are excluded."
+                )
 
         return {
             "available": True,
@@ -725,7 +839,7 @@ def _normalise_cached_price_rows(
     records = []
     for row in _sort_cached_price_rows(rows):
         flag = str(row.price_flag or "").strip().lower()
-        if flag and flag not in _ALLOWED_PRICE_FLAGS:
+        if not _is_real_price_flag(flag):
             continue
 
         price = pd.to_numeric(row.price, errors="coerce")
@@ -748,7 +862,8 @@ def _normalise_cached_price_rows(
                 "Market ID": row.market_id,
                 "Unit": row.commodity_unit_name or "",
                 "Currency": row.currency_name or row.currency_code or "",
-                "Data Type": "Aggregated" if flag == "aggregate" else (flag.title() if flag else ""),
+                "Currency Code": row.currency_code or "",
+                "Data Type": _data_type_from_flag(flag),
                 "Price Flag": flag,
                 "Observations": row.observations,
                 "Data Source": row.data_source or "PriceCache",
@@ -769,6 +884,7 @@ def _normalise_cached_price_rows(
         "Market ID",
         "Unit",
         "Currency",
+        "Currency Code",
         "Data Type",
         "Price Flag",
         "Observations",
@@ -866,6 +982,36 @@ def _cached_price_sort_key(row: MonthlyPriceRecord) -> tuple[Any, ...]:
 def _commodity_sort_key(item: dict[str, Any]) -> tuple[str, int]:
     commodity_id = _to_int(item.get("id"))
     return (str(item.get("name") or "").strip().lower(), commodity_id if commodity_id is not None else 10**12)
+
+
+def _normalise_basket_components(items: Optional[List[Dict[str, Any]]]) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        commodity_id = _to_int(item.get("commodity_id"))
+        name = str(
+            item.get("commodity_name_snapshot")
+            or item.get("commodity_name")
+            or item.get("name")
+            or ""
+        ).strip()
+        weight = _to_float(item.get("weight_quantity"))
+        if commodity_id is None or not name or weight is None or weight <= 0:
+            continue
+        if commodity_id in seen:
+            continue
+        seen.add(commodity_id)
+        components.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": name,
+                "weight_quantity": weight,
+                "databridges_unit": item.get("databridges_unit") or item.get("unit"),
+            }
+        )
+    return components
 
 
 def _resolve_commodities(
@@ -1024,7 +1170,7 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
         return _country_cache_warnings(raw_items, country_iso3=country_iso3, error_message=status.error_message)
 
     warnings: list[str] = []
-    unit_warning = False
+    unit_warning: Optional[str] = None
     metadata_reference_countries = 0
     metadata_reference_count = 0
     dedup_countries: set[str] = set()
@@ -1047,7 +1193,7 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
         if warning:
             sanitized = _sanitize_cache_warning(str(warning))
             if "CommodityUnits/List" in sanitized:
-                unit_warning = True
+                unit_warning = unit_warning or sanitized
             else:
                 other_warnings.append(sanitized)
 
@@ -1083,10 +1229,7 @@ def _cache_warnings(status: CacheStatus, *, country_iso3: str | None = None) -> 
             other_warnings.append(_sanitize_cache_warning(text))
 
     if unit_warning:
-        warnings.append(
-            "CommodityUnits/List could not be fetched from Databridges (403 Forbidden); "
-            "commodity units were derived from commodity and monthly price rows where available."
-        )
+        warnings.append(unit_warning)
     if metadata_reference_countries:
         warnings.append(
             "Price metadata references were missing from current commodity/market metadata for "
@@ -1148,12 +1291,10 @@ def _country_cache_warnings(
 
 
 def _sanitize_cache_warning(warning: str) -> str:
-    if "CommodityUnits/List" in warning:
-        return (
-            "CommodityUnits/List could not be fetched from Databridges (403 Forbidden); "
-            "commodity units were derived from commodity and monthly price rows where available."
-        )
-    return warning
+    text_value = str(warning).strip()
+    if len(text_value) > 500:
+        text_value = text_value[:497] + "..."
+    return text_value
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -1248,12 +1389,93 @@ def _empty_price_df() -> pd.DataFrame:
             "Market ID",
             "Unit",
             "Currency",
+            "Currency Code",
             "Data Type",
             "Price Flag",
             "Observations",
             "Data Source",
         ]
     )
+
+
+def _is_real_price_flag(flag: Any) -> bool:
+    normalized = str(flag or "").strip().lower()
+    if not normalized:
+        return True
+    components = [component.strip() for component in normalized.split(",") if component.strip()]
+    return bool(components) and all(component in _REAL_PRICE_FLAG_COMPONENTS for component in components)
+
+
+def _data_type_from_flag(flag: str) -> str:
+    components = [component.strip() for component in str(flag or "").split(",") if component.strip()]
+    if any(component in {"aggregate", "aggregated"} for component in components):
+        return "Aggregated"
+    if components:
+        return components[0].title()
+    return ""
+
+
+def _select_report_currency(
+    df: pd.DataFrame,
+    *,
+    requested_code: Optional[str] = None,
+    country: Optional[str] = None,
+) -> tuple[pd.DataFrame, Optional[str], list[str]]:
+    """Restrict a price dataframe to a single currency.
+
+    Databridges can quote the same series in several currencies (e.g. LBP and
+    USD in Lebanon); averaging across them would corrupt every statistic, so one
+    currency is selected per report: the requested currency if present, then the
+    country default, then the most frequent currency in the data.
+    """
+    if df.empty or "Currency" not in df.columns:
+        return df, None, []
+
+    labels = df["Currency"].fillna("").astype(str)
+    codes = (
+        df["Currency Code"].fillna("").astype(str)
+        if "Currency Code" in df.columns
+        else labels
+    )
+    distinct_labels = sorted({label for label in labels if label.strip()})
+    if len(distinct_labels) <= 1:
+        return df, (distinct_labels[0] if distinct_labels else None), []
+
+    preferences: list[str] = []
+    if requested_code:
+        preferences.append(str(requested_code))
+    default_currency = COUNTRY_CURRENCIES.get(country or "")
+    if default_currency:
+        preferences.extend([default_currency.get("code") or "", default_currency.get("name") or ""])
+
+    selected_label: Optional[str] = None
+    for preference in preferences:
+        if not str(preference).strip():
+            continue
+        match_mask = (codes.str.lower() == str(preference).lower()) | (
+            labels.str.lower() == str(preference).lower()
+        )
+        if match_mask.any():
+            selected_label = labels[match_mask].iloc[0]
+            break
+    if selected_label is None:
+        selected_label = labels[labels.str.strip() != ""].value_counts().idxmax()
+
+    excluded = sorted(set(distinct_labels) - {selected_label})
+    return df[labels == selected_label].copy(), selected_label, excluded
+
+
+def _split_warning_audiences(warnings: list[str]) -> tuple[list[str], list[str]]:
+    """Separate officer-relevant warnings from refresh-worker ETL telemetry."""
+    user_warnings: list[str] = []
+    operator_warnings: list[str] = []
+    for warning in warnings:
+        text_value = str(warning)
+        if any(marker in text_value for marker in _OPERATOR_WARNING_MARKERS):
+            operator_warnings.append(text_value)
+        else:
+            user_warnings.append(text_value)
+    return user_warnings, operator_warnings
 
 
 def _field(row: dict[str, Any], *names: str, default: Any = None) -> Any:

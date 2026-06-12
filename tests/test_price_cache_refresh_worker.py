@@ -35,11 +35,24 @@ def _config():
 
 
 class FakeAdapter:
-    def __init__(self, *, fail_countries=None, duplicate_countries=None, forecast_countries=None, fail_units=False):
+    def __init__(
+        self,
+        *,
+        fail_countries=None,
+        duplicate_countries=None,
+        forecast_countries=None,
+        composite_flag_countries=None,
+        future_countries=None,
+        dual_currency_countries=None,
+        fail_units=False,
+    ):
         self.config = SimpleNamespace(base_url="https://databridges.test", env="prod")
         self.fail_countries = set(fail_countries or [])
         self.duplicate_countries = set(duplicate_countries or [])
         self.forecast_countries = set(forecast_countries or [])
+        self.composite_flag_countries = set(composite_flag_countries or [])
+        self.future_countries = set(future_countries or [])
+        self.dual_currency_countries = set(dual_currency_countries or [])
         self.fail_units = fail_units
 
     def fetch_units(self):
@@ -77,6 +90,8 @@ class FakeAdapter:
 
     def fetch_monthly_price_rows(self, country_iso3, **kwargs):
         self._maybe_fail(country_iso3)
+        # DTO-faithful: the real PriceMonthly payload carries no admin1/admin2
+        # fields, so the fake must not invent them either.
         rows = [
             {
                 "country_iso3": country_iso3,
@@ -84,7 +99,6 @@ class FakeAdapter:
                 "commodity_name": "Maize",
                 "market_id": 10,
                 "market_name": f"{country_iso3} Market",
-                "admin1_name": "Central",
                 "price_date": "2025-01-01",
                 "price": 20.0,
                 "currency_id": 200,
@@ -109,6 +123,36 @@ class FakeAdapter:
                     price=30.0,
                     price_flag="forecast",
                     source_payload_hash=f"{country_iso3}-forecast",
+                )
+            )
+        if country_iso3 in self.composite_flag_countries:
+            rows.append(
+                dict(
+                    rows[0],
+                    price_date="2025-02-01",
+                    price=22.0,
+                    price_flag="actual,aggregate",
+                    source_payload_hash=f"{country_iso3}-composite",
+                )
+            )
+        if country_iso3 in self.future_countries:
+            rows.append(
+                dict(
+                    rows[0],
+                    price_date="2030-01-01",
+                    price=44.0,
+                    source_payload_hash=f"{country_iso3}-future",
+                )
+            )
+        if country_iso3 in self.dual_currency_countries:
+            rows.append(
+                dict(
+                    rows[0],
+                    price=0.5,
+                    currency_id=201,
+                    currency_code="USD",
+                    currency_name="US Dollar",
+                    source_payload_hash=f"{country_iso3}-usd",
                 )
             )
         return rows
@@ -144,7 +188,95 @@ def test_refresh_worker_promotes_all_successful_countries(tmp_path):
     assert summary["countries_successful"] == 2
     assert repo.get_cache_status().active_country_count == 2
     assert repo.get_active_version_id_for_country("AAA") == summary["cache_version_id"]
-    assert repo.get_price_window("BBB", "2025-01-01", "2025-01-01")[0].price == 20.0
+    cached_row = repo.get_price_window("BBB", "2025-01-01", "2025-01-01")[0]
+    assert cached_row.price == 20.0
+    assert cached_row.admin1_name == "Central"
+
+
+def test_refresh_worker_enriches_price_rows_with_market_admin_metadata(tmp_path):
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    worker.run(triggered_by="pytest")
+    rows = repo.get_price_window("AAA", "2025-01-01", "2025-01-01")
+
+    # The PriceMonthly DTO has no admin fields; admin1 must come from Markets/List.
+    assert rows[0].admin1_name == "Central"
+    assert rows[0].market_name == "AAA Market"
+
+
+def test_refresh_worker_keeps_composite_real_price_flags(tmp_path):
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(composite_flag_countries={"AAA"}),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    summary = worker.run(triggered_by="pytest")
+    rows = repo.get_price_window("AAA", "2025-01-01", "2025-02-01")
+
+    assert summary["status"] == "active"
+    assert summary["rows_prices"] == 2
+    assert {row.price_flag for row in rows} == {"actual", "actual,aggregate"}
+    assert not any(
+        "non-real monthly price row" in nested
+        for warning in summary["warnings"]
+        for nested in warning.get("warnings", [])
+    )
+
+
+def test_refresh_worker_excludes_future_dated_price_rows(tmp_path, monkeypatch):
+    from datetime import date
+
+    from app.services.price_cache import refresh_worker as refresh_worker_module
+
+    monkeypatch.setattr(refresh_worker_module, "_current_month_start", lambda: date(2026, 6, 1))
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(future_countries={"AAA"}),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    summary = worker.run(triggered_by="pytest")
+    rows = repo.get_price_window("AAA", "2025-01-01", "2030-12-01")
+    refresh = repo.get_cache_refresh(summary["cache_version_id"])
+
+    assert summary["status"] == "active"
+    assert summary["rows_prices"] == 1
+    assert [row.price_date.isoformat() for row in rows] == ["2025-01-01"]
+    assert any(
+        "future-dated monthly price row" in nested
+        for warning in summary["warnings"]
+        for nested in warning.get("warnings", [])
+    )
+    assert refresh.countries[0].latest_price_date.isoformat() == "2025-01-01"
+
+
+def test_refresh_worker_keeps_dual_currency_rows_without_deduplication(tmp_path):
+    repo = _repo(tmp_path)
+    worker = _worker(
+        repo,
+        FakeAdapter(dual_currency_countries={"AAA"}),
+        [{"iso3": "AAA", "name": "Alpha", "currency_code": "AAA", "currency_name": "Alpha Currency"}],
+    )
+
+    summary = worker.run(triggered_by="pytest")
+    rows = repo.get_price_window("AAA", "2025-01-01", "2025-01-01")
+
+    assert summary["status"] == "active"
+    assert summary["rows_prices"] == 2
+    assert {(row.currency_code, row.price) for row in rows} == {("SSP", 20.0), ("USD", 0.5)}
+    assert not any(
+        "Deduplicated" in nested
+        for warning in summary["warnings"]
+        for nested in warning.get("warnings", [])
+    )
 
 
 def test_refresh_worker_partial_success_keeps_failed_country_previous_data(tmp_path):

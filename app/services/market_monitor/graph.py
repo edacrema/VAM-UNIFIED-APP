@@ -41,6 +41,7 @@ from .data_loader import (
     calculate_statistics_from_csv,
     check_data_availability,
 )
+from .food_basket import get_active_basket_for_report
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class MarketReportState(TypedDict):
     news_start_date: Optional[str]
     news_end_date: Optional[str]
     commodity_list: List[str]
+    basket_version_id: Optional[str]
     admin1_list: List[str]
     previous_report_text: str
     currency_code: str
@@ -117,6 +119,7 @@ class MarketReportState(TypedDict):
     data_statistics: Optional[Dict[str, Any]]
     databridges_rows: List[Dict[str, Any]]
     cache_metadata: Dict[str, Any]
+    food_basket: Dict[str, Any]
     visualizations: Dict[str, str]  # Base64 images
 
     # ===== BRANCH 2 OUTPUTS (Contextual Intelligence) =====
@@ -152,6 +155,7 @@ def create_initial_state(
     admin1_list: List[str],
     currency_code: str,
     enabled_modules: List[str],
+    basket_version_id: Optional[str] = None,
     news_start_date: Optional[str] = None,
     news_end_date: Optional[str] = None,
     previous_report_text: str = "",
@@ -164,6 +168,7 @@ def create_initial_state(
         news_start_date=news_start_date,
         news_end_date=news_end_date,
         commodity_list=commodity_list,
+        basket_version_id=basket_version_id,
         admin1_list=admin1_list,
         previous_report_text=previous_report_text,
         currency_code=currency_code,
@@ -174,6 +179,7 @@ def create_initial_state(
         data_statistics=None,
         databridges_rows=[],
         cache_metadata={},
+        food_basket={},
         visualizations={},
         documents=[],
         document_references=[],
@@ -293,6 +299,21 @@ def _chunk_list(items: List[str], size: int) -> List[List[str]]:
     out: List[List[str]] = []
     for i in range(0, len(items), size):
         out.append(items[i : i + size])
+    return out
+
+
+def _dedupe_text(items: List[Any]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for item in items or []:
+        text_value = str(item or "").strip()
+        if not text_value:
+            continue
+        key = text_value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text_value)
     return out
 
 
@@ -687,22 +708,13 @@ def node_data_agent(state: MarketReportState) -> dict:
 
     country = state["country"]
     use_mock = state.get("use_mock_data", False)
-    commodity_list = state.get("commodity_list", []) or []
-
-    if not commodity_list and not use_mock:
-        from .data_loader import (
-            get_available_commodities,
-        )
-        try:
-            available = get_available_commodities(country)
-            commodity_list = _select_default_commodities(available)
-            logger.info(f"[DataAgent] Auto-selected commodities: {commodity_list}")
-        except Exception as e:
-            raise RuntimeError(f"Could not auto-select PriceCache commodities: {e}") from e
+    requested_commodities = state.get("commodity_list", []) or []
+    commodity_list = _dedupe_text(requested_commodities)
 
     warnings = []
     databridges_rows: List[Dict[str, Any]] = []
     cache_metadata: Dict[str, Any] = {}
+    food_basket: Dict[str, Any] = {}
     
     if use_mock:
         # =====================================================================
@@ -724,11 +736,24 @@ def node_data_agent(state: MarketReportState) -> dict:
         logger.info("[DataAgent] Loading data from PriceCache")
         
         try:
+            food_basket = get_active_basket_for_report(
+                state["country"],
+                basket_version_id=state.get("basket_version_id"),
+            )
+            basket_items = list(food_basket.get("items") or [])
+            basket_commodities = [
+                str(item.get("commodity_name_snapshot") or item.get("commodity_name") or "")
+                for item in basket_items
+                if isinstance(item, dict)
+            ]
+            commodity_list = _dedupe_text(basket_commodities + commodity_list)
+
             # First, check what data is available
             availability = check_data_availability(
                 country=state["country"],
                 time_period=state["time_period"],
-                commodities=commodity_list
+                commodities=commodity_list,
+                currency_code=state.get("currency_code"),
             )
             
             # If country not available, raise error
@@ -750,14 +775,27 @@ def node_data_agent(state: MarketReportState) -> dict:
                 commodities=commodity_list,
                 admin1_list=state["admin1_list"],
                 return_raw_rows=True,
+                currency_code=state.get("currency_code"),
+                basket_items=basket_items,
             )
             databridges_rows = json.loads(df_raw.to_json(orient="records", date_format="iso"))
             
             # Calculate statistics using the existing report statistics contract
             stats = calculate_statistics_from_csv(
                 df_national, 
-                commodity_list
+                commodity_list,
+                food_basket_components=basket_items,
             )
+            basket_metadata = {
+                "basket_version_id": food_basket.get("basket_version_id"),
+                "basket_version_number": food_basket.get("version_number"),
+                "basket_created_at": food_basket.get("created_at"),
+                "basket_created_by_user_id": food_basket.get("created_by_user_id"),
+                "basket_cache_version_id_at_creation": food_basket.get("cache_version_id_at_creation"),
+                "basket_change_note": food_basket.get("change_note"),
+                "basket_items": basket_items,
+            }
+            cache_metadata = {**cache_metadata, **basket_metadata}
             food_basket_stats = stats.get("food_basket", {}) if isinstance(stats, dict) else {}
             missing_latest_components = food_basket_stats.get("missing_latest_component_names") or []
             selected_component_count = food_basket_stats.get("selected_component_count")
@@ -790,6 +828,7 @@ def node_data_agent(state: MarketReportState) -> dict:
         "data_statistics": stats,
         "databridges_rows": databridges_rows,
         "cache_metadata": cache_metadata,
+        "food_basket": food_basket,
         "warnings": warnings,
         "current_node": "data_agent"
     }
@@ -1587,6 +1626,7 @@ def run_report_generation(
     admin1_list: List[str],
     currency_code: str = "USD",
     enabled_modules: List[str] = None,
+    basket_version_id: Optional[str] = None,
     news_start_date: Optional[str] = None,
     news_end_date: Optional[str] = None,
     previous_report_text: str = "",
@@ -1609,6 +1649,7 @@ def run_report_generation(
         admin1_list=admin1_list,
         currency_code=currency_code,
         enabled_modules=enabled_modules,
+        basket_version_id=basket_version_id,
         news_start_date=news_start_date,
         news_end_date=news_end_date,
         previous_report_text=previous_report_text,

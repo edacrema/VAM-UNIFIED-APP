@@ -116,7 +116,11 @@ class GenerateReportInput(BaseModel):
 
     commodity_list: List[str] = Field(
         default=[],
-        description="List of commodities to analyze. If empty, defaults will be inferred from available data."
+        description="Additional commodities to analyze. Active basket commodities are always included."
+    )
+    basket_version_id: Optional[str] = Field(
+        default=None,
+        description="Active country food basket version selected by the UI. Stale versions are rejected."
     )
     admin1_list: List[str] = Field(
         default=[],
@@ -156,6 +160,7 @@ class GenerateReportOutput(BaseModel):
     document_references: List[Dict[str, Any]] = []
     news_counts: Dict[str, int] = {}
     cache_metadata: Dict[str, Any] = {}
+    food_basket: Dict[str, Any] = {}
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True

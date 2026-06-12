@@ -30,6 +30,7 @@ def _seed_loader_cache(
     repo: SqlPriceCacheRepository,
     *,
     include_latest_beans: bool = True,
+    include_rice: bool = False,
     duplicate_commodities: bool = False,
     price_offset: float = 0.0,
 ) -> str:
@@ -54,6 +55,16 @@ def _seed_loader_cache(
             "category_name": "Pulses",
         },
     ]
+    if include_rice:
+        commodities.append(
+            {
+                "commodity_id": 4,
+                "commodity_name": "Rice",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            }
+        )
     if duplicate_commodities:
         commodities.append(
             {
@@ -75,6 +86,9 @@ def _seed_loader_cache(
     ]
     if include_latest_beans:
         prices.append(_price(2, "Beans", 11, "Wau", "Western Bahr el Ghazal", "2025-02-01", 6 + price_offset))
+    if include_rice:
+        prices.append(_price(4, "Rice", 10, "Juba", "Central Equatoria", "2024-02-01", 4 + price_offset))
+        prices.append(_price(4, "Rice", 10, "Juba", "Central Equatoria", "2025-02-01", 7 + price_offset))
     if duplicate_commodities:
         prices.append(_price(3, "Maize", 10, "Juba", "Central Equatoria", "2025-02-01", 30 + price_offset))
     prices.append(
@@ -145,6 +159,210 @@ def _price(commodity_id, commodity, market_id, market, admin1, price_date, price
         "source_payload_hash": f"{commodity_id}-{market_id}-{price_date}-{flag}",
         "data_source": "fixture",
     }
+
+
+def _basket_items():
+    return [
+        {
+            "commodity_id": 1,
+            "commodity_name_snapshot": "Maize",
+            "databridges_unit": "kg",
+            "weight_quantity": 2,
+        },
+        {
+            "commodity_id": 2,
+            "commodity_name_snapshot": "Beans",
+            "databridges_unit": "kg",
+            "weight_quantity": 3,
+        },
+    ]
+
+
+def _seed_dto_shaped_cache(repo: SqlPriceCacheRepository) -> str:
+    """Seed price rows the way the real Databridges DTO delivers them: no admin fields."""
+    version_id = repo.create_cache_version()
+    repo.insert_currencies(
+        version_id,
+        [{"currency_id": 200, "currency_code": "SSP", "currency_name": "South Sudanese Pound"}],
+    )
+    prices = []
+    for price_date, maize_price, beans_price in (("2024-02-01", 10, 5), ("2025-02-01", 12, 6)):
+        for commodity_id, commodity, market_id, market, price in (
+            (1, "Maize", 10, "Juba", maize_price),
+            (2, "Beans", 11, "Wau", beans_price),
+        ):
+            row = _price(commodity_id, commodity, market_id, market, None, price_date, price)
+            row["admin1_name"] = None
+            row["admin2_name"] = None
+            prices.append(row)
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        country_name="South Sudan",
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            },
+            {
+                "commodity_id": 2,
+                "commodity_name": "Beans",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Pulses",
+            },
+        ],
+        markets=[
+            {"market_id": 10, "market_name": "Juba", "admin1_name": "Central Equatoria"},
+            {"market_id": 11, "market_name": "Wau", "admin1_name": "Western Bahr el Ghazal"},
+        ],
+        prices=prices,
+        latest_price_date="2025-02-01",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        status="success",
+        rows_prices=len(prices),
+        rows_commodities=2,
+        rows_markets=2,
+        latest_price_date="2025-02-01",
+    )
+    repo.insert_units(
+        version_id,
+        [{"commodity_unit_id": 100, "commodity_unit_name": "kg", "conversion_to_kg_l": 1.0, "active": True}],
+    )
+    repo.publish_cache_version(
+        version_id,
+        country_iso3s=["SSD"],
+        status="active",
+        validation_summary={"fixture": True},
+    )
+    return version_id
+
+
+def test_regions_resolve_from_markets_when_price_rows_lack_admin1(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_dto_shaped_cache(repo)
+    _patch_repo(monkeypatch, repo)
+
+    metadata = data_loader.get_country_metadata("South Sudan")
+    national, regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize", "Beans"],
+        ["Central Equatoria", "Western Bahr el Ghazal"],
+    )
+
+    assert metadata["regions"] == ["Central Equatoria", "Western Bahr el Ghazal"]
+    assert national.loc["2025-02-01", "FoodBasket"] == 18
+    assert set(regional["Region"].unique()) == {"Central Equatoria", "Western Bahr el Ghazal"}
+
+
+def test_extract_selects_single_currency_for_dual_currency_rows(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    version_id = repo.create_cache_version()
+    base = _price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-02-01", 12)
+    usd = dict(
+        base,
+        price=0.5,
+        currency_id=201,
+        currency_code="USD",
+        currency_name="US Dollar",
+        source_payload_hash="usd-row",
+    )
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        country_name="South Sudan",
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            }
+        ],
+        markets=[{"market_id": 10, "market_name": "Juba", "admin1_name": "Central Equatoria"}],
+        prices=[base, usd],
+        latest_price_date="2025-02-01",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        status="success",
+        rows_prices=2,
+        rows_commodities=1,
+        rows_markets=1,
+        latest_price_date="2025-02-01",
+    )
+    repo.publish_cache_version(version_id, country_iso3s=["SSD"], status="active")
+    _patch_repo(monkeypatch, repo)
+
+    national, _regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        [],
+    )
+    availability = data_loader.check_data_availability("South Sudan", "2025-02", ["Maize"])
+
+    # The country default (SSP) wins; USD rows must not be averaged in.
+    assert national.loc["2025-02-01", "Maize"] == 12
+    assert any("multiple currencies" in warning for warning in availability["warnings"])
+
+
+def test_composite_price_flags_survive_read_path(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    version_id = repo.create_cache_version()
+    row = _price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-02-01", 12, flag="actual,aggregate")
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        country_name="South Sudan",
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            }
+        ],
+        markets=[{"market_id": 10, "market_name": "Juba", "admin1_name": "Central Equatoria"}],
+        prices=[row],
+        latest_price_date="2025-02-01",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        status="success",
+        rows_prices=1,
+        rows_commodities=1,
+        rows_markets=1,
+        latest_price_date="2025-02-01",
+    )
+    repo.publish_cache_version(version_id, country_iso3s=["SSD"], status="active")
+    _patch_repo(monkeypatch, repo)
+
+    national, _regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        [],
+    )
+
+    assert national.loc["2025-02-01", "Maize"] == 12
 
 
 def test_country_metadata_uses_price_cache(monkeypatch, tmp_path):
@@ -373,3 +591,83 @@ def test_food_basket_coverage_only_counts_latest_month_contributors(monkeypatch,
     assert stats["food_basket"]["latest_component_count"] == 1
     assert stats["food_basket"]["latest_component_names"] == ["Maize"]
     assert stats["food_basket"]["missing_latest_component_names"] == ["Beans"]
+
+
+def test_weighted_food_basket_uses_saved_component_quantities(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+
+    national, regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize", "Beans"],
+        ["Central Equatoria", "Western Bahr el Ghazal"],
+        basket_items=_basket_items(),
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        national,
+        ["Maize", "Beans"],
+        food_basket_components=_basket_items(),
+    )
+
+    assert national.loc["2025-02-01", "Maize"] == 12
+    assert national.loc["2025-02-01", "Beans"] == 6
+    assert national.loc["2025-02-01", "FoodBasket"] == 42
+    latest_regions = regional[regional["Date"] == pd.Timestamp("2025-02-01")]
+    assert dict(zip(latest_regions["Region"], latest_regions["FoodBasket"])) == {
+        "Central Equatoria": 24,
+        "Western Bahr el Ghazal": 18,
+    }
+    assert stats["food_basket"]["current_price"] == 42
+    assert stats["food_basket"]["selected_component_names"] == ["Maize", "Beans"]
+    assert stats["food_basket"]["available_component_names"] == ["Maize", "Beans"]
+
+
+def test_additional_commodities_do_not_change_weighted_food_basket(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_rice=True)
+    _patch_repo(monkeypatch, repo)
+
+    national, _regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize", "Beans", "Rice"],
+        [],
+        basket_items=_basket_items(),
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        national,
+        ["Maize", "Beans", "Rice"],
+        food_basket_components=_basket_items(),
+    )
+
+    assert national.loc["2025-02-01", "Rice"] == 7
+    assert national.loc["2025-02-01", "FoodBasket"] == 42
+    assert stats["commodities"]["Rice"]["current_price"] == 7
+    assert stats["food_basket"]["current_price"] == 42
+
+
+def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_latest_beans=False)
+    _patch_repo(monkeypatch, repo)
+
+    national, _regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        [],
+        basket_items=_basket_items(),
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        national,
+        ["Maize"],
+        food_basket_components=_basket_items(),
+    )
+
+    assert national.loc["2025-02-01", "FoodBasket"] == 24
+    assert stats["food_basket"]["current_price"] == 24
+    assert stats["food_basket"]["selected_component_count"] == 2
+    assert stats["food_basket"]["available_component_names"] == ["Maize"]
+    assert stats["food_basket"]["missing_component_names"] == ["Beans"]

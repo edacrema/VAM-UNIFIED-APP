@@ -28,6 +28,22 @@ def _reset_run_store(monkeypatch):
 def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypatch):
     _reset_run_store(monkeypatch)
     monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        dispatcher,
+        "get_active_basket_for_report",
+        lambda country, basket_version_id=None: {
+            "basket_version_id": basket_version_id or "active-basket",
+            "version_number": 1,
+            "items": [
+                {
+                    "commodity_id": 1,
+                    "commodity_name_snapshot": "Maize",
+                    "databridges_unit": "kg",
+                    "weight_quantity": 1,
+                }
+            ],
+        },
+    )
 
     def fake_run_report_generation(*, country, time_period, on_step=None, **kwargs):
         if on_step is not None:

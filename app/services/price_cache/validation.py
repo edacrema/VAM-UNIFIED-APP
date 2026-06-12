@@ -12,7 +12,18 @@ CANONICAL_PRICE_KEY_FIELDS = (
     "price_date",
     "price_type_name",
     "price_flag",
+    "price_type_id",
+    "currency_id",
+    "commodity_unit_id",
 )
+
+CANONICAL_PRICE_KEY_INT_FIELDS = {
+    "commodity_id",
+    "market_id",
+    "price_type_id",
+    "currency_id",
+    "commodity_unit_id",
+}
 
 
 @dataclass(frozen=True)
@@ -136,7 +147,7 @@ def _canonical_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         value = row.get(field_name)
         if field_name == "country_iso3":
             value = str(value or "").upper()
-        elif field_name in {"commodity_id", "market_id"}:
+        elif field_name in CANONICAL_PRICE_KEY_INT_FIELDS:
             value = _as_int(value)
         elif field_name == "price_date":
             parsed = _as_date(value)
