@@ -368,7 +368,10 @@ class SqlCountryFoodBasketRepository:
             if priced_ids and commodity_id not in priced_ids:
                 raise BasketValidationError(f"Commodity ID {commodity_id} has no cached price rows for {country_iso3}.")
 
+            unit_id = commodity.commodity_unit_id
             unit = str(commodity.commodity_unit_name or "").strip()
+            if not unit:
+                unit_id, unit = self._get_price_row_unit(country_iso3, commodity_id)
             if not unit:
                 raise BasketValidationError(
                     f"Commodity {commodity.commodity_name} has no Databridges unit in the active cache."
@@ -382,7 +385,7 @@ class SqlCountryFoodBasketRepository:
                 {
                     "commodity_id": commodity_id,
                     "commodity_name_snapshot": str(commodity.commodity_name),
-                    "databridges_unit_id": commodity.commodity_unit_id,
+                    "databridges_unit_id": unit_id,
                     "databridges_unit": unit,
                     "weight_quantity": weight,
                     "item_note": _optional_str(_payload_get(raw, "item_note")),
@@ -390,6 +393,35 @@ class SqlCountryFoodBasketRepository:
             )
 
         return normalized, availability.cache_version_id or metadata.country.cache_version_id
+
+    def _get_price_row_unit(self, country_iso3: str, commodity_id: int) -> tuple[Optional[int], str]:
+        active_version_id = self.price_repo.get_active_version_id_for_country(country_iso3)
+        if active_version_id is None:
+            return None, ""
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT commodity_unit_id, commodity_unit_name
+                    FROM cached_price_monthly
+                    WHERE cache_version_id = :cache_version_id
+                      AND country_iso3 = :country_iso3
+                      AND commodity_id = :commodity_id
+                      AND commodity_unit_name IS NOT NULL
+                      AND commodity_unit_name <> ''
+                    ORDER BY price_date DESC, commodity_unit_name
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "cache_version_id": active_version_id,
+                    "country_iso3": str(country_iso3 or "").upper(),
+                    "commodity_id": int(commodity_id),
+                },
+            ).mappings().first()
+        if row is None:
+            return None, ""
+        return _optional_int(row.get("commodity_unit_id")), str(row.get("commodity_unit_name") or "").strip()
 
     def _get_items(self, basket_version_id: str) -> list[CountryFoodBasketItem]:
         with self.engine.begin() as conn:

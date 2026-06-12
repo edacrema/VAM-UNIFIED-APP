@@ -338,14 +338,15 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     raw_commodities = cache_metadata.commodities
     if priced_ids:
         raw_commodities = [item for item in raw_commodities if item.commodity_id in priced_ids]
+    price_row_units = _price_row_units_by_commodity(repo, iso3, availability)
     commodities = [
         {
             "id": item.commodity_id,
             "name": item.commodity_name,
             "category": item.category_name or _infer_category(item.commodity_name),
-            "unit_id": item.commodity_unit_id,
-            "unit": item.commodity_unit_name,
-            "unit_name": item.commodity_unit_name,
+            "unit_id": item.commodity_unit_id or price_row_units.get(item.commodity_id, {}).get("unit_id"),
+            "unit": item.commodity_unit_name or price_row_units.get(item.commodity_id, {}).get("unit"),
+            "unit_name": item.commodity_unit_name or price_row_units.get(item.commodity_id, {}).get("unit"),
         }
         for item in sorted(raw_commodities, key=lambda item: (item.commodity_name.lower(), item.commodity_id))
     ]
@@ -1145,6 +1146,32 @@ def _merge_units(metadata: CountryMetadata, derived_units: list[Any]) -> list[di
             },
         )
     return sorted(by_id.values(), key=lambda item: str(item["name"]).lower())
+
+
+def _price_row_units_by_commodity(
+    repo: PriceCacheRepository,
+    iso3: str,
+    availability: Any,
+) -> dict[int, dict[str, Any]]:
+    if not hasattr(repo, "get_price_window"):
+        return {}
+    start = _date_wire(getattr(availability, "date_start", None))
+    end = _date_wire(getattr(availability, "date_end", None))
+    if not start or not end:
+        return {}
+    units: dict[int, dict[str, Any]] = {}
+    for row in repo.get_price_window(iso3, start, end):
+        unit_name = str(row.commodity_unit_name or "").strip()
+        if not unit_name:
+            continue
+        units.setdefault(
+            int(row.commodity_id),
+            {
+                "unit_id": row.commodity_unit_id,
+                "unit": unit_name,
+            },
+        )
+    return units
 
 
 def _country_currency(country: Any, *, fallback_country: str) -> dict[str, str]:

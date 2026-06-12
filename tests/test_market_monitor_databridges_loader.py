@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import date
 
 import pandas as pd
+from sqlalchemy import text
 
 from app.services.market_monitor import data_loader
 from app.services.price_cache.config import load_price_cache_config
@@ -382,6 +383,33 @@ def test_country_metadata_uses_price_cache(monkeypatch, tmp_path):
     assert metadata["units"] == [
         {"id": 100, "name": "kg", "conversion_to_kg_l": 1.0, "source": "cached_units"}
     ]
+
+
+def test_country_metadata_derives_commodity_units_from_price_rows(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    version_id = _seed_loader_cache(repo)
+    with repo.engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE cached_commodities
+                SET commodity_unit_name = '',
+                    commodity_unit_id = NULL
+                WHERE cache_version_id = :cache_version_id
+                  AND country_iso3 = 'SSD'
+                  AND commodity_id = 1
+                """
+            ),
+            {"cache_version_id": version_id},
+        )
+    _patch_repo(monkeypatch, repo)
+
+    metadata = data_loader.get_country_metadata("South Sudan")
+    maize = next(item for item in metadata["commodities"] if item["name"] == "Maize")
+
+    assert maize["unit"] == "kg"
+    assert maize["unit_name"] == "kg"
+    assert maize["unit_id"] == 100
 
 
 def test_country_metadata_caps_future_price_dates(monkeypatch, tmp_path):

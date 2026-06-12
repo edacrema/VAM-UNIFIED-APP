@@ -121,7 +121,7 @@ def test_unpriced_commodity_is_rejected(tmp_path):
         _basket_repo(price_repo).save_basket("SSD", items=[{"commodity_id": 3, "weight_quantity": 1}])
 
 
-def test_missing_databridges_unit_is_rejected(tmp_path):
+def test_missing_commodity_unit_falls_back_to_price_row_unit(tmp_path):
     price_repo = _price_repo(tmp_path)
     cache_version_id = seed_cache_snapshot(price_repo)
     with price_repo.engine.begin() as conn:
@@ -130,6 +130,42 @@ def test_missing_databridges_unit_is_rejected(tmp_path):
                 """
                 UPDATE cached_commodities
                 SET commodity_unit_name = ''
+                WHERE cache_version_id = :cache_version_id
+                  AND country_iso3 = 'SSD'
+                  AND commodity_id = 1
+                """
+            ),
+            {"cache_version_id": cache_version_id},
+        )
+
+    basket = _basket_repo(price_repo).save_basket("SSD", items=[{"commodity_id": 1, "weight_quantity": 1}])
+
+    assert basket.items[0].databridges_unit == "kg"
+    assert basket.items[0].databridges_unit_id == 100
+
+
+def test_missing_databridges_unit_is_rejected_when_price_rows_also_lack_unit(tmp_path):
+    price_repo = _price_repo(tmp_path)
+    cache_version_id = seed_cache_snapshot(price_repo)
+    with price_repo.engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE cached_commodities
+                SET commodity_unit_name = ''
+                WHERE cache_version_id = :cache_version_id
+                  AND country_iso3 = 'SSD'
+                  AND commodity_id = 1
+                """
+            ),
+            {"cache_version_id": cache_version_id},
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE cached_price_monthly
+                SET commodity_unit_name = '',
+                    commodity_unit_id = NULL
                 WHERE cache_version_id = :cache_version_id
                   AND country_iso3 = 'SSD'
                   AND commodity_id = 1
