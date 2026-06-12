@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -49,6 +50,8 @@ _COMMODITY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _MARKET_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _PRICE_CACHE: dict[tuple[Any, ...], tuple[float, pd.DataFrame]] = {}
 _METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_PRICE_CACHE_REPOSITORY: Optional[PriceCacheRepository] = None
+_PRICE_CACHE_REPOSITORY_LOCK = threading.Lock()
 
 
 class PriceCacheUnavailableError(RuntimeError):
@@ -61,11 +64,13 @@ def normalize_country_name(country: str) -> str:
 
 
 def reset_market_monitor_caches_for_tests() -> None:
+    global _PRICE_CACHE_REPOSITORY
     _COUNTRY_CACHE.clear()
     _COMMODITY_CACHE.clear()
     _MARKET_CACHE.clear()
     _PRICE_CACHE.clear()
     _METADATA_CACHE.clear()
+    _PRICE_CACHE_REPOSITORY = None
 
 
 def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
@@ -1080,10 +1085,16 @@ def _recent_price_window(months: int = _RECENT_METADATA_MONTHS) -> Tuple[str, st
 
 
 def _get_price_cache_repository() -> PriceCacheRepository:
-    config = load_price_cache_config()
-    engine = create_price_cache_engine(config)
-    apply_migrations(engine, config.backend)
-    return SqlPriceCacheRepository(engine)
+    global _PRICE_CACHE_REPOSITORY
+    if _PRICE_CACHE_REPOSITORY is not None:
+        return _PRICE_CACHE_REPOSITORY
+    with _PRICE_CACHE_REPOSITORY_LOCK:
+        if _PRICE_CACHE_REPOSITORY is None:
+            config = load_price_cache_config()
+            engine = create_price_cache_engine(config)
+            apply_migrations(engine, config.backend)
+            _PRICE_CACHE_REPOSITORY = SqlPriceCacheRepository(engine)
+    return _PRICE_CACHE_REPOSITORY
 
 
 def _get_repository_country_metadata(iso3: str) -> CountryMetadata:

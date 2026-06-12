@@ -10,6 +10,7 @@ from typing import Optional, List, Any, Dict
 from dataclasses import is_dataclass, asdict
 from datetime import date, datetime
 import logging
+import threading
 import traceback
 
 from .graph import run_report_generation, AVAILABLE_MODULES
@@ -53,6 +54,8 @@ router = APIRouter()
 
 # In-memory store per report status (in produzione usare Redis/DB)
 _report_status: dict = {}
+_PRICE_CACHE_REPOSITORY: Any = None
+_PRICE_CACHE_REPOSITORY_LOCK = threading.Lock()
 
 
 class ExportDocxOptions(BaseModel):
@@ -63,6 +66,9 @@ class ExportDocxOptions(BaseModel):
 
 
 def _get_price_cache_repository():
+    global _PRICE_CACHE_REPOSITORY
+    if _PRICE_CACHE_REPOSITORY is not None:
+        return _PRICE_CACHE_REPOSITORY
     from app.services.price_cache.config import load_price_cache_config
     from app.services.price_cache.migrations import apply_migrations
     from app.services.price_cache.sql_repository import (
@@ -70,10 +76,13 @@ def _get_price_cache_repository():
         create_price_cache_engine,
     )
 
-    config = load_price_cache_config()
-    engine = create_price_cache_engine(config)
-    apply_migrations(engine, config.backend)
-    return SqlPriceCacheRepository(engine)
+    with _PRICE_CACHE_REPOSITORY_LOCK:
+        if _PRICE_CACHE_REPOSITORY is None:
+            config = load_price_cache_config()
+            engine = create_price_cache_engine(config)
+            apply_migrations(engine, config.backend)
+            _PRICE_CACHE_REPOSITORY = SqlPriceCacheRepository(engine)
+    return _PRICE_CACHE_REPOSITORY
 
 
 def _cache_json(value: Any) -> Any:

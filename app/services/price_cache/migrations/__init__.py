@@ -17,6 +17,7 @@ def apply_migrations(engine: Engine, dialect: str) -> list[str]:
 
     applied_now: list[str] = []
     with engine.begin() as conn:
+        _acquire_migration_lock(conn, normalized)
         _ensure_migration_table(conn, normalized)
         applied = {
             str(row.version)
@@ -34,6 +35,12 @@ def apply_migrations(engine: Engine, dialect: str) -> list[str]:
             )
             applied_now.append(version)
     return applied_now
+
+
+def _acquire_migration_lock(conn, dialect: str) -> None:
+    if dialect != "postgres":
+        return
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('price_cache_schema_migrations'))"))
 
 
 def _ensure_migration_table(conn, dialect: str) -> None:

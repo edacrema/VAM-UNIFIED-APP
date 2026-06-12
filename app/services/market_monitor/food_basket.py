@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
@@ -26,6 +27,10 @@ class BasketNotConfigured(RuntimeError):
 
 class BasketVersionConflict(RuntimeError):
     """Raised when a report references a stale basket version."""
+
+
+_FOOD_BASKET_REPOSITORY: Optional[SqlCountryFoodBasketRepository] = None
+_FOOD_BASKET_REPOSITORY_LOCK = threading.Lock()
 
 
 class BasketItemInput(BaseModel):
@@ -434,10 +439,16 @@ class SqlCountryFoodBasketRepository:
 
 
 def create_food_basket_repository() -> SqlCountryFoodBasketRepository:
-    config = load_price_cache_config()
-    engine = create_price_cache_engine(config)
-    apply_migrations(engine, config.backend)
-    return SqlCountryFoodBasketRepository(engine)
+    global _FOOD_BASKET_REPOSITORY
+    if _FOOD_BASKET_REPOSITORY is not None:
+        return _FOOD_BASKET_REPOSITORY
+    with _FOOD_BASKET_REPOSITORY_LOCK:
+        if _FOOD_BASKET_REPOSITORY is None:
+            config = load_price_cache_config()
+            engine = create_price_cache_engine(config)
+            apply_migrations(engine, config.backend)
+            _FOOD_BASKET_REPOSITORY = SqlCountryFoodBasketRepository(engine)
+    return _FOOD_BASKET_REPOSITORY
 
 
 def get_country_basket_response(country: str) -> dict[str, Any]:
