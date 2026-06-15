@@ -44,6 +44,16 @@ def _short_id(value):
     return text[:8] if text else "n/a"
 
 
+def _clear_cache_version_dependent_state():
+    for key in (
+        "mm_countries_resp",
+        "mm_countries_resp_version",
+        "mm_country_metadata",
+        "mm_country_basket",
+    ):
+        st.session_state.pop(key, None)
+
+
 st.set_page_config(page_title="Price Bulletin Drafter", layout="wide")
 apply_wfp_theme()
 
@@ -64,13 +74,26 @@ countries = []
 country_currency = {}
 cache_status = {}
 
-cache_status_resp = st.session_state.get("mm_cache_status_resp")
-if cache_status_resp is None:
-    try:
-        cache_status_resp = request_json("GET", "/market-monitor/cache/status", timeout=30)
-        st.session_state["mm_cache_status_resp"] = cache_status_resp
-    except Exception as e:
-        cache_status_resp = None
+cache_status_resp = None
+try:
+    cache_status_resp = request_json("GET", "/market-monitor/cache/status", timeout=30)
+    current_cache_version = (
+        cache_status_resp.get("active_version_id")
+        if isinstance(cache_status_resp, dict)
+        else None
+    )
+    previous_cache_version = st.session_state.get("mm_cache_status_version")
+    if (
+        current_cache_version
+        and previous_cache_version
+        and current_cache_version != previous_cache_version
+    ):
+        _clear_cache_version_dependent_state()
+    st.session_state["mm_cache_status_resp"] = cache_status_resp
+    st.session_state["mm_cache_status_version"] = current_cache_version
+except Exception as e:
+    cache_status_resp = st.session_state.get("mm_cache_status_resp")
+    if cache_status_resp is None:
         st.session_state.pop("mm_cache_status_resp", None)
         safe_show_error(e)
 
@@ -97,15 +120,26 @@ if cache_warnings:
         for warning in cache_warnings:
             st.warning(str(warning))
 
+cache_operator_warnings = cache_status.get("operator_warnings") or []
+if cache_operator_warnings:
+    with st.expander("Cache processing notes (for administrators)", expanded=False):
+        for warning in cache_operator_warnings:
+            st.info(str(warning))
+
 if not cache_status.get("has_active_cache"):
     st.warning("No active price cache is available. Run a cache refresh before drafting a Price Bulletin.")
     st.stop()
 
-countries_resp = st.session_state.get("mm_countries_resp")
+countries_resp = (
+    st.session_state.get("mm_countries_resp")
+    if st.session_state.get("mm_countries_resp_version") == active_version
+    else None
+)
 if countries_resp is None:
     try:
         countries_resp = request_json("GET", "/market-monitor/countries", timeout=30)
         st.session_state["mm_countries_resp"] = countries_resp
+        st.session_state["mm_countries_resp_version"] = active_version
     except Exception:
         countries_resp = None
         st.session_state.pop("mm_countries_resp", None)
@@ -137,7 +171,8 @@ default_time_period = None
 
 if country:
     metadata_cache = st.session_state.setdefault("mm_country_metadata", {})
-    metadata = metadata_cache.get(country)
+    metadata_cache_key = (active_version, country)
+    metadata = metadata_cache.get(metadata_cache_key)
     if metadata is None:
         try:
             metadata = request_json(
@@ -145,7 +180,7 @@ if country:
                 f"/market-monitor/countries/{quote_path_param(country)}/metadata",
                 timeout=30,
             )
-            metadata_cache[country] = metadata
+            metadata_cache[metadata_cache_key] = metadata
         except Exception as e:
             metadata = None
             safe_show_error(e)
@@ -209,20 +244,16 @@ if not commodities:
     st.stop()
 
 basket_resp = None
-basket_cache = st.session_state.setdefault("mm_country_basket", {})
 if country:
-    basket_resp = basket_cache.get(country)
-    if basket_resp is None:
-        try:
-            basket_resp = request_json(
-                "GET",
-                f"/market-monitor/countries/{quote_path_param(country)}/basket",
-                timeout=30,
-            )
-            basket_cache[country] = basket_resp
-        except Exception as e:
-            basket_resp = None
-            safe_show_error(e)
+    try:
+        basket_resp = request_json(
+            "GET",
+            f"/market-monitor/countries/{quote_path_param(country)}/basket",
+            timeout=30,
+        )
+    except Exception as e:
+        basket_resp = None
+        safe_show_error(e)
 
 active_basket = None
 if isinstance(basket_resp, dict):
@@ -355,7 +386,6 @@ with st.expander("Edit country food basket", expanded=not bool(active_basket)):
                     },
                     timeout=60,
                 )
-                basket_cache[country] = basket_resp
                 active_basket = basket_resp.get("active_basket") if isinstance(basket_resp, dict) else None
                 basket_items = active_basket.get("items") if isinstance(active_basket, dict) else []
                 basket_item_names = _dedupe_text(_basket_item_name(item) for item in basket_items)

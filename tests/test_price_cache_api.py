@@ -143,8 +143,11 @@ def test_cache_status_endpoint(monkeypatch):
     response = client.get("/cache/status")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "partial_active"
-    assert response.json()["active_country_count"] == 2
+    payload = response.json()
+    assert payload["status"] == "partial_active"
+    assert payload["active_country_count"] == 2
+    assert payload["warnings"] == []
+    assert payload["operator_warnings"][0].startswith("CommodityUnits/List")
 
 
 def test_cache_refresh_history_endpoints(monkeypatch):
@@ -169,7 +172,8 @@ def test_countries_endpoint_reads_cached_countries(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["cache_status"]["source"] == "PriceCache"
-    assert payload["warnings"][0].startswith("CommodityUnits/List")
+    assert payload["warnings"] == []
+    assert payload["operator_warnings"][0].startswith("CommodityUnits/List")
     assert payload["countries"] == [
         {
             "name": "South Sudan",

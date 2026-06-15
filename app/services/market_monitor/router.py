@@ -411,8 +411,9 @@ def check_data_availability_endpoint(
 @router.get("/cache/status")
 def get_price_cache_status():
     try:
-        repository = _get_price_cache_repository()
-        return _cache_json(repository.get_cache_status())
+        from .data_loader import get_cache_status_snapshot
+
+        return get_cache_status_snapshot()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -681,6 +682,7 @@ def get_supported_countries():
         "countries": get_cached_countries(),
         "cache_status": cache_status,
         "warnings": cache_status.get("warnings") or [],
+        "operator_warnings": cache_status.get("operator_warnings") or [],
     }
 
 

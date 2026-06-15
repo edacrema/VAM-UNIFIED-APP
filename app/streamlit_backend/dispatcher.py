@@ -2001,6 +2001,7 @@ def _market_monitor_countries() -> LocalResponse:
             "countries": get_market_monitor_supported_countries(),
             "cache_status": cache_status,
             "warnings": cache_status.get("warnings") or [],
+            "operator_warnings": cache_status.get("operator_warnings") or [],
         }
     )
 

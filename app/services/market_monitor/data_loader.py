@@ -52,6 +52,8 @@ _PRICE_CACHE: dict[tuple[Any, ...], tuple[float, pd.DataFrame]] = {}
 _METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _PRICE_CACHE_REPOSITORY: Optional[PriceCacheRepository] = None
 _PRICE_CACHE_REPOSITORY_LOCK = threading.Lock()
+_ACTIVE_CACHE_VERSION_ID: Optional[str] = None
+_ACTIVE_CACHE_VERSION_LOCK = threading.Lock()
 
 
 class PriceCacheUnavailableError(RuntimeError):
@@ -64,13 +66,32 @@ def normalize_country_name(country: str) -> str:
 
 
 def reset_market_monitor_caches_for_tests() -> None:
-    global _PRICE_CACHE_REPOSITORY
+    global _PRICE_CACHE_REPOSITORY, _ACTIVE_CACHE_VERSION_ID
     _COUNTRY_CACHE.clear()
     _COMMODITY_CACHE.clear()
     _MARKET_CACHE.clear()
     _PRICE_CACHE.clear()
     _METADATA_CACHE.clear()
     _PRICE_CACHE_REPOSITORY = None
+    _ACTIVE_CACHE_VERSION_ID = None
+
+
+def _sync_active_cache_version(active_version_id: Optional[str]) -> None:
+    """Invalidate in-process data caches when PriceCache publishes a new version."""
+    global _ACTIVE_CACHE_VERSION_ID
+    version = str(active_version_id or "")
+    with _ACTIVE_CACHE_VERSION_LOCK:
+        if _ACTIVE_CACHE_VERSION_ID is None:
+            _ACTIVE_CACHE_VERSION_ID = version
+            return
+        if _ACTIVE_CACHE_VERSION_ID == version:
+            return
+        _COUNTRY_CACHE.clear()
+        _COMMODITY_CACHE.clear()
+        _MARKET_CACHE.clear()
+        _PRICE_CACHE.clear()
+        _METADATA_CACHE.clear()
+        _ACTIVE_CACHE_VERSION_ID = version
 
 
 def load_csv_price_data(csv_path: Optional[Path] = None) -> pd.DataFrame:
@@ -91,17 +112,21 @@ def _upload_file_to_gcs(content: bytes, gcs_uri: str) -> None:
 
 def get_cache_status_snapshot() -> dict[str, Any]:
     repo = _get_price_cache_repository()
-    return _cache_status_dict(repo.get_cache_status())
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+    return _cache_status_dict(status)
 
 
 def get_supported_countries() -> List[Dict[str, Any]]:
     """Return only countries with an active PriceCache country snapshot."""
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+
     cached = _cache_get(_COUNTRY_CACHE, "countries")
     if cached is not None:
         return [dict(item) for item in cached]
 
-    repo = _get_price_cache_repository()
-    status = repo.get_cache_status()
     if not status.has_active_cache:
         _cache_set(_COUNTRY_CACHE, "countries", [])
         return []
@@ -311,12 +336,14 @@ def get_commodity_categories(source: Optional[Any] = None) -> Dict[str, List[str
 
 def get_country_metadata(country: str) -> Dict[str, Any]:
     canonical, iso3 = resolve_country(country)
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+
     cached = _cache_get(_METADATA_CACHE, iso3)
     if cached is not None:
         return dict(cached)
 
-    repo = _get_price_cache_repository()
-    status = repo.get_cache_status()
     if not status.has_active_cache:
         raise PriceCacheUnavailableError("No active PriceCache version is available. Run a cache refresh first.")
 
@@ -803,13 +830,16 @@ def _get_country_price_df(
     commodity_ids: Optional[Iterable[int]] = None,
     latest_value_only: bool = False,
 ) -> pd.DataFrame:
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+
     ids = tuple(sorted({int(item) for item in commodity_ids or [] if item is not None}))
     cache_key = (iso3, start_date, end_date, ids, latest_value_only)
     cached = _cache_get(_PRICE_CACHE, cache_key)
     if cached is not None:
         return cached.copy()
 
-    repo = _get_price_cache_repository()
     availability = repo.get_country_availability(iso3)
     if availability is None:
         df = _empty_price_df()
@@ -917,6 +947,10 @@ def _normalise_cached_price_rows(
 
 
 def _get_commodities(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+
     cached = _cache_get(_COMMODITY_CACHE, iso3)
     if cached is not None:
         return list(cached)
@@ -946,6 +980,10 @@ def _get_commodities(canonical: str, iso3: str) -> list[dict[str, Any]]:
 
 
 def _get_markets(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+
     cached = _cache_get(_MARKET_CACHE, iso3)
     if cached is not None:
         return list(cached)
@@ -1183,6 +1221,7 @@ def _country_currency(country: Any, *, fallback_country: str) -> dict[str, str]:
 
 
 def _cache_status_dict(status: CacheStatus) -> dict[str, Any]:
+    warnings, operator_warnings = _split_warning_audiences(_cache_warnings(status))
     return {
         "source": "PriceCache",
         "has_active_cache": status.has_active_cache,
@@ -1197,7 +1236,8 @@ def _cache_status_dict(status: CacheStatus) -> dict[str, Any]:
         "active_country_count": status.active_country_count,
         "validation_summary": status.validation_summary,
         "error_message": status.error_message,
-        "warnings": _cache_warnings(status),
+        "warnings": warnings,
+        "operator_warnings": operator_warnings,
     }
 
 
