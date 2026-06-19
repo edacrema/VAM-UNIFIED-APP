@@ -503,6 +503,12 @@ if isinstance(result, dict):
         cols[2].metric("Time Period", str(result.get("time_period") or ""))
         cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
 
+        result_warnings = result.get("warnings") or []
+        if result_warnings:
+            with st.expander("Warnings", expanded=False):
+                for warning in result_warnings:
+                    st.warning(str(warning))
+
         cache_metadata = result.get("cache_metadata")
         if isinstance(cache_metadata, dict) and cache_metadata:
             with st.expander("Cache metadata", expanded=False):

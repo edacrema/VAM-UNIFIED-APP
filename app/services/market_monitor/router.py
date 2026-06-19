@@ -14,6 +14,7 @@ import threading
 import traceback
 
 from .graph import run_report_generation, AVAILABLE_MODULES
+from .price_backfill import PriceDataGateError
 from .food_basket import (
     BasketNotConfigured,
     BasketSaveInput,
@@ -202,6 +203,8 @@ async def generate_market_monitor(input_data: GenerateReportInput):
 
         return output
 
+    except PriceDataGateError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.to_dict())
     except (BasketNotConfigured, BasketVersionConflict) as e:
         raise HTTPException(status_code=409, detail=str(e))
     except BasketValidationError as e:
@@ -286,20 +289,23 @@ async def generate_market_monitor_async(
                         artifacts = create_databridges_artifacts(
                             run_id=run_id,
                             service_slug="market-monitor",
-                            label_prefix="Price Cache price rows",
-                            file_stem=f"market-monitor-price-cache-{input_data.country}-{input_data.time_period}",
+                            label_prefix="Price data rows",
+                            file_stem=f"market-monitor-price-data-{input_data.country}-{input_data.time_period}",
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Cache Data",
-                            summary=f"{len(rows)} cached price rows retrieved for {input_data.country} ({input_data.time_period}).",
+                            title="Price Data",
+                            summary=(
+                                f"{len(rows)} price row(s) retrieved for {input_data.country} "
+                                f"({input_data.time_period}) from cache plus any targeted backfill."
+                            ),
                             rows=rows,
                             download_artifacts=artifacts,
                         )
                     elif input_data.use_mock_data:
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Cache Data",
-                            summary="Mock data is enabled for this run, so no cached price rows were read.",
+                            title="Price Data",
+                            summary="Mock data is enabled for this run, so no price rows were read.",
                             rows=[],
                             download_artifacts=[],
                             status="skipped",
@@ -374,6 +380,8 @@ async def generate_market_monitor_async(
             logger.exception(f"Report generation failed for {run_id}: {e}")
 
             current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            if isinstance(e, PriceDataGateError):
+                update_run(run_id, metadata={"price_gap_report": e.gap_report.to_dict()})
             set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
 
     background_tasks.add_task(run_in_background)

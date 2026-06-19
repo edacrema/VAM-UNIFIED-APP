@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import date
 
 import pandas as pd
+import pytest
 from sqlalchemy import text
 
 from app.services.market_monitor import data_loader
@@ -177,6 +178,81 @@ def _basket_items():
             "weight_quantity": 3,
         },
     ]
+
+
+class _FakeBackfillAdapter:
+    def __init__(self, rows_by_commodity=None, *, error_by_commodity=None):
+        self.rows_by_commodity = rows_by_commodity or {}
+        self.error_by_commodity = error_by_commodity or {}
+        self.config = type("Config", (), {"max_workers": 8})()
+        self.calls = []
+
+    def fetch_commodities(self, country_iso3):
+        return [
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            },
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 2,
+                "commodity_name": "Beans",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Pulses",
+            },
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 52,
+                "commodity_name": "Rice",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            },
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 65,
+                "commodity_name": "Sorghum",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            },
+        ]
+
+    def fetch_markets(self, country_iso3):
+        return [
+            {
+                "country_iso3": country_iso3,
+                "market_id": 10,
+                "market_name": "Juba",
+                "admin1_name": "Central Equatoria",
+                "admin2_name": "",
+            },
+            {
+                "country_iso3": country_iso3,
+                "market_id": 11,
+                "market_name": "Wau",
+                "admin1_name": "Western Bahr el Ghazal",
+                "admin2_name": "",
+            },
+        ]
+
+    def fetch_monthly_price_rows(self, country_iso3, *, commodity_id=None, start_date=None, end_date=None, **_kwargs):
+        self.calls.append(
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": commodity_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        if commodity_id in self.error_by_commodity:
+            raise RuntimeError(self.error_by_commodity[commodity_id])
+        return list(self.rows_by_commodity.get(commodity_id, []))
 
 
 def _seed_dto_shaped_cache(repo: SqlPriceCacheRepository) -> str:
@@ -699,3 +775,122 @@ def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp
     assert stats["food_basket"]["selected_component_count"] == 2
     assert stats["food_basket"]["available_component_names"] == ["Maize"]
     assert stats["food_basket"]["missing_component_names"] == ["Beans"]
+
+
+def test_resolve_report_price_data_backfills_missing_reference_basket_component(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_latest_beans=False)
+    _patch_repo(monkeypatch, repo)
+    beans_backfill = _price(2, "", 11, "", None, "2025-02-01", 6)
+    beans_backfill["commodity_name"] = None
+    beans_backfill["market_name"] = None
+    beans_backfill["admin1_name"] = None
+    adapter = _FakeBackfillAdapter(rows_by_commodity={2: [beans_backfill]})
+
+    result = data_loader.resolve_report_price_data(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        ["Central Equatoria", "Western Bahr el Ghazal"],
+        basket_items=_basket_items(),
+        currency_code="SSP",
+        adapter=adapter,
+    )
+
+    assert result.df_national.loc["2025-02-01", "Maize"] == 12
+    assert result.df_national.loc["2025-02-01", "Beans"] == 6
+    assert result.df_national.loc["2025-02-01", "FoodBasket"] == 42
+    latest_regions = result.df_regional[result.df_regional["Date"] == pd.Timestamp("2025-02-01")]
+    assert dict(zip(latest_regions["Region"], latest_regions["FoodBasket"])) == {
+        "Central Equatoria": 24,
+        "Western Bahr el Ghazal": 18,
+    }
+    assert result.cache_metadata["targeted_backfill"]["attempted"] is True
+    assert result.cache_metadata["targeted_backfill"]["rows_fetched"] == 1
+    assert any(call["commodity_id"] == 2 for call in adapter.calls)
+
+
+def test_resolve_report_price_data_unresolved_reference_basket_raises(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    invalid_basket = [
+        {
+            "commodity_id": 52,
+            "commodity_name_snapshot": "Rice",
+            "databridges_unit": "kg",
+            "weight_quantity": 1,
+        },
+        {
+            "commodity_id": 65,
+            "commodity_name_snapshot": "Sorghum",
+            "databridges_unit": "kg",
+            "weight_quantity": 1,
+        },
+    ]
+
+    with pytest.raises(data_loader.BasketReferenceMonthMissing) as exc_info:
+        data_loader.resolve_report_price_data(
+            "South Sudan",
+            "2025-02",
+            [],
+            [],
+            basket_items=invalid_basket,
+            currency_code="SSP",
+            adapter=_FakeBackfillAdapter(),
+        )
+
+    message = str(exc_info.value)
+    assert "reference-month food basket is incomplete" in message
+    assert "Rice (commodity_id=52): DataBridges returns no monthly price data" in message
+    assert "Sorghum (commodity_id=65): DataBridges returns no monthly price data" in message
+    assert exc_info.value.to_dict()["price_gap_report"]["hard_missing"]
+
+
+def test_resolve_report_price_data_adapter_error_for_hard_gap_is_503(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_latest_beans=False)
+    _patch_repo(monkeypatch, repo)
+
+    with pytest.raises(data_loader.ReportPriceBackfillUnavailable) as exc_info:
+        data_loader.resolve_report_price_data(
+            "South Sudan",
+            "2025-02",
+            ["Maize"],
+            [],
+            basket_items=_basket_items(),
+            currency_code="SSP",
+            adapter=_FakeBackfillAdapter(error_by_commodity={2: "adapter retries exhausted"}),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "targeted DataBridges backfill could not verify or obtain" in str(exc_info.value)
+    assert "Beans (commodity_id=2): adapter retries exhausted" in str(exc_info.value)
+
+
+def test_resolve_report_price_data_backfill_does_not_pollute_global_price_cache(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_latest_beans=False)
+    _patch_repo(monkeypatch, repo)
+    adapter = _FakeBackfillAdapter(rows_by_commodity={2: [_price(2, "Beans", 11, "Wau", "Western Bahr el Ghazal", "2025-02-01", 6)]})
+
+    result = data_loader.resolve_report_price_data(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        [],
+        basket_items=_basket_items(),
+        currency_code="SSP",
+        adapter=adapter,
+    )
+    cache_only, _regional = data_loader.extract_time_series_from_csv(
+        "South Sudan",
+        "2025-02",
+        ["Maize"],
+        [],
+        basket_items=_basket_items(),
+        currency_code="SSP",
+    )
+
+    assert result.df_national.loc["2025-02-01", "FoodBasket"] == 42
+    assert cache_only.loc["2025-02-01", "FoodBasket"] == 24

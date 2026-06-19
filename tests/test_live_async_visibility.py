@@ -5,6 +5,12 @@ from contextlib import nullcontext
 sys.modules.setdefault("app.shared.llm", types.SimpleNamespace(get_model=lambda: None))
 
 from app.shared import async_runs
+from app.services.market_monitor.price_backfill import (
+    BasketReferenceMonthMissing,
+    CommodityGapStatus,
+    PriceRequirement,
+    ReportPriceGapReport,
+)
 from app.streamlit_backend import dispatcher
 import streamlit_shared
 from streamlit_shared import ordered_live_output_sections
@@ -129,6 +135,79 @@ def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypa
     artifact_response = dispatcher.dispatch_request("GET", artifact_path)
     assert artifact_response.status_code == 200
     assert artifact_response.headers["Content-Type"] == "application/json"
+
+
+def test_market_monitor_async_failure_stores_price_gap_report(monkeypatch):
+    _reset_run_store(monkeypatch)
+    monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        dispatcher,
+        "get_active_basket_for_report",
+        lambda country, basket_version_id=None: {
+            "basket_version_id": basket_version_id or "active-basket",
+            "version_number": 1,
+            "items": [
+                {
+                    "commodity_id": 52,
+                    "commodity_name_snapshot": "Rice",
+                    "databridges_unit": "kg",
+                    "weight_quantity": 1,
+                }
+            ],
+        },
+    )
+    gap_report = ReportPriceGapReport(
+        country="Burkina Faso",
+        iso3="BFA",
+        time_period="2026-06",
+        reference_month="2026-06",
+        window_start="2025-06",
+        window_end="2026-06",
+        requirements=[
+            PriceRequirement(
+                commodity_id=52,
+                commodity_name="Rice",
+                month="2026-06",
+                hard=True,
+                is_basket=True,
+                reason="reference_month_food_basket",
+            )
+        ],
+        commodity_statuses=[
+            CommodityGapStatus(
+                commodity_id=52,
+                commodity_name="Rice",
+                is_basket=True,
+                missing_reference_month=True,
+                source_status="no_source_data",
+                backfill_attempted=True,
+            )
+        ],
+        backfill_attempted=True,
+    )
+
+    def fake_run_report_generation(**_kwargs):
+        raise BasketReferenceMonthMissing(gap_report)
+
+    monkeypatch.setattr(dispatcher, "run_report_generation", fake_run_report_generation)
+
+    response = dispatcher._market_monitor_generate_async(
+        json_body={
+            "country": "Burkina Faso",
+            "time_period": "2026-06",
+            "commodity_list": ["Rice"],
+            "admin1_list": [],
+            "currency_code": "XOF",
+            "enabled_modules": [],
+            "use_mock_data": False,
+        }
+    )
+    run = async_runs.get_run(response.json()["run_id"])
+
+    assert run is not None
+    assert run.status == "failed"
+    assert run.error == str(BasketReferenceMonthMissing(gap_report))
+    assert run.metadata["price_gap_report"]["hard_missing"][0]["commodity_id"] == 52
 def test_mfi_dispatcher_routes_csv_endpoints(monkeypatch):
     calls = []
 

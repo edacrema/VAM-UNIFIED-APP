@@ -37,9 +37,8 @@ from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 
 from .data_loader import (
-    extract_time_series_from_csv,
     calculate_statistics_from_csv,
-    check_data_availability,
+    resolve_report_price_data,
 )
 from .food_basket import get_active_basket_for_report
 
@@ -748,36 +747,19 @@ def node_data_agent(state: MarketReportState) -> dict:
             ]
             commodity_list = _dedupe_text(basket_commodities + commodity_list)
 
-            # First, check what data is available
-            availability = check_data_availability(
-                country=state["country"],
-                time_period=state["time_period"],
-                commodities=commodity_list,
-                currency_code=state.get("currency_code"),
-            )
-            
-            # If country not available, raise error
-            if not availability["available"]:
-                raise ValueError(
-                    f"Country '{state['country']}' not found in price data. "
-                    f"Available countries: {availability['countries']}"
-                )
-            cache_metadata = availability.get("cache_metadata") or {}
-            
-            # Add any warnings from availability check
-            if availability.get("warnings"):
-                warnings.extend(availability["warnings"])
-            
-            # Extract time series from PriceCache
-            df_national, df_regional, df_raw = extract_time_series_from_csv(
+            result = resolve_report_price_data(
                 country=state["country"],
                 time_period=state["time_period"],
                 commodities=commodity_list,
                 admin1_list=state["admin1_list"],
-                return_raw_rows=True,
                 currency_code=state.get("currency_code"),
                 basket_items=basket_items,
             )
+            df_national = result.df_national
+            df_regional = result.df_regional
+            df_raw = result.raw_rows
+            cache_metadata = result.cache_metadata
+            warnings.extend(result.warnings)
             databridges_rows = json.loads(df_raw.to_json(orient="records", date_format="iso"))
             
             # Calculate statistics using the existing report statistics contract

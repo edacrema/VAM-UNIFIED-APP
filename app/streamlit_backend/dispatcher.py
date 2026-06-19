@@ -54,6 +54,7 @@ from app.services.market_monitor.data_loader import (
     get_supported_countries as get_market_monitor_supported_countries,
     normalize_country_name,
 )
+from app.services.market_monitor.price_backfill import PriceDataGateError
 from app.services.market_monitor.food_basket import (
     BasketNotConfigured,
     BasketValidationError,
@@ -1613,6 +1614,8 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
         raise LocalHTTPException(409, str(exc))
     except BasketValidationError as exc:
         raise LocalHTTPException(400, str(exc))
+    except PriceDataGateError as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1694,23 +1697,24 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                         artifacts = create_databridges_artifacts(
                             run_id=run_id,
                             service_slug="market-monitor",
-                            label_prefix="Price Cache price rows",
-                            file_stem=f"market-monitor-price-cache-{json_body.get('country')}-{json_body.get('time_period')}",
+                            label_prefix="Price data rows",
+                            file_stem=f"market-monitor-price-data-{json_body.get('country')}-{json_body.get('time_period')}",
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Cache Data",
+                            title="Price Data",
                             summary=(
-                                f"{len(rows)} cached price rows retrieved for "
-                                f"{json_body.get('country')} ({json_body.get('time_period')})."
+                                f"{len(rows)} price row(s) retrieved for "
+                                f"{json_body.get('country')} ({json_body.get('time_period')}) "
+                                "from cache plus any targeted backfill."
                             ),
                             rows=rows,
                             download_artifacts=artifacts,
                         )
                     elif bool(json_body.get("use_mock_data", False)):
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Cache Data",
-                            summary="Mock data is enabled for this run, so no cached price rows were read.",
+                            title="Price Data",
+                            summary="Mock data is enabled for this run, so no price rows were read.",
                             rows=[],
                             download_artifacts=[],
                             status="skipped",
@@ -1782,6 +1786,8 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
         except Exception as exc:
             tb_str = traceback.format_exc()
             current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            if isinstance(exc, PriceDataGateError):
+                update_run(run_id, metadata={"price_gap_report": exc.gap_report.to_dict()})
             set_run_failed(run_id, error=str(exc), traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()

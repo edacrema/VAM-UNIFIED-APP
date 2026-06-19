@@ -5,18 +5,35 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from app.services.price_cache.config import load_price_cache_config
+from app.services.price_cache.databridges_adapter import DataBridgesClientAdapter
 from app.services.price_cache.migrations import apply_migrations
 from app.services.price_cache.repository import PriceCacheRepository
+from app.services.price_cache.row_hygiene import (
+    deduplicate_monthly_price_rows,
+    enrich_price_rows_with_metadata,
+    filter_future_monthly_price_rows,
+    filter_real_monthly_price_rows,
+    price_deduplication_key,
+)
 from app.services.price_cache.schemas import CacheStatus, CountryMetadata, MonthlyPriceRecord
 from app.services.price_cache.sql_repository import SqlPriceCacheRepository, create_price_cache_engine
+from app.services.market_monitor.price_backfill import (
+    BasketReferenceMonthMissing,
+    CommodityGapStatus,
+    PriceRequirement,
+    ReportPriceBackfillUnavailable,
+    ReportPriceDataResult,
+    ReportPriceGapReport,
+)
 from app.shared.countries import (
     COUNTRY_CURRENCIES,
     normalize_country_name as _normalize_country_name,
@@ -522,6 +539,251 @@ def extract_time_series_from_csv(
             f"No PriceCache price rows remained for {canonical} after selecting a single report currency."
         )
 
+    return _build_time_series_from_price_df(
+        df,
+        canonical=canonical,
+        valid_names=valid_names,
+        admin1_list=admin1_list,
+        full_date_index=full_date_index,
+        basket_components=basket_components,
+        return_raw_rows=return_raw_rows,
+    )
+
+
+def resolve_report_price_data(
+    country: str,
+    time_period: str,
+    commodities: List[str],
+    admin1_list: List[str],
+    *,
+    basket_items: Optional[List[Dict[str, Any]]] = None,
+    currency_code: Optional[str] = None,
+    lookback_months: int = 13,
+    enable_backfill: bool = True,
+    adapter: Optional[DataBridgesClientAdapter] = None,
+) -> ReportPriceDataResult:
+    """Resolve report-scope prices from cache plus ephemeral targeted backfill."""
+    canonical, iso3 = resolve_country(country)
+    target_date = _parse_time_period(time_period)
+    start_date = target_date - pd.DateOffset(months=lookback_months - 1)
+    end_date = target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)
+    full_date_index = pd.date_range(start=start_date, end=target_date, freq="MS")
+    window_months = [month.strftime("%Y-%m") for month in full_date_index]
+    reference_month = target_date.strftime("%Y-%m")
+
+    cache_metadata = get_cache_metadata_for_report(canonical)
+    valid_names, commodity_ids, missing = _resolve_commodities(canonical, iso3, commodities)
+    basket_components = _normalise_basket_components(basket_items)
+    name_by_id = _commodity_names_by_id(canonical, iso3)
+    for component in basket_components:
+        name_by_id[component["commodity_id"]] = component["commodity_name"]
+        if component["commodity_name"] not in valid_names:
+            valid_names.append(component["commodity_name"])
+        if component["commodity_id"] not in commodity_ids:
+            commodity_ids.append(component["commodity_id"])
+    for commodity_id in commodity_ids:
+        name = name_by_id.get(commodity_id)
+        if name and name not in valid_names:
+            valid_names.append(name)
+
+    warnings: list[str] = []
+    if missing:
+        warning = f"Requested commodities not available in PriceCache for {canonical}: {missing}."
+        logger.warning(warning)
+        warnings.append(warning)
+    if not valid_names:
+        raise ValueError(
+            f"No requested commodities are available in the active PriceCache for {canonical}. "
+            f"Available commodities: {get_available_commodities(canonical)}"
+        )
+
+    repo = _get_price_cache_repository()
+    availability = repo.get_country_availability(iso3)
+    cache_version_id = getattr(availability, "cache_version_id", None) or cache_metadata.get("cache_version_id") or ""
+    commodity_ids = _dedupe_ints(commodity_ids)
+    requirements, commodity_specs = _build_report_price_requirements(
+        valid_names=valid_names,
+        commodity_ids=commodity_ids,
+        basket_components=basket_components,
+        name_by_id=name_by_id,
+        window_months=window_months,
+        reference_month=reference_month,
+    )
+
+    cache_records = _read_report_price_records(
+        iso3,
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d"),
+        commodity_ids=commodity_ids,
+    )
+    df = _price_records_to_report_df(cache_records, canonical, iso3, name_by_id)
+    df = df[df["Commodity ID"].isin(commodity_ids)].copy() if not df.empty else df
+    df, selected_currency, excluded_currencies = _select_report_currency(
+        df,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    if excluded_currencies:
+        warnings.append(
+            f"Cached prices for {canonical} are quoted in multiple currencies; report uses "
+            f"{selected_currency} and excludes {excluded_currencies}."
+        )
+
+    statuses = _detect_report_price_gaps(
+        df,
+        commodity_specs=commodity_specs,
+        window_months=window_months,
+        reference_month=reference_month,
+    )
+    gap_report = ReportPriceGapReport(
+        country=canonical,
+        iso3=iso3,
+        time_period=time_period,
+        reference_month=reference_month,
+        window_start=window_months[0],
+        window_end=window_months[-1],
+        requirements=requirements,
+        commodity_statuses=statuses,
+        warnings=warnings,
+    )
+
+    gapped_ids = [
+        status.commodity_id
+        for status in statuses
+        if status.missing_reference_month or status.missing_soft_months
+    ]
+    backfill_info: dict[int, dict[str, Any]] = {}
+    merged_records = list(cache_records)
+    if enable_backfill and gapped_ids:
+        adapter = adapter or DataBridgesClientAdapter()
+        backfill_info, backfilled_rows = _fetch_targeted_report_backfill(
+            adapter,
+            iso3=iso3,
+            commodity_ids=gapped_ids,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+        )
+        flag_filtered = filter_real_monthly_price_rows(backfilled_rows)
+        future_filtered = filter_future_monthly_price_rows(
+            flag_filtered.rows,
+            current_month_start=_current_month_start(),
+        )
+        deduped = deduplicate_monthly_price_rows(future_filtered.rows)
+        if flag_filtered.excluded_rows:
+            warnings.append(
+                f"Targeted DataBridges backfill excluded {flag_filtered.excluded_rows} non-real monthly price row(s)."
+            )
+        if future_filtered.excluded_rows:
+            warnings.append(
+                "Targeted DataBridges backfill excluded "
+                f"{future_filtered.excluded_rows} future-dated monthly price row(s)."
+            )
+        if deduped.duplicate_rows:
+            warnings.append(
+                f"Targeted DataBridges backfill deduplicated {deduped.duplicate_rows} duplicate monthly price row(s)."
+            )
+        backfilled_records = _databridges_rows_to_monthly_records(
+            deduped.rows,
+            cache_version_id=str(cache_version_id or "targeted-backfill"),
+            source_label="DataBridges targeted backfill",
+        )
+        merged_records = _merge_price_records_cache_first(cache_records, backfilled_records)
+        df = _price_records_to_report_df(merged_records, canonical, iso3, name_by_id)
+        df = df[df["Commodity ID"].isin(commodity_ids)].copy() if not df.empty else df
+        df, selected_currency, excluded_currencies = _select_report_currency(
+            df,
+            requested_code=currency_code,
+            country=canonical,
+        )
+        statuses = _detect_report_price_gaps(
+            df,
+            commodity_specs=commodity_specs,
+            window_months=window_months,
+            reference_month=reference_month,
+            backfill_info=backfill_info,
+        )
+        gap_report.commodity_statuses = statuses
+        gap_report.backfill_attempted = True
+        gap_report.backfill_rows_fetched = sum(int(info.get("fetched_rows") or 0) for info in backfill_info.values())
+
+    _classify_unresolved_gap_sources(gap_report, df, backfill_info=backfill_info)
+    hard_missing = gap_report.hard_missing_statuses()
+    if hard_missing:
+        if any(status.source_status == "source_error" for status in hard_missing):
+            raise ReportPriceBackfillUnavailable(gap_report)
+        raise BasketReferenceMonthMissing(gap_report)
+
+    frames = _build_time_series_from_price_df(
+        df,
+        canonical=canonical,
+        valid_names=valid_names,
+        admin1_list=admin1_list,
+        full_date_index=full_date_index,
+        basket_components=basket_components,
+        return_raw_rows=True,
+        allow_empty=True,
+    )
+    df_national, df_regional, raw_rows = frames
+    result_warnings = _dedupe_preserve_order(warnings + gap_report.warning_messages())
+    gap_report.warnings = result_warnings
+
+    target_metadata = {
+        "attempted": gap_report.backfill_attempted,
+        "report_scoped": True,
+        "commodity_ids": sorted(set(gapped_ids)),
+        "rows_fetched": gap_report.backfill_rows_fetched,
+        "source": "DataBridges targeted backfill",
+    }
+    cache_metadata = dict(cache_metadata)
+    cache_metadata["source"] = "PriceCache + targeted DataBridges backfill" if target_metadata["attempted"] else "PriceCache"
+    cache_metadata["targeted_backfill"] = target_metadata
+    cache_metadata["price_gap_report"] = gap_report.to_dict()
+    return ReportPriceDataResult(
+        df_national=df_national,
+        df_regional=df_regional,
+        raw_rows=raw_rows,
+        warnings=result_warnings,
+        gap_report=gap_report,
+        cache_metadata=cache_metadata,
+    )
+
+
+def _build_time_series_from_price_df(
+    df: pd.DataFrame,
+    *,
+    canonical: str,
+    valid_names: List[str],
+    admin1_list: List[str],
+    full_date_index: pd.DatetimeIndex,
+    basket_components: Optional[List[Dict[str, Any]]] = None,
+    return_raw_rows: bool = False,
+    allow_empty: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame] | Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    basket_components = basket_components or []
+    valid_names = _dedupe_preserve_order([str(name) for name in valid_names if str(name).strip()])
+    if df.empty and not allow_empty:
+        raise ValueError(f"No PriceCache price rows matched the requested commodities: {valid_names}")
+
+    df = df.copy()
+    if df.empty:
+        national_pivot = pd.DataFrame(index=full_date_index, columns=valid_names, dtype=float)
+        national_pivot["FoodBasket"] = np.nan
+        national_pivot["ExchangeRate"] = np.nan
+        national_pivot["FuelPrice"] = np.nan
+        national_pivot.index.name = "Date"
+        valid_regions = list(admin1_list or [])
+        regional_index = pd.MultiIndex.from_product(
+            [full_date_index, valid_regions],
+            names=["Date", "Region"],
+        )
+        df_regional = pd.DataFrame(index=regional_index).reset_index()
+        if "FoodBasket" not in df_regional.columns:
+            df_regional["FoodBasket"] = np.nan
+        raw_rows = _empty_price_df()
+        if return_raw_rows:
+            return national_pivot, df_regional, raw_rows
+        return national_pivot, df_regional
+
     df["Month"] = df["Price Date"].dt.to_period("M").dt.to_timestamp()
 
     national_pivot = df.pivot_table(
@@ -638,6 +900,362 @@ def extract_time_series_from_csv(
         return national_pivot, df_regional, raw_rows
 
     return national_pivot, df_regional
+
+
+def _read_report_price_records(
+    iso3: str,
+    start_date: str,
+    end_date: str,
+    *,
+    commodity_ids: Sequence[int],
+) -> list[MonthlyPriceRecord]:
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+    ids = tuple(sorted({int(item) for item in commodity_ids if item is not None}))
+    return repo.get_price_window(iso3, start_date, end_date, commodity_ids=ids or None)
+
+
+def _price_records_to_report_df(
+    records: list[MonthlyPriceRecord],
+    canonical: str,
+    iso3: str,
+    name_by_id: dict[int, str],
+) -> pd.DataFrame:
+    df = _normalise_cached_price_rows(records, canonical, iso3)
+    return _apply_report_commodity_names(df, name_by_id)
+
+
+def _apply_report_commodity_names(df: pd.DataFrame, name_by_id: dict[int, str]) -> pd.DataFrame:
+    if df.empty or "Commodity ID" not in df.columns:
+        return df
+    df = df.copy()
+    for commodity_id, name in name_by_id.items():
+        df.loc[df["Commodity ID"] == commodity_id, "Commodity"] = name
+    return df
+
+
+def _commodity_names_by_id(canonical: str, iso3: str) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for commodity in _get_commodities(canonical, iso3):
+        commodity_id = _to_int(commodity.get("id"))
+        name = str(commodity.get("name") or "").strip()
+        if commodity_id is not None and name:
+            names[commodity_id] = name
+    return names
+
+
+def _build_report_price_requirements(
+    *,
+    valid_names: list[str],
+    commodity_ids: list[int],
+    basket_components: list[dict[str, Any]],
+    name_by_id: dict[int, str],
+    window_months: list[str],
+    reference_month: str,
+) -> tuple[list[PriceRequirement], list[dict[str, Any]]]:
+    basket_by_id = {component["commodity_id"]: component for component in basket_components}
+    specs: list[dict[str, Any]] = []
+    for commodity_id in commodity_ids:
+        name = name_by_id.get(commodity_id)
+        if not name and commodity_id in basket_by_id:
+            name = basket_by_id[commodity_id]["commodity_name"]
+        if not name:
+            continue
+        specs.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": name,
+                "is_basket": commodity_id in basket_by_id,
+            }
+        )
+    seen_ids = {item["commodity_id"] for item in specs}
+    for component in basket_components:
+        if component["commodity_id"] in seen_ids:
+            continue
+        specs.append(
+            {
+                "commodity_id": component["commodity_id"],
+                "commodity_name": component["commodity_name"],
+                "is_basket": True,
+            }
+        )
+    requested_names = {str(name) for name in valid_names}
+    specs = [
+        item
+        for item in specs
+        if item["is_basket"] or item["commodity_name"] in requested_names
+    ]
+
+    requirements: list[PriceRequirement] = []
+    for item in specs:
+        for month in window_months:
+            is_hard = bool(item["is_basket"] and month == reference_month)
+            requirements.append(
+                PriceRequirement(
+                    commodity_id=int(item["commodity_id"]),
+                    commodity_name=str(item["commodity_name"]),
+                    month=month,
+                    hard=is_hard,
+                    is_basket=bool(item["is_basket"]),
+                    reason="reference_month_food_basket" if is_hard else "trailing_window",
+                )
+            )
+    return requirements, specs
+
+
+def _detect_report_price_gaps(
+    df: pd.DataFrame,
+    *,
+    commodity_specs: list[dict[str, Any]],
+    window_months: list[str],
+    reference_month: str,
+    backfill_info: Optional[dict[int, dict[str, Any]]] = None,
+) -> list[CommodityGapStatus]:
+    backfill_info = backfill_info or {}
+    months_by_id: dict[int, set[str]] = {}
+    if not df.empty:
+        working = df.copy()
+        working["MonthLabel"] = working["Price Date"].dt.to_period("M").astype(str)
+        working = working[pd.to_numeric(working["Price"], errors="coerce").notna()]
+        for commodity_id, group in working.groupby("Commodity ID"):
+            parsed_id = _to_int(commodity_id)
+            if parsed_id is None:
+                continue
+            months_by_id[parsed_id] = set(group["MonthLabel"].dropna().astype(str))
+
+    statuses: list[CommodityGapStatus] = []
+    for item in commodity_specs:
+        commodity_id = int(item["commodity_id"])
+        present = months_by_id.get(commodity_id, set())
+        is_basket = bool(item["is_basket"])
+        missing_reference = is_basket and reference_month not in present
+        soft_months = [
+            month
+            for month in window_months
+            if month not in present and not (is_basket and month == reference_month)
+        ]
+        info = backfill_info.get(commodity_id, {})
+        latest = max(present) if present else None
+        status = CommodityGapStatus(
+            commodity_id=commodity_id,
+            commodity_name=str(item["commodity_name"]),
+            is_basket=is_basket,
+            missing_reference_month=missing_reference,
+            missing_soft_months=soft_months,
+            source_status="source_error" if info.get("error") else "cache_checked",
+            latest_source_month=latest,
+            backfill_attempted=bool(info.get("attempted")),
+            fetched_rows=int(info.get("fetched_rows") or 0),
+            error=info.get("error"),
+        )
+        statuses.append(status)
+    return statuses
+
+
+def _classify_unresolved_gap_sources(
+    gap_report: ReportPriceGapReport,
+    df: pd.DataFrame,
+    *,
+    backfill_info: dict[int, dict[str, Any]],
+) -> None:
+    latest_by_id = _latest_month_by_commodity(df)
+    for status in gap_report.commodity_statuses:
+        if status.source_status == "source_error":
+            continue
+        status.latest_source_month = latest_by_id.get(status.commodity_id) or status.latest_source_month
+        if not (status.missing_reference_month or status.missing_soft_months):
+            status.source_status = "complete"
+            continue
+        info = backfill_info.get(status.commodity_id, {})
+        if info.get("attempted"):
+            if int(info.get("fetched_rows") or 0) <= 0 and status.latest_source_month is None:
+                status.source_status = "no_source_data"
+            else:
+                status.source_status = "source_lacks_reference" if status.missing_reference_month else "source_has_data"
+        elif status.latest_source_month is None:
+            status.source_status = "no_source_data"
+        else:
+            status.source_status = "source_lacks_reference" if status.missing_reference_month else "source_has_data"
+
+
+def _latest_month_by_commodity(df: pd.DataFrame) -> dict[int, str]:
+    if df.empty:
+        return {}
+    working = df.copy()
+    working["MonthLabel"] = working["Price Date"].dt.to_period("M").astype(str)
+    out: dict[int, str] = {}
+    for commodity_id, group in working.groupby("Commodity ID"):
+        parsed_id = _to_int(commodity_id)
+        if parsed_id is not None:
+            out[parsed_id] = max(group["MonthLabel"].dropna().astype(str))
+    return out
+
+
+def _fetch_targeted_report_backfill(
+    adapter: DataBridgesClientAdapter,
+    *,
+    iso3: str,
+    commodity_ids: list[int],
+    start_date: str,
+    end_date: str,
+) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    ids = _dedupe_ints(commodity_ids)
+    info = {
+        commodity_id: {"attempted": True, "fetched_rows": 0, "error": None}
+        for commodity_id in ids
+    }
+    try:
+        commodities = adapter.fetch_commodities(iso3)
+    except Exception as exc:
+        commodities = []
+        logger.warning("Could not fetch DataBridges commodity metadata for %s: %s", iso3, _safe_adapter_error(exc))
+    try:
+        markets = adapter.fetch_markets(iso3)
+    except Exception as exc:
+        markets = []
+        logger.warning("Could not fetch DataBridges market metadata for %s: %s", iso3, _safe_adapter_error(exc))
+
+    raw_rows: list[dict[str, Any]] = []
+    workers = min(_adapter_max_workers(adapter), 5, max(1, len(ids)))
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {
+            executor.submit(
+                adapter.fetch_monthly_price_rows,
+                iso3,
+                commodity_id=commodity_id,
+                start_date=start_date,
+                end_date=end_date,
+            ): commodity_id
+            for commodity_id in ids
+        }
+        for future in as_completed(futures):
+            commodity_id = futures[future]
+            try:
+                rows = [dict(row) for row in future.result()]
+                info[commodity_id]["fetched_rows"] = len(rows)
+                raw_rows.extend(rows)
+            except Exception as exc:
+                info[commodity_id]["error"] = _safe_adapter_error(exc)
+
+    enriched = enrich_price_rows_with_metadata(raw_rows, markets=markets, commodities=commodities)
+    return info, enriched
+
+
+def _adapter_max_workers(adapter: DataBridgesClientAdapter) -> int:
+    config = getattr(adapter, "config", None)
+    value = _to_int(getattr(config, "max_workers", None))
+    return value if value is not None and value > 0 else 5
+
+
+def _safe_adapter_error(exc: Exception) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    text = re.sub(r"(?i)(api[_-]?secret|client[_-]?secret|token|authorization)[=:]\S+", r"\1=<redacted>", text)
+    if len(text) > 500:
+        text = text[:497] + "..."
+    return text
+
+
+def _databridges_rows_to_monthly_records(
+    rows: Sequence[dict[str, Any]],
+    *,
+    cache_version_id: str,
+    source_label: str,
+) -> list[MonthlyPriceRecord]:
+    records: list[MonthlyPriceRecord] = []
+    for row in rows:
+        country_iso3 = str(row.get("country_iso3") or "").upper()
+        commodity_id = _to_int(row.get("commodity_id"))
+        market_id = _to_int(row.get("market_id"))
+        price_date = _date_obj(row.get("price_date"))
+        price = _to_float(row.get("price"))
+        if not country_iso3 or commodity_id is None or market_id is None or price_date is None or price is None:
+            continue
+        records.append(
+            MonthlyPriceRecord(
+                cache_version_id=cache_version_id,
+                country_iso3=country_iso3,
+                commodity_id=commodity_id,
+                market_id=market_id,
+                price_date=price_date,
+                price=price,
+                currency_id=_to_int(row.get("currency_id")),
+                currency_code=_optional_text(row.get("currency_code")),
+                currency_name=_optional_text(row.get("currency_name")),
+                commodity_unit_id=_to_int(row.get("commodity_unit_id")),
+                commodity_unit_name=_optional_text(row.get("commodity_unit_name")),
+                price_type_id=_to_int(row.get("price_type_id")),
+                price_type_name=_optional_text(row.get("price_type_name")) or "",
+                price_flag=_optional_text(row.get("price_flag")) or "",
+                original_frequency=_optional_text(row.get("original_frequency")),
+                observations=_to_int(row.get("observations")),
+                source_payload_hash=_optional_text(row.get("source_payload_hash")),
+                admin1_name=_optional_text(row.get("admin1_name")),
+                admin2_name=_optional_text(row.get("admin2_name")),
+                market_name=_optional_text(row.get("market_name")),
+                commodity_name=_optional_text(row.get("commodity_name")),
+                data_source=_optional_text(row.get("data_source")) or source_label,
+            )
+        )
+    return records
+
+
+def _merge_price_records_cache_first(
+    cached: Sequence[MonthlyPriceRecord],
+    backfilled: Sequence[MonthlyPriceRecord],
+) -> list[MonthlyPriceRecord]:
+    merged: list[MonthlyPriceRecord] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in list(cached) + list(backfilled):
+        key = price_deduplication_key(_monthly_record_to_row_dict(row))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
+def _monthly_record_to_row_dict(row: MonthlyPriceRecord) -> dict[str, Any]:
+    return {
+        "country_iso3": row.country_iso3,
+        "commodity_id": row.commodity_id,
+        "market_id": row.market_id,
+        "price_date": row.price_date,
+        "price": row.price,
+        "currency_id": row.currency_id,
+        "currency_code": row.currency_code,
+        "currency_name": row.currency_name,
+        "commodity_unit_id": row.commodity_unit_id,
+        "commodity_unit_name": row.commodity_unit_name,
+        "price_type_id": row.price_type_id,
+        "price_type_name": row.price_type_name,
+        "price_flag": row.price_flag,
+        "observations": row.observations,
+        "source_payload_hash": row.source_payload_hash,
+        "commodity_name": row.commodity_name,
+        "market_name": row.market_name,
+        "admin1_name": row.admin1_name,
+        "admin2_name": row.admin2_name,
+        "data_source": row.data_source,
+    }
+
+
+def _dedupe_ints(values: Sequence[Any]) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        parsed = _to_int(value)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        out.append(parsed)
+    return out
+
+
+def _optional_text(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 extract_time_series_from_databridges = extract_time_series_from_csv
