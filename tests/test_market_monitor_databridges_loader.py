@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -253,6 +254,110 @@ class _FakeBackfillAdapter:
         if commodity_id in self.error_by_commodity:
             raise RuntimeError(self.error_by_commodity[commodity_id])
         return list(self.rows_by_commodity.get(commodity_id, []))
+
+
+class _FakeFxAdapter:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.calls = []
+
+    def fetch_exchange_rate_rows_result(self, country_iso3, *, currency_name=None, start_date=None, end_date=None):
+        self.calls.append(
+            {
+                "country_iso3": country_iso3,
+                "currency_name": currency_name,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        return SimpleNamespace(rows=list(self.rows), pages=1, permission_denied=False, error=None)
+
+
+def _seed_contiguous_cache(
+    repo: SqlPriceCacheRepository,
+    *,
+    start_month: str = "2021-03-01",
+    periods: int = 60,
+    country_iso3: str = "SSD",
+    country_name: str = "South Sudan",
+    currency_code: str = "SSP",
+    currency_name: str = "South Sudanese Pound",
+) -> str:
+    version_id = repo.create_cache_version()
+    repo.insert_currencies(
+        version_id,
+        [{"currency_id": 200, "currency_code": currency_code, "currency_name": currency_name}],
+    )
+    months = pd.date_range(start=start_month, periods=periods, freq="MS")
+    prices = []
+    for index, month in enumerate(months):
+        row = _price(
+            1,
+            "Maize",
+            10,
+            "Juba",
+            "Central Equatoria",
+            month.strftime("%Y-%m-%d"),
+            10 + index,
+        )
+        row["country_iso3"] = country_iso3
+        row["currency_code"] = currency_code
+        row["currency_name"] = currency_name
+        prices.append(row)
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        country_name=country_name,
+        commodities=[
+            {
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            }
+        ],
+        markets=[{"market_id": 10, "market_name": "Juba", "admin1_name": "Central Equatoria"}],
+        prices=prices,
+        latest_price_date=months[-1].strftime("%Y-%m-%d"),
+        currency_code=currency_code,
+        currency_name=currency_name,
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        status="success",
+        rows_prices=len(prices),
+        rows_commodities=1,
+        rows_markets=1,
+        latest_price_date=months[-1].strftime("%Y-%m-%d"),
+    )
+    repo.insert_units(
+        version_id,
+        [{"commodity_unit_id": 100, "commodity_unit_name": "kg", "conversion_to_kg_l": 1.0, "active": True}],
+    )
+    repo.publish_cache_version(version_id, country_iso3s=[country_iso3], status="active")
+    return version_id
+
+
+def _fx_rows(months, *, official=True, missing=None, base=1000, country_iso3="SSD", currency_code="SSP"):
+    missing = set(missing or [])
+    rows = []
+    for index, month in enumerate(months):
+        label = pd.Timestamp(month).strftime("%Y-%m")
+        if label in missing:
+            continue
+        rows.append(
+            {
+                "country_iso3": country_iso3,
+                "currency_code": currency_code,
+                "date": pd.Timestamp(month).date(),
+                "value": float(base + index),
+                "is_official": official,
+                "frequency": "Daily" if official else "Weekly",
+            }
+        )
+    return rows
 
 
 def _seed_dto_shaped_cache(repo: SqlPriceCacheRepository) -> str:
@@ -750,6 +855,192 @@ def test_additional_commodities_do_not_change_weighted_food_basket(monkeypatch, 
     assert national.loc["2025-02-01", "FoodBasket"] == 42
     assert stats["commodities"]["Rice"]["current_price"] == 7
     assert stats["food_basket"]["current_price"] == 42
+
+
+def test_resolve_report_price_data_adds_databridges_fx_and_history(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_contiguous_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    adapter = _FakeFxAdapter(
+        _fx_rows(months, official=True, base=1000)
+        + _fx_rows(months, official=False, missing={"2026-01"}, base=1200)
+    )
+
+    result = data_loader.resolve_report_price_data(
+        "South Sudan",
+        "2026-02",
+        ["Maize"],
+        ["Central Equatoria"],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 2}],
+        currency_code="SSP",
+        adapter=adapter,
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        result.df_national,
+        ["Maize"],
+        food_basket_components=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 2}],
+        currency_code="SSP",
+    )
+
+    assert adapter.calls == [
+        {
+            "country_iso3": "SSD",
+            "currency_name": "SSP",
+            "start_date": date(2025, 2, 1),
+            "end_date": date(2026, 2, 28),
+        }
+    ]
+    assert result.df_national["ExchangeRate"].notna().all()
+    assert "ExchangeRateUnofficial" not in result.df_national.columns
+    assert result.exchange_rate_data["source"] == "DataBridges"
+    assert result.exchange_rate_data["current_rate"] == 1012.0
+    assert result.exchange_rate_data["unit"] == "SSP per 1 USD"
+    assert result.exchange_rate_data["higher_value_indicates"] == "local_currency_depreciation"
+    assert stats["exchange_rate"]["official"]["current_rate"] == 1012.0
+    assert stats["exchange_rate"]["official"]["unit"] == "SSP per 1 USD"
+    assert result.cache_metadata["currency_code"] == "SSP"
+    assert result.cache_metadata["fx"]["official"]["included"] is True
+    assert result.cache_metadata["fx"]["unofficial"]["included"] is False
+    assert any("Unofficial FX omitted" in warning for warning in result.warnings)
+    assert len(result.df_history_national) == 60
+    assert result.df_history_national["FoodBasket"].notna().all()
+
+
+def test_exchange_rate_resampling_averages_raw_daily_and_weekly_rows():
+    months = pd.date_range("2026-01-01", periods=2, freq="MS")
+    rows = [
+        {"date": date(2026, 1, 1), "value": 100, "is_official": True},
+        {"date": date(2026, 1, 15), "value": 110, "is_official": True},
+        {"date": date(2026, 2, 1), "value": 120, "is_official": True},
+        {"date": date(2026, 2, 18), "value": 140, "is_official": True},
+        {"date": date(2026, 1, 2), "value": 200, "is_official": False, "frequency": "Weekly"},
+        {"date": date(2026, 1, 23), "value": 220, "is_official": False, "frequency": "Weekly"},
+        {"date": date(2026, 2, 6), "value": 240, "is_official": False, "frequency": "Weekly"},
+        {"date": date(2026, 2, 27), "value": 280, "is_official": False, "frequency": "Weekly"},
+    ]
+
+    official, official_missing = data_loader._monthly_exchange_rate_series(
+        rows,
+        full_date_index=months,
+        official=True,
+    )
+    unofficial, unofficial_missing = data_loader._monthly_exchange_rate_series(
+        rows,
+        full_date_index=months,
+        official=False,
+    )
+
+    assert official_missing == []
+    assert unofficial_missing == []
+    assert official.tolist() == [105.0, 130.0]
+    assert unofficial.tolist() == [210.0, 260.0]
+
+
+def test_resolve_exchange_rate_series_keeps_official_when_unofficial_missing_month():
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    rows = (
+        _fx_rows(months, official=True, base=1000)
+        + _fx_rows(months, official=False, missing={"2026-01"}, base=1200)
+    )
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="SSD",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(rows),
+    )
+
+    assert "ExchangeRate" in result["series"]
+    assert "ExchangeRateUnofficial" not in result["series"]
+    assert result["metadata"]["official"]["included"] is True
+    assert result["metadata"]["unofficial"]["included"] is False
+    assert "2026-01" in result["metadata"]["unofficial"]["missing_months"]
+    assert any("Unofficial FX omitted" in warning for warning in result["warnings"])
+
+
+def test_resolve_exchange_rate_series_no_unofficial_is_official_only_warning():
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    rows = _fx_rows(months, official=True, base=1000, country_iso3="AFG", currency_code="AFN")
+
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="AFG",
+        currency_code="AFN",
+        currency_name="Afghani",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(rows),
+    )
+
+    assert "ExchangeRate" in result["series"]
+    assert "ExchangeRateUnofficial" not in result["series"]
+    assert result["metadata"]["official"]["included"] is True
+    assert result["metadata"]["unofficial"]["included"] is False
+    assert any("no unofficial/parallel" in warning for warning in result["warnings"])
+
+
+def test_resolve_exchange_rate_series_partial_current_month_warns(monkeypatch):
+    months = pd.date_range(end="2026-06-01", periods=13, freq="MS")
+    prior_rows = _fx_rows(months[:-1], official=True, base=1000)
+    latest_rows = [
+        {
+            "country_iso3": "SSD",
+            "currency_code": "SSP",
+            "date": date(2026, 6, 1),
+            "value": 2000.0,
+            "is_official": True,
+            "frequency": "Daily",
+        },
+        {
+            "country_iso3": "SSD",
+            "currency_code": "SSP",
+            "date": date(2026, 6, 18),
+            "value": 2200.0,
+            "is_official": True,
+            "frequency": "Daily",
+        },
+    ]
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2026, 6, 1))
+
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="SSD",
+        currency_code="SSP",
+        currency_name="South Sudanese Pound",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(prior_rows + latest_rows),
+    )
+
+    assert result["series"]["ExchangeRate"].iloc[-1] == 2100.0
+    assert result["exchange_rate_data"]["current_rate"] == 2100.0
+    assert result["metadata"]["partial_latest_month"] == {
+        "partial": True,
+        "month": "2026-06",
+        "through_date": "2026-06-18",
+    }
+    assert any("partial through 2026-06-18" in warning for warning in result["warnings"])
+
+
+def test_resolve_report_price_data_fx_flag_disables_fetch(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_contiguous_cache(repo, start_month="2025-06-01", periods=13)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setenv("MARKET_MONITOR_FX_ENABLED", "false")
+    months = pd.date_range(end="2026-06-01", periods=13, freq="MS")
+    adapter = _FakeFxAdapter(_fx_rows(months, official=True, base=1000))
+
+    result = data_loader.resolve_report_price_data(
+        "South Sudan",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="SSP",
+        adapter=adapter,
+    )
+
+    assert adapter.calls == []
+    assert result.exchange_rate_data is None
+    assert result.cache_metadata["fx"]["source"] == "disabled"
+    assert result.df_national["ExchangeRate"].isna().all()
 
 
 def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp_path):

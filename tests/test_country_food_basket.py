@@ -121,6 +121,25 @@ def test_unpriced_commodity_is_rejected(tmp_path):
         _basket_repo(price_repo).save_basket("SSD", items=[{"commodity_id": 3, "weight_quantity": 1}])
 
 
+def test_empty_priced_commodity_set_is_rejected(tmp_path):
+    price_repo = _price_repo(tmp_path)
+    cache_version_id = seed_cache_snapshot(price_repo)
+    with price_repo.engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM cached_price_monthly
+                WHERE cache_version_id = :cache_version_id
+                  AND country_iso3 = 'SSD'
+                """
+            ),
+            {"cache_version_id": cache_version_id},
+        )
+
+    with pytest.raises(BasketValidationError, match="No commodities with cached price rows"):
+        _basket_repo(price_repo).save_basket("SSD", items=[{"commodity_id": 1, "weight_quantity": 1}])
+
+
 def test_missing_commodity_unit_falls_back_to_price_row_unit(tmp_path):
     price_repo = _price_repo(tmp_path)
     cache_version_id = seed_cache_snapshot(price_repo)

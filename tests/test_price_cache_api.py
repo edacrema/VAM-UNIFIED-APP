@@ -88,6 +88,7 @@ class FakeRepo:
             commodities=[
                 CommodityRecord(version_id, "SSD", 1, "Maize", 100, "kg", "Cereals"),
                 CommodityRecord(version_id, "SSD", 2, "Beans", 100, "kg", "Pulses"),
+                CommodityRecord(version_id, "SSD", 3, "Rice", 100, "kg", "Cereals"),
             ],
             units=[UnitRecord(version_id, 100, "kg")],
             markets=[
@@ -205,6 +206,18 @@ def test_country_metadata_endpoint_reads_cache_without_databridges(monkeypatch):
     assert payload["latest_cached_date"] == "2025-02-01"
     assert payload["date_range"] == {"start": "2025-01-01", "end": "2025-02-01"}
     assert [item["name"] for item in payload["commodities"]] == ["Beans", "Maize"]
+    assert all(item["priced"] is True for item in payload["commodities"])
+    assert payload["unpriced_commodities"] == [
+        {
+            "id": 3,
+            "name": "Rice",
+            "category": "Cereals",
+            "unit_id": 100,
+            "unit": "kg",
+            "unit_name": "kg",
+            "priced": False,
+        }
+    ]
     assert payload["units"] == [
         {"id": 100, "name": "kg", "conversion_to_kg_l": None, "source": "cached_units"}
     ]

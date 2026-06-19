@@ -1949,7 +1949,7 @@ def _market_monitor_info() -> Dict[str, Any]:
                 "type": "array",
                 "required": False,
                 "label": "Optional Modules",
-                "description": "Optional modules to enable (note: exchange_rate requires TE_API_KEY and has no mock fallback)",
+                "description": "Optional modules to enable (exchange_rate uses DataBridges FX first, with TradingEconomics fallback when TE_API_KEY is configured)",
                 "default": [],
                 "options": list(AVAILABLE_MODULES.keys()),
             },
@@ -1980,7 +1980,7 @@ def _market_monitor_info() -> Dict[str, Any]:
             {
                 "id": "exchange_rate",
                 "name": "Exchange Rate Analysis",
-                "description": "Exchange rate analysis using TradingEconomics API data (requires TE_API_KEY; no mock fallback)",
+                "description": "Exchange rate analysis using DataBridges FX, with TradingEconomics as fallback when TE_API_KEY is configured",
             }
         ],
     }

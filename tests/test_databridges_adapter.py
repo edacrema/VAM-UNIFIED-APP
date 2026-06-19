@@ -12,6 +12,7 @@ from app.services.price_cache.databridges_adapter import (
     DataBridgesClientAdapter,
     DataBridgesNormalizationError,
     load_databridges_adapter_config,
+    normalize_exchange_rate_row,
     normalize_monthly_price_row,
 )
 
@@ -62,6 +63,13 @@ class FakePagedApi:
             raise response
         return response
 
+    def exchange_rates(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
 
 class FakeMarketPricesApi:
     def __init__(self, fake):
@@ -101,6 +109,9 @@ class FakeCurrencyApi:
 
     def currency_list_get(self, **kwargs):
         return self.fake.currencies(**kwargs)
+
+    def currency_usd_indirect_quotation_get(self, **kwargs):
+        return self.fake.exchange_rates(**kwargs)
 
 
 class ModelLike:
@@ -286,6 +297,135 @@ def test_metadata_fetches_normalize_cache_compatible_rows():
     assert client.fetch_units()[0]["commodity_unit_name"] == "kg"
     assert client.fetch_markets("ssd")[0]["admin1_name"] == "Central"
     assert client.fetch_currencies()[0]["currency_code"] == "SSP"
+
+
+def test_exchange_rate_pagination_normalizes_official_and_unofficial_rows():
+    fx = FakePagedApi(
+        [
+            {
+                "items": [
+                    {
+                        "countryISO3": "COD",
+                        "name": "CDF",
+                        "date": "2025-02-15",
+                        "value": "2850.5",
+                        "isOfficial": True,
+                        "frequency": "Daily",
+                    },
+                    {
+                        "countryISO3": "COD",
+                        "currencyCode": "CDF",
+                        "date": "2025-02-15",
+                        "value": 2901.25,
+                        "isOfficial": False,
+                    },
+                ],
+                "totalItems": 2,
+            }
+        ]
+    )
+    client = _adapter(currency_api=FakeCurrencyApi(fx))
+
+    result = client.fetch_exchange_rate_rows_result("cod", currency_name="CDF")
+
+    assert result.permission_denied is False
+    assert result.error is None
+    assert result.pages == 1
+    assert [row["is_official"] for row in result.rows] == [True, False]
+    assert result.rows[0]["country_iso3"] == "COD"
+    assert result.rows[0]["currency_code"] == "CDF"
+    assert result.rows[0]["currency_name"] is None
+    assert result.rows[0]["date"] == date(2025, 2, 15)
+    assert result.rows[0]["value"] == 2850.5
+    assert fx.calls[0]["country_code"] == "COD"
+    assert fx.calls[0]["currency_name"] == "CDF"
+    assert fx.calls[0]["format"] == "json"
+
+
+def test_exchange_rate_newest_first_pagination_stops_after_window_start():
+    fx = FakePagedApi(
+        [
+            {
+                "items": [
+                    {
+                        "countryISO3": "COD",
+                        "name": "CDF",
+                        "date": "2026-06-18",
+                        "value": "2860",
+                        "isOfficial": True,
+                    },
+                    {
+                        "countryISO3": "COD",
+                        "name": "CDF",
+                        "date": "2026-05-15",
+                        "value": "2850",
+                        "isOfficial": True,
+                    },
+                ],
+                "totalItems": 3000,
+            },
+            {
+                "items": [
+                    {
+                        "countryISO3": "COD",
+                        "name": "CDF",
+                        "date": "2025-06-01",
+                        "value": "2800",
+                        "isOfficial": True,
+                    },
+                    {
+                        "countryISO3": "COD",
+                        "name": "CDF",
+                        "date": "2025-05-31",
+                        "value": "2790",
+                        "isOfficial": True,
+                    },
+                ],
+                "totalItems": 3000,
+            },
+        ]
+    )
+    client = _adapter(currency_api=FakeCurrencyApi(fx))
+
+    result = client.fetch_exchange_rate_rows_result(
+        "COD",
+        currency_name="CDF",
+        start_date=date(2025, 6, 1),
+        end_date=date(2026, 6, 30),
+    )
+
+    assert result.error is None
+    assert result.pages == 2
+    assert [call["page"] for call in fx.calls] == [1, 2]
+    assert [row["date"] for row in result.rows] == [
+        date(2026, 6, 18),
+        date(2026, 5, 15),
+        date(2025, 6, 1),
+    ]
+
+
+def test_exchange_rate_permission_and_empty_responses_do_not_raise():
+    denied = FakePagedApi([ApiError(403, "permission denied")])
+    client = _adapter(currency_api=FakeCurrencyApi(denied))
+
+    denied_result = client.fetch_exchange_rate_rows_result("COD")
+
+    assert denied_result.rows == []
+    assert denied_result.permission_denied is True
+    assert "permission" in denied_result.error
+
+    empty = FakePagedApi([{"items": []}])
+    client = _adapter(currency_api=FakeCurrencyApi(empty))
+    empty_result = client.fetch_exchange_rate_rows_result("COD")
+
+    assert empty_result.rows == []
+    assert empty_result.permission_denied is False
+    assert empty_result.error is None
+
+
+def test_exchange_rate_normalization_requires_date_and_value():
+    with pytest.raises(DataBridgesNormalizationError, match="value"):
+        normalize_exchange_rate_row({"countryISO3": "COD", "date": "2025-02-01"}, country_iso3="COD")
 
 
 def test_normalization_accepts_model_like_objects_and_hash_is_deterministic():

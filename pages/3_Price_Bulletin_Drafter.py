@@ -304,6 +304,8 @@ editor_rows = []
 for commodity in raw_commodities:
     if not isinstance(commodity, dict):
         continue
+    if commodity.get("priced") is False:
+        continue
     commodity_id = commodity.get("id")
     if commodity_id in (None, ""):
         continue

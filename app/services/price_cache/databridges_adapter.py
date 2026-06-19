@@ -50,6 +50,14 @@ class PagedFetchResult:
     pages: int
 
 
+@dataclass(frozen=True)
+class ExchangeRateFetchResult:
+    rows: list[dict[str, Any]]
+    pages: int = 0
+    permission_denied: bool = False
+    error: Optional[str] = None
+
+
 def load_databridges_adapter_config(
     env: Optional[Mapping[str, str]] = None,
     *,
@@ -190,6 +198,36 @@ class DataBridgesClientAdapter:
 
     def fetch_currencies(self) -> list[dict[str, Any]]:
         return self._fetch_currencies_result().rows
+
+    def fetch_exchange_rate_rows(
+        self,
+        country_iso3: str,
+        *,
+        currency_name: Optional[str] = None,
+        start_date: Optional[date | str] = None,
+        end_date: Optional[date | str] = None,
+    ) -> list[dict[str, Any]]:
+        return self.fetch_exchange_rate_rows_result(
+            country_iso3,
+            currency_name=currency_name,
+            start_date=start_date,
+            end_date=end_date,
+        ).rows
+
+    def fetch_exchange_rate_rows_result(
+        self,
+        country_iso3: str,
+        *,
+        currency_name: Optional[str] = None,
+        start_date: Optional[date | str] = None,
+        end_date: Optional[date | str] = None,
+    ) -> ExchangeRateFetchResult:
+        return self._fetch_exchange_rate_rows_result(
+            country_iso3,
+            currency_name=currency_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
     def dry_run_full_cache(
         self,
@@ -332,6 +370,92 @@ class DataBridgesClientAdapter:
         return PagedFetchResult(
             rows=[normalize_currency_row(item) for item in result.rows],
             pages=result.pages,
+        )
+
+    def _fetch_exchange_rate_rows_result(
+        self,
+        country_iso3: str,
+        *,
+        currency_name: Optional[str] = None,
+        start_date: Optional[date | str] = None,
+        end_date: Optional[date | str] = None,
+    ) -> ExchangeRateFetchResult:
+        method = getattr(self._currency_api, "currency_usd_indirect_quotation_get", None)
+        if method is None:
+            return ExchangeRateFetchResult(
+                rows=[],
+                pages=0,
+                permission_denied=False,
+                error="DataBridges CurrencyApi does not expose currency_usd_indirect_quotation_get.",
+            )
+
+        params = {
+            "country_code": str(country_iso3 or "").upper(),
+            "currency_name": currency_name,
+        }
+        start_bound = _to_date_value(start_date)
+        end_bound = _to_date_value(end_date)
+        rows: list[dict[str, Any]] = []
+        errors: list[str] = []
+        pages = 0
+        seen_raw = 0
+        first_total: Optional[int] = None
+        try:
+            for page in range(1, self.config.max_pages + 1):
+                kwargs = _clean_params(
+                    {
+                        **params,
+                        "page": page,
+                        "format": "json",
+                        "env": self.config.env,
+                        "_request_timeout": float(self.config.request_timeout_seconds),
+                    }
+                )
+                payload = self._request_with_retry(method, kwargs)
+                page_items = _payload_items(payload)
+                pages += 1
+                if not page_items:
+                    break
+                seen_raw += len(page_items)
+                total = _payload_total(payload)
+                if first_total is None and total is not None:
+                    first_total = total
+
+                page_dates: list[date] = []
+                for item in page_items:
+                    try:
+                        row = normalize_exchange_rate_row(item, country_iso3=country_iso3)
+                    except Exception as exc:
+                        errors.append(_safe_error(exc))
+                        continue
+                    row_date = row["date"]
+                    page_dates.append(row_date)
+                    if start_bound is not None and row_date < start_bound:
+                        continue
+                    if end_bound is not None and row_date > end_bound:
+                        continue
+                    rows.append(row)
+
+                if start_bound is not None and page_dates and min(page_dates) < start_bound:
+                    break
+                if first_total is not None and seen_raw >= first_total:
+                    break
+            else:
+                raise DataBridgesAdapterError(f"Databridges pagination exceeded {self.config.max_pages} pages.")
+        except Exception as exc:
+            message = _safe_error(exc)
+            return ExchangeRateFetchResult(
+                rows=[],
+                pages=pages,
+                permission_denied=_looks_permission_denied(message, exc),
+                error=message,
+            )
+
+        return ExchangeRateFetchResult(
+            rows=rows,
+            pages=pages,
+            permission_denied=False,
+            error="; ".join(errors[:3]) if errors else None,
         )
 
     def _fetch_paged(self, method: Callable[..., Any], *, params: dict[str, Any]) -> PagedFetchResult:
@@ -597,6 +721,37 @@ def normalize_currency_row(row: Any) -> dict[str, Any]:
     }
 
 
+def normalize_exchange_rate_row(row: Any, *, country_iso3: Optional[str] = None) -> dict[str, Any]:
+    mapping = _to_mapping(row)
+    resolved_country = str(
+        _field(mapping, "countryISO3", "countryIso3", "country_iso3", "countryCode", "country_code", default=country_iso3)
+        or ""
+    ).upper()
+    rate_date = _to_date_value(_field(mapping, "date", "quotationDate", "quotation_date", "valueDate", "value_date"))
+    value = _to_float(_field(mapping, "value", "exchangeRate", "exchange_rate", "rate"))
+    missing = []
+    if not resolved_country:
+        missing.append("country_iso3")
+    if rate_date is None:
+        missing.append("date")
+    if value is None:
+        missing.append("value")
+    if missing:
+        raise DataBridgesNormalizationError(f"Exchange rate row missing required fields: {', '.join(missing)}")
+
+    is_official_raw = _field(mapping, "isOfficial", "is_official", "official", default=True)
+    return {
+        "country_iso3": resolved_country,
+        "currency_code": _optional_str(_field(mapping, "currencyCode", "currency_code", "name", "code")),
+        "currency_name": _optional_str(_field(mapping, "currencyName", "currency_name")),
+        "date": rate_date,
+        "value": value,
+        "is_official": _to_bool(is_official_raw),
+        "frequency": _optional_str(_field(mapping, "frequency", "originalFrequency", "original_frequency")),
+        "source_payload_hash": _hash_payload(mapping),
+    }
+
+
 def _default_country_codes() -> list[str]:
     return [str(item["iso3"]) for item in supported_country_options()]
 
@@ -700,6 +855,21 @@ def _to_month_start(value: Any) -> Optional[date]:
     except ValueError:
         return None
     return date(parsed.year, parsed.month, 1)
+
+
+def _to_date_value(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw[:10] if len(raw) >= 10 else raw)
+    except ValueError:
+        return None
+    return parsed.date()
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -828,6 +998,14 @@ def _safe_error(exc: BaseException) -> str:
         if secret:
             message = message.replace(secret, "[redacted]")
     return message
+
+
+def _looks_permission_denied(message: str, exc: Optional[BaseException] = None) -> bool:
+    status = _status_code(exc) if exc is not None else None
+    if status == 403:
+        return True
+    text = str(message or "").lower()
+    return "403" in text or "forbidden" in text or "permission" in text or "unauthorized" in text
 
 
 def _format_summary(summary: dict[str, Any]) -> str:

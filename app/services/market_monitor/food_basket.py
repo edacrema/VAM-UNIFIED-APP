@@ -353,6 +353,8 @@ class SqlCountryFoodBasketRepository:
 
         commodities = {int(item.commodity_id): item for item in metadata.commodities}
         priced_ids = {int(item) for item in availability.priced_commodity_ids or []}
+        if not priced_ids:
+            raise BasketValidationError(f"No commodities with cached price rows are available for {country_iso3}.")
         seen: set[int] = set()
         normalized: list[dict[str, Any]] = []
 
@@ -365,7 +367,7 @@ class SqlCountryFoodBasketRepository:
             commodity = commodities.get(commodity_id)
             if commodity is None:
                 raise BasketValidationError(f"Commodity ID {commodity_id} is not available for {country_iso3}.")
-            if priced_ids and commodity_id not in priced_ids:
+            if commodity_id not in priced_ids:
                 raise BasketValidationError(f"Commodity ID {commodity_id} has no cached price rows for {country_iso3}.")
 
             unit_id = commodity.commodity_unit_id

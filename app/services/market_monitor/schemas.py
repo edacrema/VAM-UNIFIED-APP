@@ -132,7 +132,10 @@ class GenerateReportInput(BaseModel):
     )
     enabled_modules: List[str] = Field(
         default=[],
-        description="Optional modules to enable (exchange_rate requires TE_API_KEY and has no mock fallback)"
+        description=(
+            "Optional modules to enable "
+            "(exchange_rate uses DataBridges FX first, with TradingEconomics as fallback when TE_API_KEY is configured)"
+        )
     )
     previous_report_text: str = Field(
         default="",

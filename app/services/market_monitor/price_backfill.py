@@ -139,6 +139,8 @@ class ReportPriceDataResult:
     warnings: list[str]
     gap_report: ReportPriceGapReport
     cache_metadata: dict[str, Any]
+    exchange_rate_data: Optional[dict[str, Any]] = None
+    df_history_national: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class PriceDataGateError(RuntimeError):

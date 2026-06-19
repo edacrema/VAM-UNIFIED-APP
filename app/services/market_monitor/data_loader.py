@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 _CACHE_TTL_SECONDS = 15 * 60
 _RECENT_METADATA_MONTHS = 36
+_CHART_HISTORY_MONTHS = 60
 _REAL_PRICE_FLAG_COMPONENTS = {"actual", "aggregate", "aggregated"}
 
 # Worker-side ETL telemetry that operators need but officers should not be
@@ -378,21 +380,30 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     country_record = cache_metadata.country
     country_name = country_record.country_name or canonical
     currency = _country_currency(country_record, fallback_country=canonical)
-    priced_ids = set(availability.priced_commodity_ids)
-    raw_commodities = cache_metadata.commodities
-    if priced_ids:
-        raw_commodities = [item for item in raw_commodities if item.commodity_id in priced_ids]
+    priced_ids = {int(item) for item in availability.priced_commodity_ids or []}
+    raw_commodities = list(cache_metadata.commodities)
+    priced_commodities = [item for item in raw_commodities if int(item.commodity_id) in priced_ids]
+    unpriced_commodities = [item for item in raw_commodities if int(item.commodity_id) not in priced_ids]
     price_row_units = _price_row_units_by_commodity(repo, iso3, availability)
-    commodities = [
-        {
+
+    def commodity_payload(item: Any, *, priced: bool) -> dict[str, Any]:
+        return {
             "id": item.commodity_id,
             "name": item.commodity_name,
             "category": item.category_name or _infer_category(item.commodity_name),
             "unit_id": item.commodity_unit_id or price_row_units.get(item.commodity_id, {}).get("unit_id"),
             "unit": item.commodity_unit_name or price_row_units.get(item.commodity_id, {}).get("unit"),
             "unit_name": item.commodity_unit_name or price_row_units.get(item.commodity_id, {}).get("unit"),
+            "priced": priced,
         }
-        for item in sorted(raw_commodities, key=lambda item: (item.commodity_name.lower(), item.commodity_id))
+
+    commodities = [
+        commodity_payload(item, priced=True)
+        for item in sorted(priced_commodities, key=lambda item: (item.commodity_name.lower(), item.commodity_id))
+    ]
+    unpriced_payload = [
+        commodity_payload(item, priced=False)
+        for item in sorted(unpriced_commodities, key=lambda item: (item.commodity_name.lower(), item.commodity_id))
     ]
     commodity_names = [str(item["name"]) for item in commodities if item.get("name")]
 
@@ -407,6 +418,8 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
         availability.latest_price_date,
     )
     warnings, operator_warnings = _split_warning_audiences(_cache_warnings(status, country_iso3=iso3))
+    if not priced_ids:
+        warnings.append(f"PriceCache has no priced commodity IDs for {country_name}; basket setup is disabled.")
     if date_range is None:
         warnings.append(f"PriceCache has no monthly price date range for {country_name}.")
     if has_future_dates:
@@ -424,6 +437,7 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
         "iso3": iso3,
         "currency": currency,
         "commodities": commodities,
+        "unpriced_commodities": unpriced_payload,
         "units": units,
         "commodity_categories": get_commodity_categories(commodity_names),
         "default_commodities": _select_default_commodities(commodity_names),
@@ -724,7 +738,34 @@ def resolve_report_price_data(
         allow_empty=True,
     )
     df_national, df_regional, raw_rows = frames
+    selected_currency_code = _resolve_selected_currency_code(
+        df,
+        selected_currency,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    df_history_national = _build_chart_history_national(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        valid_names=valid_names,
+        admin1_list=admin1_list,
+        basket_components=basket_components,
+        commodity_ids=commodity_ids,
+        name_by_id=name_by_id,
+        currency_code=selected_currency_code or currency_code,
+    )
+    fx_result = _resolve_exchange_rate_series(
+        iso3=iso3,
+        currency_code=selected_currency_code,
+        currency_name=selected_currency,
+        full_date_index=full_date_index,
+        adapter=adapter,
+    )
+    for column, series in fx_result["series"].items():
+        df_national[column] = series.reindex(full_date_index)
     result_warnings = _dedupe_preserve_order(warnings + gap_report.warning_messages())
+    result_warnings = _dedupe_preserve_order(result_warnings + fx_result["warnings"])
     gap_report.warnings = result_warnings
 
     target_metadata = {
@@ -736,6 +777,8 @@ def resolve_report_price_data(
     }
     cache_metadata = dict(cache_metadata)
     cache_metadata["source"] = "PriceCache + targeted DataBridges backfill" if target_metadata["attempted"] else "PriceCache"
+    cache_metadata["currency_code"] = selected_currency_code
+    cache_metadata["fx"] = fx_result["metadata"]
     cache_metadata["targeted_backfill"] = target_metadata
     cache_metadata["price_gap_report"] = gap_report.to_dict()
     return ReportPriceDataResult(
@@ -745,7 +788,349 @@ def resolve_report_price_data(
         warnings=result_warnings,
         gap_report=gap_report,
         cache_metadata=cache_metadata,
+        exchange_rate_data=fx_result["exchange_rate_data"],
+        df_history_national=df_history_national,
     )
+
+
+def _market_monitor_fx_enabled() -> bool:
+    raw = os.getenv("MARKET_MONITOR_FX_ENABLED")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _resolve_selected_currency_code(
+    df: pd.DataFrame,
+    selected_currency: Optional[str],
+    *,
+    requested_code: Optional[str],
+    country: str,
+) -> Optional[str]:
+    if not df.empty and "Currency Code" in df.columns:
+        codes = [
+            str(value).strip().upper()
+            for value in df["Currency Code"].dropna().astype(str)
+            if str(value).strip()
+        ]
+        if codes:
+            return pd.Series(codes).value_counts().idxmax()
+    if requested_code and str(requested_code).strip():
+        return str(requested_code).strip().upper()
+    default_currency = COUNTRY_CURRENCIES.get(country) or {}
+    code = default_currency.get("code")
+    if code:
+        return str(code).strip().upper()
+    if selected_currency and len(str(selected_currency).strip()) == 3:
+        return str(selected_currency).strip().upper()
+    return None
+
+
+def _build_chart_history_national(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    valid_names: list[str],
+    admin1_list: list[str],
+    basket_components: list[dict[str, Any]],
+    commodity_ids: list[int],
+    name_by_id: dict[int, str],
+    currency_code: Optional[str],
+) -> pd.DataFrame:
+    history_start = target_date - pd.DateOffset(months=_CHART_HISTORY_MONTHS - 1)
+    history_index = pd.date_range(start=history_start, end=target_date, freq="MS")
+    try:
+        records = _read_report_price_records(
+            iso3,
+            history_start.strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+        df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+        if not df.empty:
+            df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+        df, _selected, _excluded = _select_report_currency(
+            df,
+            requested_code=currency_code,
+            country=canonical,
+        )
+        history_frames = _build_time_series_from_price_df(
+            df,
+            canonical=canonical,
+            valid_names=valid_names,
+            admin1_list=admin1_list,
+            full_date_index=history_index,
+            basket_components=basket_components,
+            return_raw_rows=False,
+            allow_empty=True,
+        )
+        return history_frames[0]
+    except Exception as exc:
+        logger.warning("Could not build chart history for %s: %s", iso3, _safe_adapter_error(exc))
+        return pd.DataFrame(index=history_index)
+
+
+def _resolve_exchange_rate_series(
+    *,
+    iso3: str,
+    currency_code: Optional[str],
+    currency_name: Optional[str],
+    full_date_index: pd.DatetimeIndex,
+    adapter: Optional[DataBridgesClientAdapter],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "enabled": _market_monitor_fx_enabled(),
+        "source": "DataBridges",
+        "currency_code": currency_code,
+        "currency_name": currency_name,
+        "rows_fetched": 0,
+        "permission_denied": False,
+        "error": None,
+        "official": {"included": False, "missing_months": []},
+        "unofficial": {"included": False, "missing_months": []},
+    }
+    empty = {"series": {}, "warnings": [], "metadata": metadata, "exchange_rate_data": None}
+    if not metadata["enabled"]:
+        metadata["source"] = "disabled"
+        return empty
+    if not currency_code or str(currency_code).strip().upper() == "USD":
+        metadata["source"] = "skipped"
+        metadata["error"] = "No non-USD report currency was resolved."
+        return empty
+
+    fx_adapter = adapter if adapter is not None and hasattr(adapter, "fetch_exchange_rate_rows_result") else None
+    if adapter is not None and fx_adapter is None:
+        metadata["error"] = "Injected DataBridges adapter does not support FX rows."
+        return empty
+    if fx_adapter is None:
+        try:
+            fx_adapter = DataBridgesClientAdapter()
+        except Exception as exc:
+            metadata["error"] = _safe_adapter_error(exc)
+            return {
+                **empty,
+                "warnings": [f"DataBridges FX omitted: {metadata['error']}"],
+                "metadata": metadata,
+            }
+
+    try:
+        fetch_result = fx_adapter.fetch_exchange_rate_rows_result(
+            iso3,
+            currency_name=currency_code,
+            start_date=full_date_index[0].date(),
+            end_date=(full_date_index[-1] + pd.DateOffset(months=1) - pd.DateOffset(days=1)).date(),
+        )
+    except Exception as exc:
+        metadata["error"] = _safe_adapter_error(exc)
+        return {
+            **empty,
+            "warnings": [f"DataBridges FX omitted: {metadata['error']}"],
+            "metadata": metadata,
+        }
+
+    rows = list(getattr(fetch_result, "rows", []) or [])
+    metadata["rows_fetched"] = len(rows)
+    metadata["permission_denied"] = bool(getattr(fetch_result, "permission_denied", False))
+    metadata["error"] = getattr(fetch_result, "error", None)
+    if metadata["permission_denied"]:
+        return {
+            **empty,
+            "warnings": [f"DataBridges FX omitted: {metadata['error'] or 'permission denied'}"],
+            "metadata": metadata,
+        }
+
+    code = str(currency_code or "").strip().upper()
+    if code:
+        rows = [
+            row
+            for row in rows
+            if not row.get("currency_code") or str(row.get("currency_code")).strip().upper() == code
+        ]
+    metadata["rows_matched_currency"] = len(rows)
+    if not rows:
+        reason = metadata["error"] or f"no exchange-rate rows found for {iso3} {code}"
+        return {
+            **empty,
+            "warnings": [f"DataBridges FX omitted: {reason}."],
+            "metadata": metadata,
+        }
+
+    series: dict[str, pd.Series] = {}
+    warnings: list[str] = []
+    official_series, official_missing = _monthly_exchange_rate_series(
+        rows,
+        full_date_index=full_date_index,
+        official=True,
+    )
+    metadata["official"]["missing_months"] = official_missing
+    if official_series is not None:
+        series["ExchangeRate"] = official_series
+        metadata["official"]["included"] = True
+    else:
+        warnings.append(f"Official FX omitted: missing {', '.join(official_missing)}.")
+
+    unofficial_rows = [row for row in rows if row.get("is_official") is False]
+    unofficial_series, unofficial_missing = _monthly_exchange_rate_series(
+        rows,
+        full_date_index=full_date_index,
+        official=False,
+    )
+    metadata["unofficial"]["missing_months"] = unofficial_missing
+    if unofficial_series is not None:
+        series["ExchangeRateUnofficial"] = unofficial_series
+        metadata["unofficial"]["included"] = True
+    elif unofficial_rows:
+        warnings.append(f"Unofficial FX omitted: missing {', '.join(unofficial_missing)}.")
+    else:
+        warnings.append("Unofficial FX omitted: no unofficial/parallel exchange-rate rows returned.")
+
+    partial = _partial_latest_fx_month(
+        rows,
+        full_date_index,
+        included_official=metadata["official"]["included"],
+        included_unofficial=metadata["unofficial"]["included"],
+    )
+    metadata["partial_latest_month"] = partial
+    if partial.get("partial"):
+        warnings.append(
+            "DataBridges FX latest month "
+            f"{partial['month']} is partial through {partial['through_date']}; "
+            "monthly averages use available observations."
+        )
+
+    exchange_rate_data = _exchange_rate_data_from_series(
+        series.get("ExchangeRate"),
+        currency_code=code,
+        target_date=full_date_index[-1],
+    )
+    return {
+        "series": series,
+        "warnings": warnings,
+        "metadata": metadata,
+        "exchange_rate_data": exchange_rate_data,
+    }
+
+
+def _monthly_exchange_rate_series(
+    rows: list[dict[str, Any]],
+    *,
+    full_date_index: pd.DatetimeIndex,
+    official: bool,
+) -> tuple[Optional[pd.Series], list[str]]:
+    if not rows:
+        return None, [month.strftime("%Y-%m") for month in full_date_index]
+    df = pd.DataFrame(rows)
+    if df.empty or "date" not in df.columns or "value" not in df.columns:
+        return None, [month.strftime("%Y-%m") for month in full_date_index]
+    if "is_official" not in df.columns:
+        df["is_official"] = True
+    df = df[df["is_official"] == official].copy()
+    if df.empty:
+        return None, [month.strftime("%Y-%m") for month in full_date_index]
+    df["Date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["Value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["Date", "Value"])
+    if df.empty:
+        return None, [month.strftime("%Y-%m") for month in full_date_index]
+    df["Month"] = df["Date"].dt.to_period("M").dt.to_timestamp()
+    monthly = df.groupby("Month")["Value"].mean().reindex(full_date_index)
+    missing = [month.strftime("%Y-%m") for month in full_date_index if pd.isna(monthly.loc[month])]
+    if missing:
+        return None, missing
+    return monthly.astype(float).round(6), []
+
+
+def _partial_latest_fx_month(
+    rows: list[dict[str, Any]],
+    full_date_index: pd.DatetimeIndex,
+    *,
+    included_official: bool,
+    included_unofficial: bool,
+) -> dict[str, Any]:
+    latest_month = pd.Timestamp(full_date_index[-1]).to_period("M").to_timestamp()
+    if latest_month.date() != _current_month_start():
+        return {"partial": False}
+    included_flags = []
+    if included_official:
+        included_flags.append(True)
+    if included_unofficial:
+        included_flags.append(False)
+    if not included_flags:
+        return {"partial": False}
+    dates = []
+    for row in rows:
+        if row.get("is_official") not in included_flags:
+            continue
+        parsed = pd.to_datetime(row.get("date"), errors="coerce")
+        if pd.isna(parsed):
+            continue
+        if parsed.to_period("M").to_timestamp() == latest_month:
+            dates.append(parsed.normalize())
+    if not dates:
+        return {"partial": False}
+    through = max(dates)
+    month_end = latest_month + pd.offsets.MonthEnd(0)
+    if through >= month_end:
+        return {"partial": False}
+    return {
+        "partial": True,
+        "month": latest_month.strftime("%Y-%m"),
+        "through_date": through.date().isoformat(),
+    }
+
+
+def _exchange_rate_data_from_series(
+    series: Optional[pd.Series],
+    *,
+    currency_code: str,
+    target_date: pd.Timestamp,
+) -> Optional[dict[str, Any]]:
+    if series is None or series.dropna().empty:
+        return None
+    current = float(series.iloc[-1])
+    mom = _pct_change(current, series.iloc[-2] if len(series) >= 2 else None)
+    yoy = _pct_change(current, series.iloc[0] if len(series) >= 1 else None)
+    history = series.rename("Close").to_frame()
+    return {
+        "symbol": f"USD{currency_code}:DATABRIDGES",
+        "currency_code": currency_code,
+        "current_rate": round(current, 6),
+        "unit": f"{currency_code} per 1 USD",
+        "quotation": "local_currency_per_usd",
+        "higher_value_indicates": "local_currency_depreciation",
+        "daily_change_pct": None,
+        "weekly_change_pct": None,
+        "monthly_change_pct": None if mom is None else round(mom, 2),
+        "yearly_change_pct": None if yoy is None else round(yoy, 2),
+        "trend": _exchange_rate_trend(yoy),
+        "last_update": pd.Timestamp(target_date).isoformat(),
+        "historical_data_json": history.to_json(date_format="iso"),
+        "is_mock": False,
+        "source": "DataBridges",
+    }
+
+
+def _pct_change(current: Any, previous: Any) -> Optional[float]:
+    try:
+        curr = float(current)
+        prev = float(previous)
+    except Exception:
+        return None
+    if prev == 0 or pd.isna(prev) or pd.isna(curr):
+        return None
+    return (curr - prev) / prev * 100.0
+
+
+def _exchange_rate_trend(yoy_change_pct: Optional[float]) -> str:
+    yoy = float(yoy_change_pct or 0.0)
+    if yoy > 30:
+        return "rapid_depreciation"
+    if yoy > 10:
+        return "depreciation"
+    if yoy < -10:
+        return "appreciation"
+    return "stable"
 
 
 def _build_time_series_from_price_df(
@@ -1265,11 +1650,13 @@ def calculate_statistics_from_csv(
     df_national: pd.DataFrame,
     commodities: List[str],
     food_basket_components: Optional[List[Dict[str, Any]]] = None,
+    currency_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     stats: Dict[str, Any] = {
         "food_basket": {},
         "commodities": {},
         "auxiliary": {},
+        "exchange_rate": {},
     }
     if df_national.empty:
         return stats
@@ -1332,6 +1719,27 @@ def calculate_statistics_from_csv(
                 }
             )
             stats["food_basket"] = item
+        elif column in {"ExchangeRate", "ExchangeRateUnofficial"}:
+            stats["auxiliary"][column] = item
+            unit = f"{str(currency_code or 'LCU').strip().upper() or 'LCU'} per 1 USD"
+            item["unit"] = unit
+            item["quotation"] = "local_currency_per_usd"
+            item["higher_value_indicates"] = "local_currency_depreciation"
+            fx_item = {
+                "current": item["current_price"],
+                "mom": item["mom_change_pct"],
+                "yoy": item["yoy_change_pct"],
+                "current_rate": item["current_price"],
+                "mom_change_pct": item["mom_change_pct"],
+                "yoy_change_pct": item["yoy_change_pct"],
+                "unit": unit,
+                "quotation": "local_currency_per_usd",
+                "higher_value_indicates": "local_currency_depreciation",
+            }
+            if column == "ExchangeRate":
+                stats["exchange_rate"]["official"] = fx_item
+            else:
+                stats["exchange_rate"]["unofficial"] = fx_item
         elif any(token in column.lower() for token in ["exchange", "fuel", "wage", "milling"]):
             stats["auxiliary"][column] = item
         elif column in commodities:
@@ -1574,8 +1982,12 @@ def _get_commodities(canonical: str, iso3: str) -> list[dict[str, Any]]:
         return list(cached)
 
     metadata = _get_repository_country_metadata(iso3)
+    availability = repo.get_country_availability(iso3)
+    priced_ids = {int(item) for item in (availability.priced_commodity_ids if availability else [])}
     commodities = []
     for row in metadata.commodities:
+        if int(row.commodity_id) not in priced_ids:
+            continue
         name = str(row.commodity_name or "").strip()
         if not name:
             continue
@@ -1590,6 +2002,7 @@ def _get_commodities(canonical: str, iso3: str) -> list[dict[str, Any]]:
                 "unit_name": row.commodity_unit_name,
                 "country": metadata.country.country_name or canonical,
                 "iso3": iso3,
+                "priced": True,
             }
         )
     commodities = sorted(commodities, key=_commodity_sort_key)

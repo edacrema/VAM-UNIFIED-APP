@@ -46,39 +46,27 @@ logger = logging.getLogger(__name__)
 
 OnStepCallback = Callable[[str, Dict[str, Any]], None]
 
-
-# ============================================================================
-# CURRENCY SYMBOLS (Trading Economics)
-# ============================================================================
-
 CURRENCY_SYMBOLS = {
-    "SDG": "USDSDG:CUR",  # Sudan Pound
-    "MMK": "USDMMK:CUR",  # Myanmar Kyat
-    "YER": "USDYER:CUR",  # Yemeni Rial
-    "SYP": "USDSYP:CUR",  # Syrian Pound
-    "AFN": "USDAFN:CUR",  # Afghan Afghani
-    "ETB": "USDETB:CUR",  # Ethiopian Birr
-    "NGN": "USDNGN:CUR",  # Nigerian Naira
-    "PKR": "USDPKR:CUR",  # Pakistani Rupee
-    "BDT": "USDBDT:CUR",  # Bangladeshi Taka
-    "KES": "USDKES:CUR",  # Kenyan Shilling
-    "UGX": "USDUGX:CUR",  # Ugandan Shilling
-    "TZS": "USDTZS:CUR",  # Tanzanian Shilling
-    "ZMW": "USDZMW:CUR",  # Zambian Kwacha
-    "MWK": "USDMWK:CUR",  # Malawian Kwacha
-    "HTG": "USDHTG:CUR",  # Haitian Gourde
-    "CDF": "USDCDF:CUR",  # Congolese Franc
-    "SOS": "USDSOS:CUR",  # Somali Shilling
-    "SSP": "USDSSP:CUR",  # South Sudanese Pound
+    "SDG": "USDSDG:CUR",
+    "MMK": "USDMMK:CUR",
+    "YER": "USDYER:CUR",
+    "SYP": "USDSYP:CUR",
+    "AFN": "USDAFN:CUR",
+    "ETB": "USDETB:CUR",
+    "NGN": "USDNGN:CUR",
+    "PKR": "USDPKR:CUR",
+    "BDT": "USDBDT:CUR",
+    "KES": "USDKES:CUR",
+    "UGX": "USDUGX:CUR",
+    "TZS": "USDTZS:CUR",
+    "ZMW": "USDZMW:CUR",
+    "MWK": "USDMWK:CUR",
+    "HTG": "USDHTG:CUR",
+    "CDF": "USDCDF:CUR",
+    "SOS": "USDSOS:CUR",
+    "SSP": "USDSSP:CUR",
 }
 
-# Base rates per mock data
-BASE_EXCHANGE_RATES = {
-    "SDG": 550.0, "MMK": 2100.0, "YER": 250.0, "ETB": 56.0,
-    "NGN": 1550.0, "PKR": 278.0, "KES": 130.0, "UGX": 3700.0,
-    "TZS": 2500.0, "ZMW": 25.0, "MWK": 1700.0, "HTG": 130.0,
-    "CDF": 2800.0, "SOS": 570.0, "SSP": 130.0
-}
 
 TERMINOLOGY_THRESHOLDS = {
     "hyperinflation": {"monthly_min": 50.0},
@@ -115,6 +103,7 @@ class MarketReportState(TypedDict):
     # ===== BRANCH 1 OUTPUTS (Data & Graphs) =====
     time_series_data_national: Optional[str]  # JSON
     time_series_data_regional: Optional[str]  # JSON
+    time_series_history_national: Optional[str]  # JSON
     data_statistics: Optional[Dict[str, Any]]
     databridges_rows: List[Dict[str, Any]]
     cache_metadata: Dict[str, Any]
@@ -175,6 +164,7 @@ def create_initial_state(
         enabled_modules=enabled_modules,
         time_series_data_national=None,
         time_series_data_regional=None,
+        time_series_history_national=None,
         data_statistics=None,
         databridges_rows=[],
         cache_metadata={},
@@ -341,6 +331,98 @@ def _commodity_importance_score(stats: Dict[str, Any], commodity: str) -> float:
     return 0.0
 
 
+def _state_currency_code(state: Dict[str, Any]) -> str:
+    cache_metadata = state.get("cache_metadata") or {}
+    code = cache_metadata.get("currency_code") or state.get("currency_code") or "LCU"
+    code = str(code or "LCU").strip().upper()
+    return code or "LCU"
+
+
+def _currency_axis_label(label: str, currency_code: str) -> str:
+    return f"{label} ({currency_code or 'LCU'})"
+
+
+def _fx_axis_label(currency_code: str) -> str:
+    code = str(currency_code or "LCU").strip().upper() or "LCU"
+    return f"{code} per 1 USD"
+
+
+def _normalise_time_index(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = out[out.index.notna()]
+    return out.sort_index()
+
+
+def _history_overlay_values(
+    history: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    column: str,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    empty = pd.Series(index=target_index, dtype=float)
+    if history is None or history.empty or column not in history.columns:
+        return empty, empty, empty, empty
+    hist = _normalise_time_index(history)
+    if hist.empty:
+        return empty, empty, empty, empty
+    values = pd.to_numeric(hist[column], errors="coerce")
+    prior_values = []
+    five_year_mean = []
+    five_year_low = []
+    five_year_high = []
+    for ts in target_index:
+        current_ts = pd.Timestamp(ts)
+        prior_values.append(values.get(current_ts - pd.DateOffset(years=1), np.nan))
+        window_start = current_ts - pd.DateOffset(years=5)
+        candidates = values[
+            (values.index < current_ts)
+            & (values.index >= window_start)
+            & (values.index.month == current_ts.month)
+        ].dropna()
+        if candidates.empty:
+            five_year_mean.append(np.nan)
+            five_year_low.append(np.nan)
+            five_year_high.append(np.nan)
+        else:
+            five_year_mean.append(float(candidates.mean()))
+            five_year_low.append(float(candidates.min()))
+            five_year_high.append(float(candidates.max()))
+    return (
+        pd.Series(prior_values, index=target_index, dtype=float),
+        pd.Series(five_year_mean, index=target_index, dtype=float),
+        pd.Series(five_year_low, index=target_index, dtype=float),
+        pd.Series(five_year_high, index=target_index, dtype=float),
+    )
+
+
+def _plot_history_overlays(
+    ax: Any,
+    history: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    column: str,
+    *,
+    color: str,
+    label_prefix: str = "",
+) -> None:
+    prior, five_year_mean, five_year_low, five_year_high = _history_overlay_values(history, target_index, column)
+    prefix = f"{label_prefix} " if label_prefix else ""
+    if prior.notna().any():
+        ax.plot(target_index, prior, linestyle="--", linewidth=1.5, color=color, alpha=0.65, label=f"{prefix}prior year")
+    if five_year_mean.notna().any():
+        ax.plot(target_index, five_year_mean, linestyle=":", linewidth=1.5, color=color, alpha=0.75, label=f"{prefix}5-year avg")
+    if five_year_low.notna().any() and five_year_high.notna().any():
+        ax.fill_between(
+            target_index,
+            five_year_low.to_numpy(dtype=float),
+            five_year_high.to_numpy(dtype=float),
+            color=color,
+            alpha=0.08,
+            label=f"{prefix}5-year range",
+        )
+
+
 def _has_currency_depreciation_driver(drivers: Any) -> bool:
     if not drivers:
         return False
@@ -402,15 +484,13 @@ class ReportModule(ABC):
 # ============================================================================
 
 class ExchangeRateModule(ReportModule):
-    """Modulo per l'analisi del tasso di cambio."""
+    """Narrative module over DataBridges FX, with TradingEconomics fallback."""
     
     TE_API_BASE = "https://api.tradingeconomics.com"
     
     def __init__(self, api_key: Optional[str] = None):
         import os
         self.api_key = api_key or os.getenv("TE_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("TE_API_KEY is required to run the exchange_rate module")
     
     @property
     def module_id(self) -> str:
@@ -466,8 +546,14 @@ class ExchangeRateModule(ReportModule):
         return (curr - prev) / prev * 100.0
     
     def fetch_data(self, state: dict) -> Dict[str, Any]:
-        """Recupera dati tasso di cambio."""
-        logger.info(f"[ExchangeRateModule] Fetching data for {state['currency_code']}")
+        """Use DataBridges data if present, otherwise TradingEconomics fallback."""
+        existing = state.get("exchange_rate_data") or {}
+        if existing.get("current_rate") is not None:
+            return {"exchange_rate_data": existing}
+        if not self.api_key:
+            raise RuntimeError("DataBridges exchange-rate data is unavailable and TE_API_KEY is not configured for fallback")
+
+        logger.info(f"[ExchangeRateModule] Falling back to TradingEconomics for {state['currency_code']}")
         
         currency_code = state["currency_code"]
         symbol = self._get_symbol(currency_code)
@@ -520,6 +606,9 @@ class ExchangeRateModule(ReportModule):
             "symbol": symbol,
             "currency_code": currency_code,
             "current_rate": round(current_close, 6),
+            "unit": f"{currency_code} per 1 USD",
+            "quotation": "local_currency_per_usd",
+            "higher_value_indicates": "local_currency_depreciation",
             "daily_change_pct": None if daily_change_pct is None else round(daily_change_pct, 2),
             "weekly_change_pct": None if weekly_change_pct is None else round(weekly_change_pct, 2),
             "monthly_change_pct": None if monthly_change_pct is None else round(monthly_change_pct, 2),
@@ -528,6 +617,7 @@ class ExchangeRateModule(ReportModule):
             "last_update": end_dt.isoformat(),
             "historical_data_json": df.to_json(date_format='iso'),
             "is_mock": False,
+            "source": "TradingEconomics fallback",
         }
 
         return {"exchange_rate_data": data}
@@ -547,10 +637,11 @@ STYLE AND OUTPUT RULES (MANDATORY):
 CONTEXT:
 - Country: {state.get('country', 'Unknown')}
 - Currency: {exchange_data.get('currency_code', 'LCU')}
-- Current exchange rate: {exchange_data.get('current_rate', 'N/A')} per 1 USD
+- Current exchange rate: {exchange_data.get('current_rate', 'N/A')} {exchange_data.get('unit') or 'local currency per 1 USD'}
 - Month-on-month change: {exchange_data.get('monthly_change_pct', 'N/A')}%
 - Year-on-year change: {exchange_data.get('yearly_change_pct', 'N/A')}%
 - Recent trend: {exchange_data.get('trend', 'unknown')}
+- Quotation direction: local currency per 1 USD; higher values indicate local-currency depreciation.
 
 Write a concise analysis (100-150 words) covering:
 1. Current exchange rate status and recent trend
@@ -757,6 +848,7 @@ def node_data_agent(state: MarketReportState) -> dict:
             )
             df_national = result.df_national
             df_regional = result.df_regional
+            df_history_national = result.df_history_national
             df_raw = result.raw_rows
             cache_metadata = result.cache_metadata
             warnings.extend(result.warnings)
@@ -767,6 +859,7 @@ def node_data_agent(state: MarketReportState) -> dict:
                 df_national, 
                 commodity_list,
                 food_basket_components=basket_items,
+                currency_code=cache_metadata.get("currency_code") or state.get("currency_code"),
             )
             basket_metadata = {
                 "basket_version_id": food_basket.get("basket_version_id"),
@@ -807,10 +900,16 @@ def node_data_agent(state: MarketReportState) -> dict:
         "commodity_list": commodity_list,
         "time_series_data_national": df_national.to_json(date_format='iso'),
         "time_series_data_regional": df_regional.to_json(date_format='iso'),
+        "time_series_history_national": (
+            df_history_national.to_json(date_format='iso')
+            if "df_history_national" in locals() and isinstance(df_history_national, pd.DataFrame)
+            else None
+        ),
         "data_statistics": stats,
         "databridges_rows": databridges_rows,
         "cache_metadata": cache_metadata,
         "food_basket": food_basket,
+        "exchange_rate_data": result.exchange_rate_data if not use_mock and "result" in locals() else None,
         "warnings": warnings,
         "current_node": "data_agent"
     }
@@ -834,14 +933,22 @@ def node_graph_designer(state: MarketReportState) -> dict:
         
         # Parse data
         df_national = pd.read_json(io.StringIO(state["time_series_data_national"]))
+        df_national = _normalise_time_index(df_national)
+        history_json = state.get("time_series_history_national")
+        df_history = pd.DataFrame()
+        if history_json:
+            df_history = _normalise_time_index(pd.read_json(io.StringIO(history_json)))
+        currency_code = _state_currency_code(state)
         
         # 1. Food Basket Trend
         fig, ax = plt.subplots(figsize=(10, 5))
-        if "FoodBasket" in df_national.columns:
-            ax.plot(df_national.index, df_national["FoodBasket"], 
-                   marker='o', linewidth=2, color='#1f77b4')
+        if "FoodBasket" in df_national.columns and df_national["FoodBasket"].notna().any():
+            ax.plot(df_national.index, df_national["FoodBasket"],
+                   marker='o', linewidth=2, color='#1f77b4', label="Current")
+            _plot_history_overlays(ax, df_history, pd.DatetimeIndex(df_national.index), "FoodBasket", color="#1f77b4")
             ax.set_title(f"Food Basket Cost Trend - {state['country']}", fontweight='bold')
-            ax.set_ylabel("Cost (LCU)")
+            ax.set_ylabel(_currency_axis_label("Cost", currency_code))
+            ax.legend(loc='upper left')
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
             plt.xticks(rotation=45)
             plt.tight_layout()
@@ -891,12 +998,20 @@ def node_graph_designer(state: MarketReportState) -> dict:
                 for page_idx, page_cols in enumerate(pages, start=1):
                     fig, ax = plt.subplots(figsize=(12, 6))
                     for col in page_cols:
-                        ax.plot(df_national.index, df_national[col], marker='o', label=col)
+                        line = ax.plot(df_national.index, df_national[col], marker='o', label=col)[0]
+                        _plot_history_overlays(
+                            ax,
+                            df_history,
+                            pd.DatetimeIndex(df_national.index),
+                            col,
+                            color=line.get_color(),
+                            label_prefix=col,
+                        )
                     title_suffix = f"{cat}"
                     if len(pages) > 1:
                         title_suffix = f"{cat} (Page {page_idx}/{len(pages)})"
                     ax.set_title(f"Commodity Price Trends - {state['country']} - {title_suffix}", fontweight='bold')
-                    ax.set_ylabel("Price (LCU)")
+                    ax.set_ylabel(_currency_axis_label("Price", currency_code))
                     ax.legend(loc='upper left')
                     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
                     plt.xticks(rotation=45)
@@ -911,17 +1026,47 @@ def node_graph_designer(state: MarketReportState) -> dict:
                     visualizations[fig_id] = fig_b64
                     if "commodity_trends" not in visualizations:
                         visualizations["commodity_trends"] = fig_b64
+
+        # 3. Exchange Rate Trend
+        fx_cols = [
+            ("ExchangeRate", "Official", "#6f42c1"),
+            ("ExchangeRateUnofficial", "Unofficial", "#d35400"),
+        ]
+        if any(col in df_national.columns and df_national[col].dropna().any() for col, _label, _color in fx_cols):
+            fig, ax = plt.subplots(figsize=(10, 5))
+            for col, label, color in fx_cols:
+                if col in df_national.columns and df_national[col].dropna().any():
+                    ax.plot(df_national.index, df_national[col], marker='o', linewidth=2, color=color, label=label)
+            ax.set_title(f"Exchange Rate Trend - {state['country']}", fontweight='bold')
+            ax.set_ylabel(_fx_axis_label(currency_code))
+            ax.legend(loc='upper left')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            visualizations["exchange_rate_trend"] = base64.b64encode(buf.read()).decode('utf-8')
         
-        # 3. Regional Comparison (if data available)
+        # 4. Regional Comparison (if data available)
         if state.get("time_series_data_regional"):
             df_regional = pd.read_json(io.StringIO(state["time_series_data_regional"]))
             if not df_regional.empty and "Region" in df_regional.columns:
                 latest = df_regional[df_regional["Date"] == df_regional["Date"].max()]
+                latest = latest[pd.to_numeric(latest.get("FoodBasket"), errors="coerce").notna()].copy()
+                latest = latest[pd.to_numeric(latest["FoodBasket"], errors="coerce") > 0]
+                if latest.empty:
+                    return {
+                        "visualizations": visualizations,
+                        "current_node": "graph_designer"
+                    }
                 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 bars = ax.barh(latest["Region"], latest["FoodBasket"], color='#2ecc71')
                 ax.set_title(f"Regional Food Basket Cost - {state['time_period']}", fontweight='bold')
-                ax.set_xlabel("Cost (LCU)")
+                ax.set_xlabel(_currency_axis_label("Cost", currency_code))
                 plt.tight_layout()
                 
                 buf = io.BytesIO()
@@ -1258,7 +1403,7 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
         except Exception as e:
             logger.error(f"Module '{module_id}' failed: {e}")
             if module_id == "exchange_rate":
-                warnings.append(f"Skipped exchange_rate module due to TradingEconomics error: {e}")
+                warnings.append(f"Skipped exchange_rate module because no exchange-rate source was available: {e}")
             continue
     
     updates["module_sections"] = module_sections
