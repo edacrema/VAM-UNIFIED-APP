@@ -256,6 +256,58 @@ class _FakeBackfillAdapter:
         return list(self.rows_by_commodity.get(commodity_id, []))
 
 
+class _FakeManualRefreshAdapter:
+    def __init__(self, rows=None, *, error: str | None = None):
+        self.rows = list(rows or [])
+        self.error = error
+        self.calls = []
+        self.config = SimpleNamespace(max_workers=4, base_url="https://databridges.test", env="test")
+
+    def fetch_commodities(self, country_iso3):
+        return [
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Cereals",
+            },
+            {
+                "country_iso3": country_iso3,
+                "commodity_id": 2,
+                "commodity_name": "Beans",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "category_name": "Pulses",
+            },
+        ]
+
+    def fetch_markets(self, country_iso3):
+        return [
+            {
+                "country_iso3": country_iso3,
+                "market_id": 10,
+                "market_name": "Juba",
+                "admin1_name": "Central Equatoria",
+                "admin2_name": "",
+            },
+            {
+                "country_iso3": country_iso3,
+                "market_id": 11,
+                "market_name": "Wau",
+                "admin1_name": "Western Bahr el Ghazal",
+                "admin2_name": "",
+            },
+        ]
+
+    def fetch_monthly_price_rows(self, country_iso3, *, start_date=None, end_date=None, **_kwargs):
+        self.calls.append({"country_iso3": country_iso3, "start_date": start_date, "end_date": end_date})
+        if self.error:
+            raise RuntimeError(self.error)
+        return list(self.rows)
+
+
 class _FakeFxAdapter:
     def __init__(self, rows):
         self.rows = list(rows)
@@ -591,6 +643,154 @@ def test_country_metadata_derives_commodity_units_from_price_rows(monkeypatch, t
     assert maize["unit"] == "kg"
     assert maize["unit_name"] == "kg"
     assert maize["unit_id"] == 100
+
+
+def test_reportable_months_ignore_forecast_only_latest_month(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    version_id = _seed_loader_cache(repo)
+    repo.upsert_monthly_prices(
+        cache_version_id=version_id,
+        country_iso3="SSD",
+        prices=[
+            _price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-03-01", 14, flag="forecast"),
+            _price(2, "Beans", 11, "Wau", "Western Bahr el Ghazal", "2025-03-01", 8, flag="forecast"),
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace())
+
+    payload = data_loader.get_reportable_months("South Sudan")
+
+    assert payload["latest_cached_month"] == "2025-03"
+    assert payload["latest_reportable_month"] == "2025-02"
+    assert "2025-03" not in payload["reportable_months"]
+    assert payload["missing_by_month"]["2025-03"] == ["Maize", "Beans"]
+
+
+def test_reportable_months_require_each_basket_commodity(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo, include_latest_beans=False)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace())
+
+    payload = data_loader.get_reportable_months("South Sudan")
+
+    assert payload["latest_cached_month"] == "2025-02"
+    assert payload["latest_reportable_month"] == "2024-02"
+    assert payload["missing_by_month"]["2025-02"] == ["Beans"]
+
+
+def test_reportable_months_without_basket_returns_warning(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: None)
+
+    payload = data_loader.get_reportable_months("South Sudan")
+
+    assert payload["reportable_months"] == []
+    assert payload["latest_reportable_month"] is None
+    assert "No active food basket" in payload["warnings"][0]
+
+
+def test_manual_refresh_promotes_country_cache_when_new_actual_rows_exist(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    source_version = _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setenv("MARKET_MONITOR_MANUAL_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace("basket-v1"))
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2025, 3, 1))
+    adapter = _FakeManualRefreshAdapter(
+        [
+            _price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-03-01", 14),
+            _price(2, "Beans", 11, "Wau", "Western Bahr el Ghazal", "2025-03-01", 8),
+        ]
+    )
+
+    result = data_loader.refresh_reportable_months_from_databridges(
+        "South Sudan",
+        basket_version_id="basket-v1",
+        adapter=adapter,
+    )
+
+    assert result["status"] == "updated"
+    assert result["source_cache_version_id"] == source_version
+    assert result["new_cache_version_id"] != source_version
+    assert result["checked_start_month"] == "2025-03"
+    assert result["latest_reportable_month_before"] == "2025-02"
+    assert result["latest_reportable_month_after"] == "2025-03"
+    assert result["rows_saved"] == 2
+    assert repo.get_active_version_id() == source_version
+    assert repo.get_active_version_id_for_country("SSD") == result["new_cache_version_id"]
+
+
+def test_manual_refresh_forecast_only_returns_no_update(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    source_version = _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setenv("MARKET_MONITOR_MANUAL_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace("basket-v1"))
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2025, 3, 1))
+    adapter = _FakeManualRefreshAdapter(
+        [
+            _price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-03-01", 14, flag="forecast"),
+            _price(2, "Beans", 11, "Wau", "Western Bahr el Ghazal", "2025-03-01", 8, flag="forecast"),
+        ]
+    )
+
+    result = data_loader.refresh_reportable_months_from_databridges(
+        "South Sudan",
+        basket_version_id="basket-v1",
+        adapter=adapter,
+    )
+
+    assert result["status"] == "no_update"
+    assert result["rows_saved"] == 0
+    assert result["excluded_non_real_rows"] == 2
+    assert repo.get_active_version_id_for_country("SSD") == source_version
+
+
+def test_manual_refresh_partial_actual_saves_rows_but_month_remains_unreportable(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    source_version = _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setenv("MARKET_MONITOR_MANUAL_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace("basket-v1"))
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2025, 3, 1))
+    adapter = _FakeManualRefreshAdapter(
+        [_price(1, "Maize", 10, "Juba", "Central Equatoria", "2025-03-01", 14)]
+    )
+
+    result = data_loader.refresh_reportable_months_from_databridges(
+        "South Sudan",
+        basket_version_id="basket-v1",
+        adapter=adapter,
+    )
+
+    assert result["status"] == "updated"
+    assert result["rows_saved"] == 1
+    assert result["latest_reportable_month_after"] == "2025-02"
+    assert result["missing_by_month"]["2025-03"] == ["Beans"]
+    assert repo.get_active_version_id_for_country("SSD") != source_version
+
+
+def test_manual_refresh_databridges_error_returns_unavailable(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    source_version = _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+    monkeypatch.setenv("MARKET_MONITOR_MANUAL_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(data_loader, "_get_active_food_basket", lambda _iso3: _basket_namespace("basket-v1"))
+    monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2025, 3, 1))
+
+    result = data_loader.refresh_reportable_months_from_databridges(
+        "South Sudan",
+        basket_version_id="basket-v1",
+        adapter=_FakeManualRefreshAdapter(error="permission denied"),
+    )
+
+    assert result["status"] == "unavailable"
+    assert "permission denied" in result["warnings"][0]
+    assert repo.get_active_version_id_for_country("SSD") == source_version
 
 
 def test_country_metadata_caps_future_price_dates(monkeypatch, tmp_path):
@@ -999,6 +1199,16 @@ def test_resolve_exchange_rate_series_partial_current_month_warns(monkeypatch):
             "frequency": "Daily",
         },
     ]
+
+
+def _basket_namespace(version_id="basket-v1"):
+    return SimpleNamespace(
+        basket_version_id=version_id,
+        items=[
+            SimpleNamespace(commodity_id=1, commodity_name_snapshot="Maize"),
+            SimpleNamespace(commodity_id=2, commodity_name_snapshot="Beans"),
+        ],
+    )
     monkeypatch.setattr(data_loader, "_current_month_start", lambda: date(2026, 6, 1))
 
     result = data_loader._resolve_exchange_rate_series(

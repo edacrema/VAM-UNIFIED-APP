@@ -414,6 +414,474 @@ class SqlPriceCacheRepository:
             rows = conn.execute(text(query), params).mappings().all()
         return [_monthly_price_from_row(row) for row in rows]
 
+    def copy_country_snapshot(
+        self,
+        *,
+        source_cache_version_id: str,
+        target_cache_version_id: str,
+        country_iso3: str,
+    ) -> None:
+        country = country_iso3.upper()
+        params = {
+            "source_cache_version_id": source_cache_version_id,
+            "target_cache_version_id": target_cache_version_id,
+            "country_iso3": country,
+        }
+        with self.engine.begin() as conn:
+            for table in ("cached_price_monthly", "cached_markets", "cached_commodities", "cached_countries"):
+                conn.execute(
+                    text(
+                        f"""
+                        DELETE FROM {table}
+                        WHERE cache_version_id = :target_cache_version_id
+                          AND country_iso3 = :country_iso3
+                        """
+                    ),
+                    params,
+                )
+            for table in ("cached_units", "cached_currencies"):
+                conn.execute(
+                    text(f"DELETE FROM {table} WHERE cache_version_id = :target_cache_version_id"),
+                    params,
+                )
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_units (
+                        cache_version_id,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        conversion_to_kg_l,
+                        active
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        conversion_to_kg_l,
+                        active
+                    FROM cached_units
+                    WHERE cache_version_id = :source_cache_version_id
+                    """
+                ),
+                params,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_currencies (
+                        cache_version_id,
+                        currency_id,
+                        currency_code,
+                        currency_name
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        currency_id,
+                        currency_code,
+                        currency_name
+                    FROM cached_currencies
+                    WHERE cache_version_id = :source_cache_version_id
+                    """
+                ),
+                params,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_countries (
+                        cache_version_id,
+                        country_iso3,
+                        country_name,
+                        currency_code,
+                        currency_name,
+                        latest_price_date
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        country_iso3,
+                        country_name,
+                        currency_code,
+                        currency_name,
+                        latest_price_date
+                    FROM cached_countries
+                    WHERE cache_version_id = :source_cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                params,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_commodities (
+                        cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        commodity_name,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        category_name,
+                        active
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        commodity_name,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        category_name,
+                        active
+                    FROM cached_commodities
+                    WHERE cache_version_id = :source_cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                params,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_markets (
+                        cache_version_id,
+                        country_iso3,
+                        market_id,
+                        market_name,
+                        admin1_name,
+                        admin2_name,
+                        latitude,
+                        longitude,
+                        active
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        country_iso3,
+                        market_id,
+                        market_name,
+                        admin1_name,
+                        admin2_name,
+                        latitude,
+                        longitude,
+                        active
+                    FROM cached_markets
+                    WHERE cache_version_id = :source_cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                params,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_price_monthly (
+                        cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        market_id,
+                        price_date,
+                        price,
+                        currency_id,
+                        currency_code,
+                        currency_name,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        price_type_id,
+                        price_type_name,
+                        price_flag,
+                        original_frequency,
+                        observations,
+                        source_payload_hash,
+                        admin1_name,
+                        admin2_name,
+                        market_name,
+                        commodity_name,
+                        data_source
+                    )
+                    SELECT
+                        :target_cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        market_id,
+                        price_date,
+                        price,
+                        currency_id,
+                        currency_code,
+                        currency_name,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        price_type_id,
+                        price_type_name,
+                        price_flag,
+                        original_frequency,
+                        observations,
+                        source_payload_hash,
+                        admin1_name,
+                        admin2_name,
+                        market_name,
+                        commodity_name,
+                        data_source
+                    FROM cached_price_monthly
+                    WHERE cache_version_id = :source_cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                params,
+            )
+
+    def upsert_country_metadata(
+        self,
+        *,
+        cache_version_id: str,
+        country_iso3: str,
+        commodities: Sequence[MappingLike],
+        markets: Sequence[MappingLike],
+    ) -> None:
+        country = country_iso3.upper()
+        commodity_rows = [
+            {
+                "cache_version_id": cache_version_id,
+                "country_iso3": country,
+                "commodity_id": _required_int(row, "commodity_id"),
+                "commodity_name": str(row.get("commodity_name") or ""),
+                "commodity_unit_id": _optional_int(row.get("commodity_unit_id")),
+                "commodity_unit_name": _optional_str(row.get("commodity_unit_name")),
+                "category_name": _optional_str(row.get("category_name")),
+                "active": _bool_param_value(row.get("active", True)),
+            }
+            for row in commodities
+            if row.get("commodity_id") not in (None, "")
+        ]
+        market_rows = [
+            {
+                "cache_version_id": cache_version_id,
+                "country_iso3": country,
+                "market_id": _required_int(row, "market_id"),
+                "market_name": str(row.get("market_name") or ""),
+                "admin1_name": _optional_str(row.get("admin1_name")),
+                "admin2_name": _optional_str(row.get("admin2_name")),
+                "latitude": row.get("latitude"),
+                "longitude": row.get("longitude"),
+                "active": _bool_param_value(row.get("active", True)),
+            }
+            for row in markets
+            if row.get("market_id") not in (None, "")
+        ]
+        with self.engine.begin() as conn:
+            if commodity_rows:
+                _delete_by_ids(
+                    conn,
+                    "cached_commodities",
+                    "commodity_id",
+                    [row["commodity_id"] for row in commodity_rows],
+                    cache_version_id=cache_version_id,
+                    country_iso3=country,
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO cached_commodities (
+                            cache_version_id,
+                            country_iso3,
+                            commodity_id,
+                            commodity_name,
+                            commodity_unit_id,
+                            commodity_unit_name,
+                            category_name,
+                            active
+                        ) VALUES (
+                            :cache_version_id,
+                            :country_iso3,
+                            :commodity_id,
+                            :commodity_name,
+                            :commodity_unit_id,
+                            :commodity_unit_name,
+                            :category_name,
+                            :active
+                        )
+                        """
+                    ),
+                    commodity_rows,
+                )
+            if market_rows:
+                _delete_by_ids(
+                    conn,
+                    "cached_markets",
+                    "market_id",
+                    [row["market_id"] for row in market_rows],
+                    cache_version_id=cache_version_id,
+                    country_iso3=country,
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO cached_markets (
+                            cache_version_id,
+                            country_iso3,
+                            market_id,
+                            market_name,
+                            admin1_name,
+                            admin2_name,
+                            latitude,
+                            longitude,
+                            active
+                        ) VALUES (
+                            :cache_version_id,
+                            :country_iso3,
+                            :market_id,
+                            :market_name,
+                            :admin1_name,
+                            :admin2_name,
+                            :latitude,
+                            :longitude,
+                            :active
+                        )
+                        """
+                    ),
+                    market_rows,
+                )
+
+    def upsert_monthly_prices(
+        self,
+        *,
+        cache_version_id: str,
+        country_iso3: str,
+        prices: Sequence[MappingLike],
+    ) -> int:
+        country = country_iso3.upper()
+        price_rows = [_price_insert_row(cache_version_id, country, row) for row in prices]
+        if not price_rows:
+            return 0
+        existing_keys = self.get_country_price_keys(cache_version_id=cache_version_id, country_iso3=country)
+        insert_rows = [
+            row for row in price_rows if _canonical_key_from_price_row(row) not in existing_keys
+        ]
+        if not insert_rows:
+            return 0
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_price_monthly (
+                        cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        market_id,
+                        price_date,
+                        price,
+                        currency_id,
+                        currency_code,
+                        currency_name,
+                        commodity_unit_id,
+                        commodity_unit_name,
+                        price_type_id,
+                        price_type_name,
+                        price_flag,
+                        original_frequency,
+                        observations,
+                        source_payload_hash,
+                        admin1_name,
+                        admin2_name,
+                        market_name,
+                        commodity_name,
+                        data_source
+                    ) VALUES (
+                        :cache_version_id,
+                        :country_iso3,
+                        :commodity_id,
+                        :market_id,
+                        :price_date,
+                        :price,
+                        :currency_id,
+                        :currency_code,
+                        :currency_name,
+                        :commodity_unit_id,
+                        :commodity_unit_name,
+                        :price_type_id,
+                        :price_type_name,
+                        :price_flag,
+                        :original_frequency,
+                        :observations,
+                        :source_payload_hash,
+                        :admin1_name,
+                        :admin2_name,
+                        :market_name,
+                        :commodity_name,
+                        :data_source
+                    )
+                    """
+                ),
+                insert_rows,
+            )
+            latest = conn.execute(
+                text(
+                    """
+                    SELECT MAX(price_date) AS latest_price_date
+                    FROM cached_price_monthly
+                    WHERE cache_version_id = :cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                {"cache_version_id": cache_version_id, "country_iso3": country},
+            ).mappings().first()
+            conn.execute(
+                text(
+                    """
+                    UPDATE cached_countries
+                    SET latest_price_date = :latest_price_date
+                    WHERE cache_version_id = :cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                {
+                    "cache_version_id": cache_version_id,
+                    "country_iso3": country,
+                    "latest_price_date": (latest or {}).get("latest_price_date"),
+                },
+            )
+        return len(insert_rows)
+
+    def get_country_price_keys(self, *, cache_version_id: str, country_iso3: str) -> set[tuple[Any, ...]]:
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        cache_version_id,
+                        country_iso3,
+                        commodity_id,
+                        market_id,
+                        price_date,
+                        price_type_name,
+                        price_flag,
+                        COALESCE(price_type_id, -1) AS price_type_id,
+                        COALESCE(currency_id, -1) AS currency_id,
+                        COALESCE(commodity_unit_id, -1) AS commodity_unit_id
+                    FROM cached_price_monthly
+                    WHERE cache_version_id = :cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                {"cache_version_id": cache_version_id, "country_iso3": country_iso3.upper()},
+            ).mappings().all()
+        return {_canonical_key_from_price_row(row) for row in rows}
+
+    def count_country_price_rows(self, *, cache_version_id: str, country_iso3: str) -> int:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM cached_price_monthly
+                    WHERE cache_version_id = :cache_version_id
+                      AND country_iso3 = :country_iso3
+                    """
+                ),
+                {"cache_version_id": cache_version_id, "country_iso3": country_iso3.upper()},
+            ).mappings().first()
+        return int((row or {}).get("count") or 0)
+
     def create_cache_version(
         self,
         *,
@@ -968,6 +1436,50 @@ class SqlPriceCacheRepository:
                 {"cache_version_id": cache_version_id, "activated_at": now},
             )
 
+    def set_country_active_version(self, country_iso3: str, cache_version_id: str) -> None:
+        country = country_iso3.upper()
+        now = _now_wire()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM price_cache_country_active_versions
+                    WHERE country_iso3 = :country_iso3
+                    """
+                ),
+                {"country_iso3": country},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO price_cache_country_active_versions (
+                        country_iso3,
+                        cache_version_id,
+                        activated_at
+                    ) VALUES (
+                        :country_iso3,
+                        :cache_version_id,
+                        :activated_at
+                    )
+                    """
+                ),
+                {
+                    "country_iso3": country,
+                    "cache_version_id": cache_version_id,
+                    "activated_at": now,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE price_cache_versions
+                    SET activated_at = :activated_at
+                    WHERE cache_version_id = :cache_version_id
+                    """
+                ),
+                {"cache_version_id": cache_version_id, "activated_at": now},
+            )
+
     def finalize_cache_version(
         self,
         cache_version_id: str,
@@ -1210,6 +1722,83 @@ def _add_in_clause(
         placeholders.append(f":{key}")
         params[key] = value
     clauses.append(f"{column} IN ({', '.join(placeholders)})")
+
+
+def _delete_by_ids(
+    conn,
+    table: str,
+    id_column: str,
+    values: Sequence[Any],
+    *,
+    cache_version_id: str,
+    country_iso3: str,
+) -> None:
+    cleaned = [_optional_int(value) for value in values if value not in (None, "")]
+    ids = [value for value in cleaned if value is not None]
+    if not ids:
+        return
+    params: Dict[str, Any] = {
+        "cache_version_id": cache_version_id,
+        "country_iso3": country_iso3.upper(),
+    }
+    placeholders = []
+    for index, value in enumerate(ids):
+        key = f"id_{index}"
+        placeholders.append(f":{key}")
+        params[key] = value
+    conn.execute(
+        text(
+            f"""
+            DELETE FROM {table}
+            WHERE cache_version_id = :cache_version_id
+              AND country_iso3 = :country_iso3
+              AND {id_column} IN ({', '.join(placeholders)})
+            """
+        ),
+        params,
+    )
+
+
+def _price_insert_row(cache_version_id: str, country_iso3: str, row: MappingLike) -> dict[str, Any]:
+    return {
+        "cache_version_id": cache_version_id,
+        "country_iso3": country_iso3.upper(),
+        "commodity_id": _required_int(row, "commodity_id"),
+        "market_id": _required_int(row, "market_id"),
+        "price_date": _date_wire(row.get("price_date")),
+        "price": row.get("price"),
+        "currency_id": _optional_int(row.get("currency_id")),
+        "currency_code": _optional_str(row.get("currency_code")),
+        "currency_name": _optional_str(row.get("currency_name")),
+        "commodity_unit_id": _optional_int(row.get("commodity_unit_id")),
+        "commodity_unit_name": _optional_str(row.get("commodity_unit_name")),
+        "price_type_id": _optional_int(row.get("price_type_id")),
+        "price_type_name": str(row.get("price_type_name") or ""),
+        "price_flag": str(row.get("price_flag") or ""),
+        "original_frequency": _optional_str(row.get("original_frequency")),
+        "observations": _optional_int(row.get("observations")),
+        "source_payload_hash": _optional_str(row.get("source_payload_hash")),
+        "admin1_name": _optional_str(row.get("admin1_name")),
+        "admin2_name": _optional_str(row.get("admin2_name")),
+        "market_name": _optional_str(row.get("market_name")),
+        "commodity_name": _optional_str(row.get("commodity_name")),
+        "data_source": _optional_str(row.get("data_source")),
+    }
+
+
+def _canonical_key_from_price_row(row: MappingLike) -> tuple[Any, ...]:
+    return (
+        str(row.get("cache_version_id") or ""),
+        str(row.get("country_iso3") or "").upper(),
+        _optional_int(row.get("commodity_id")),
+        _optional_int(row.get("market_id")),
+        _date_wire(row.get("price_date")),
+        str(row.get("price_type_name") or ""),
+        str(row.get("price_flag") or ""),
+        _optional_int(row.get("price_type_id")) if _optional_int(row.get("price_type_id")) is not None else -1,
+        _optional_int(row.get("currency_id")) if _optional_int(row.get("currency_id")) is not None else -1,
+        _optional_int(row.get("commodity_unit_id")) if _optional_int(row.get("commodity_unit_id")) is not None else -1,
+    )
 
 
 def _active_param(conn) -> Any:

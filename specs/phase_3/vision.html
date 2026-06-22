@@ -129,12 +129,13 @@
     and must never be silently treated as zero.
   </p>
 
-  <h3>6. Manual Latest Overlay</h3>
+  <h3>6. Manual Latest Refresh</h3>
   <p>
-    The manual latest overlay remains part of Phase 3. Because a weekly cache can still be several days behind Databridges, users should be able
-    to run a small manual "sync latest" action from the Price Bulletin form. This remains an explicit user action, not part of country selection.
-    It downloads only recent rows needed for the active run, deduplicates them against the active cache, and labels them as a run-local Databridges
-    latest overlay unless writeback is explicitly approved.
+    Manual latest refresh remains part of Phase 3. Country selection stays cache-only and must not call Databridges. Because a weekly cache can
+    still be behind Databridges, users can explicitly click a Price Bulletin refresh action that checks the gap between the latest reportable
+    cached basket month and the current month. The action fetches all priced commodities for the selected country, filters to actual or aggregate
+    monthly rows, deduplicates against the active country cache, creates a new country-specific cache version when new usable rows exist, and
+    activates that version for the selected country only.
   </p>
 
   <h3>7. Efficient Country-Scoped Retrieval</h3>
@@ -213,15 +214,15 @@
       <tr><td>Country selection</td><td>Country metadata loads from the app-owned cache without a full Databridges call.</td></tr>
       <tr><td>Basket persistence</td><td>A saved country basket is visible to all authorized users on later visits.</td></tr>
       <tr><td>Basket correctness</td><td>Generated basket prices and graphs use the saved commodity weights and Databridges units.</td></tr>
-      <tr><td>Auditability</td><td>Each bulletin records cache version, refresh timestamp, basket version, and any run-local latest overlay.</td></tr>
+      <tr><td>Auditability</td><td>Each bulletin records cache version, refresh timestamp, basket version, and any manual country refresh used.</td></tr>
     </tbody>
   </table>
 
   <h2>Open Decisions</h2>
   <ul>
     <li>Who is allowed to edit shared country baskets: all users, admins, or country focal points?</li>
-    <li>Should the weekly refresh publish only a complete global cache version, or allow per-country activation if one country fails?</li>
-    <li>What exact recent window should the manual latest overlay fetch: current month only, previous plus current month, or user-selected reporting gap?</li>
+    <li>Should scheduled weekly refresh publish only a complete global cache version, or allow per-country activation if one country fails?</li>
+    <li>Whether manual latest refresh should remain all priced commodities or later narrow to basket plus selected extras.</li>
   </ul>
 </body>
 </html>

@@ -37,12 +37,12 @@
       <tr><th>Layer</th><th>Technology</th><th>Phase 3 stance</th></tr>
     </thead>
     <tbody>
-      <tr><td>Frontend</td><td>Streamlit</td><td>Kept. Extend the Price Bulletin form with cache status, basket editor, and optional latest overlay.</td></tr>
+      <tr><td>Frontend</td><td>Streamlit</td><td>Kept. Extend the Price Bulletin form with cache status, basket editor, reportable months, and manual latest refresh.</td></tr>
       <tr><td>Backend</td><td>FastAPI and service layer</td><td>Kept. Add cache repository, sync services, and basket services.</td></tr>
       <tr><td>Data processing</td><td>pandas, numpy</td><td>Kept. Used for normalization, validation, aggregation, and basket calculation.</td></tr>
       <tr><td>Visualization</td><td>matplotlib</td><td>Kept. Graphs use basket-calculated series from cached data.</td></tr>
       <tr><td>Report export</td><td>python-docx</td><td>Kept. Reports record cache and basket metadata.</td></tr>
-      <tr><td>Databridges client</td><td><code>data_bridges_client</code></td><td>Use for weekly refresh and manual latest overlay.</td></tr>
+      <tr><td>Databridges client</td><td><code>data_bridges_client</code></td><td>Use for weekly refresh and manual latest refresh.</td></tr>
       <tr><td>Tests</td><td>pytest</td><td>Expand for cache rebuild, atomic promotion, basket calculation, and refresh failure cases.</td></tr>
     </tbody>
   </table>
@@ -129,13 +129,13 @@ DATA_BRIDGES_REQUEST_TIMEOUT_SECONDS=60</code></pre>
 
   <h2>Cache Schema</h2>
   <p>
-    The schema should support versioned full snapshots. Reads use only the active successful version unless a run-local latest overlay is explicitly
-    attached.
+    The schema should support versioned full snapshots. Reads use the active version for each country; manual latest refresh creates a new
+    country-specific cache version and activates it only for that country.
   </p>
   <pre><code>price_cache_versions
 - cache_version_id uuid primary key
 - status enum("building", "validating", "active", "failed", "superseded")
-- refresh_type enum("weekly_full", "manual_admin_full")
+- refresh_type enum("weekly_full", "manual_admin_full", "manual_country_latest")
 - started_at timestamp
 - completed_at timestamp nullable
 - activated_at timestamp nullable
@@ -272,19 +272,31 @@ basket_price = sum(component_value for all available basket components)</code></
     count, missing commodity names, and whether the basket is partial for that month or region.
   </p>
 
-  <h2>Manual Latest Overlay</h2>
+  <h2>Manual Latest Refresh</h2>
   <p>
-    Manual latest sync remains enabled in Phase 3. It should not modify the weekly cache version by default. It should fetch a small recent window
-    from Databridges for the active run, normalize rows, remove keys already present in the active cache, and attach only non-overlapping rows to
-    that run.
+    Manual latest refresh remains enabled in Phase 3 behind <code>MARKET_MONITOR_MANUAL_REFRESH_ENABLED</code>. Country selection remains cache-only.
+    The Price Bulletin form reads <code>GET /market-monitor/countries/{country}/reportable-months</code> to populate only basket-complete reference
+    months. When the user clicks refresh, <code>POST /market-monitor/countries/{country}/reportable-months/refresh</code> fetches all priced
+    commodities for the selected country from Databridges between the latest reportable cached month and the current month. New actual or aggregate
+    rows are normalized, deduplicated, written into a <code>manual_country_latest</code> cache version, and activated for that country only.
   </p>
-  <pre><code>manual_latest_overlay_rows
-- run_id
-- country_iso3
-- canonical_key
-- row_json
-- fetched_at
-- source_cache_version_id</code></pre>
+  <pre><code>country reportable months response
+- cache_version_id
+- basket_version_id
+- reportable_months
+- latest_reportable_month
+- latest_cached_month
+- latest_cached_real_month
+- missing_by_month
+
+manual refresh response
+- status: updated | no_update | unavailable
+- source_cache_version_id
+- new_cache_version_id
+- checked_start_month / checked_end_month
+- rows_fetched / rows_real / rows_saved / rows_skipped_existing
+- excluded_non_real_rows / excluded_future_rows / deduplicated_rows
+- missing_by_month / warnings</code></pre>
 
   <h2>Configuration</h2>
   <pre><code>PRICE_CACHE_BACKEND=cloud_sql_postgres
@@ -324,6 +336,8 @@ FOOD_BASKET_EDIT_ROLES=user,admin</code></pre>
     <li>Weekly refresh builds a new cache version and promotes it atomically.</li>
     <li>Failed refresh leaves old active version readable.</li>
     <li>Country selection reads from active cache and does not call Databridges.</li>
+    <li>Reference-month options are basket-aware reportable months only.</li>
+    <li>Manual latest refresh can promote a country-specific cache version without changing the global active pointer.</li>
     <li>Basket edits by one user are visible to another user.</li>
     <li>Generated reports record cache version and basket version.</li>
   </ul>
@@ -331,9 +345,9 @@ FOOD_BASKET_EDIT_ROLES=user,admin</code></pre>
   <h2>Open Technical Decisions</h2>
   <ul>
     <li>Exact GCP resource choice and naming for Cloud SQL, scheduler, worker container, service accounts, and secrets.</li>
-    <li>Whether the worker should activate a complete global cache version only or support per-country activation.</li>
+    <li>Whether scheduled workers should activate a complete global cache version only or support per-country activation; manual latest refresh already uses country-specific activation.</li>
     <li>Exact active-version retention and cleanup policy.</li>
-    <li>Exact recent window for the retained manual latest overlay.</li>
+    <li>Whether manual latest refresh should remain all priced commodities or later narrow to basket plus selected extras.</li>
   </ul>
 </body>
 </html>

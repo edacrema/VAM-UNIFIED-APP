@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 
 import streamlit as st
 
@@ -50,6 +50,8 @@ def _clear_cache_version_dependent_state():
         "mm_countries_resp_version",
         "mm_country_metadata",
         "mm_country_basket",
+        "mm_country_reportable_months",
+        "mm_manual_refresh_result",
     ):
         st.session_state.pop(key, None)
 
@@ -215,30 +217,6 @@ if operator_warnings:
         for warning in operator_warnings:
             st.info(str(warning))
 
-date_range = metadata.get("date_range")
-if isinstance(date_range, dict):
-    start_s = date_range.get("start")
-    end_s = date_range.get("end")
-    if isinstance(start_s, str) and isinstance(end_s, str):
-        try:
-            start_d = datetime.strptime(start_s, "%Y-%m-%d").date().replace(day=1)
-            end_d = datetime.strptime(end_s, "%Y-%m-%d").date().replace(day=1)
-            cur = start_d
-            while cur <= end_d:
-                time_period_options.append(cur.strftime("%Y-%m"))
-                if cur.month == 12:
-                    cur = date(cur.year + 1, 1, 1)
-                else:
-                    cur = date(cur.year, cur.month + 1, 1)
-            default_time_period = end_d.strftime("%Y-%m") if time_period_options else None
-        except Exception:
-            time_period_options = []
-            default_time_period = None
-
-if not time_period_options:
-    st.warning("The selected country has no cached monthly price date range.")
-    st.stop()
-
 if not commodities:
     st.warning("The selected country has no cached priced commodities.")
     st.stop()
@@ -391,22 +369,121 @@ with st.expander("Edit country food basket", expanded=not bool(active_basket)):
                 active_basket = basket_resp.get("active_basket") if isinstance(basket_resp, dict) else None
                 basket_items = active_basket.get("items") if isinstance(active_basket, dict) else []
                 basket_item_names = _dedupe_text(_basket_item_name(item) for item in basket_items)
+                st.session_state.pop("mm_country_reportable_months", None)
                 st.success("Food basket saved and published.")
             except Exception as e:
                 safe_show_error(e)
 
+reportable_resp = None
+reportable_cache_key = None
+if active_basket:
+    reportable_cache = st.session_state.setdefault("mm_country_reportable_months", {})
+    reportable_cache_key = (
+        selected_version,
+        country,
+        active_basket.get("basket_version_id"),
+    )
+    reportable_resp = reportable_cache.get(reportable_cache_key)
+    if reportable_resp is None:
+        try:
+            reportable_resp = request_json(
+                "GET",
+                f"/market-monitor/countries/{quote_path_param(country)}/reportable-months",
+                timeout=30,
+            )
+            reportable_cache[reportable_cache_key] = reportable_resp
+        except Exception as e:
+            reportable_resp = None
+            safe_show_error(e)
+
+if isinstance(reportable_resp, dict):
+    raw_months = reportable_resp.get("reportable_months") or []
+    time_period_options = [str(item) for item in raw_months if isinstance(item, str)]
+    default_time_period = reportable_resp.get("latest_reportable_month")
+    latest_cached_month = reportable_resp.get("latest_cached_month")
+    latest_reportable_month = reportable_resp.get("latest_reportable_month")
+    if latest_cached_month and latest_reportable_month and str(latest_cached_month) > str(latest_reportable_month):
+        st.info(
+            f"Latest cached month is {latest_cached_month}, but the latest reportable basket month is "
+            f"{latest_reportable_month} because newer basket actual prices are incomplete."
+        )
+    for warning in reportable_resp.get("warnings") or []:
+        st.warning(str(warning))
+
+refresh_cols = st.columns([1, 3])
+with refresh_cols[0]:
+    refresh_clicked = st.button(
+        "Refresh from DataBridges",
+        key=f"mm_refresh_databridges_{country}" if isinstance(country, str) and country else "mm_refresh_databridges",
+        disabled=not bool(active_basket),
+    )
+with refresh_cols[1]:
+    if isinstance(reportable_resp, dict):
+        st.caption(
+            "Latest reportable month: "
+            f"{reportable_resp.get('latest_reportable_month') or 'n/a'} | "
+            f"Latest cached month: {reportable_resp.get('latest_cached_month') or 'n/a'}"
+        )
+
+if refresh_clicked and active_basket:
+    try:
+        refresh_result = request_json(
+            "POST",
+            f"/market-monitor/countries/{quote_path_param(country)}/reportable-months/refresh",
+            json_body={"basket_version_id": active_basket.get("basket_version_id")},
+            timeout=120,
+        )
+        _clear_cache_version_dependent_state()
+        st.session_state["mm_manual_refresh_result"] = refresh_result
+        reportable_resp = request_json(
+            "GET",
+            f"/market-monitor/countries/{quote_path_param(country)}/reportable-months",
+            timeout=30,
+        )
+        if isinstance(reportable_resp, dict):
+            time_period_options = [
+                str(item)
+                for item in reportable_resp.get("reportable_months") or []
+                if isinstance(item, str)
+            ]
+            default_time_period = reportable_resp.get("latest_reportable_month")
+            if default_time_period in time_period_options:
+                st.session_state[f"mm_time_period_{country}"] = default_time_period
+        status = refresh_result.get("status") if isinstance(refresh_result, dict) else None
+        if status == "updated":
+            st.success(
+                "DataBridges refresh updated the country cache "
+                f"({refresh_result.get('rows_saved', 0)} new rows saved)."
+            )
+        elif status == "no_update":
+            st.info("DataBridges refresh completed; no newer usable rows were found.")
+        else:
+            st.warning("DataBridges refresh is unavailable right now.")
+        for warning in (refresh_result.get("warnings") if isinstance(refresh_result, dict) else []) or []:
+            st.warning(str(warning))
+    except Exception as e:
+        safe_show_error(e)
+
 if not active_basket:
     st.info("Report generation is disabled until the country food basket is saved.")
+    st.stop()
+
+if active_basket and not time_period_options:
+    st.warning("No reportable basket month is available yet. Try refreshing from DataBridges or check the basket data coverage.")
+    st.stop()
 
 with st.form("market_monitor_form"):
     time_period_index = 0
     if default_time_period in time_period_options:
         time_period_index = time_period_options.index(default_time_period)
+    time_period_key = f"mm_time_period_{country}" if isinstance(country, str) and country else "mm_time_period"
+    if st.session_state.get(time_period_key) not in (None, "") and st.session_state.get(time_period_key) not in time_period_options:
+        st.session_state.pop(time_period_key, None)
     time_period = st.selectbox(
         "Time Period (YYYY-MM)",
         options=time_period_options,
         index=time_period_index,
-        key=f"mm_time_period_{country}" if isinstance(country, str) and country else "mm_time_period",
+        key=time_period_key,
     )
 
     use_news_dates = st.checkbox("Use News Dates", value=False, key="mm_use_news_dates")

@@ -256,6 +256,83 @@ def test_country_active_pointer_preserves_failed_country_fallback(tmp_path):
     assert eth_rows[0].price == 110.0
 
 
+def test_country_incremental_snapshot_promotes_only_selected_country(tmp_path):
+    repo = _repo(tmp_path)
+    source_version = seed_cache_snapshot(
+        repo,
+        cache_version_id="11111111-1111-1111-1111-111111111111",
+        country_iso3="SSD",
+        country_name="South Sudan",
+    )
+    target_version = repo.create_cache_version(
+        cache_version_id="33333333-3333-3333-3333-333333333333",
+        refresh_type="manual_country_latest",
+        triggered_by="pytest",
+    )
+
+    repo.copy_country_snapshot(
+        source_cache_version_id=source_version,
+        target_cache_version_id=target_version,
+        country_iso3="SSD",
+    )
+    inserted = repo.upsert_monthly_prices(
+        cache_version_id=target_version,
+        country_iso3="SSD",
+        prices=[
+            {
+                "country_iso3": "SSD",
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "market_id": 10,
+                "market_name": "Juba",
+                "admin1_name": "Central Equatoria",
+                "price_date": "2025-02-01",
+                "price": 12,
+                "currency_id": 200,
+                "currency_code": "SSP",
+                "currency_name": "South Sudanese Pound",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "price_type_id": 1,
+                "price_type_name": "Retail",
+                "price_flag": "actual",
+            },
+            {
+                "country_iso3": "SSD",
+                "commodity_id": 1,
+                "commodity_name": "Maize",
+                "market_id": 10,
+                "market_name": "Juba",
+                "admin1_name": "Central Equatoria",
+                "price_date": "2025-03-01",
+                "price": 14,
+                "currency_id": 200,
+                "currency_code": "SSP",
+                "currency_name": "South Sudanese Pound",
+                "commodity_unit_id": 100,
+                "commodity_unit_name": "kg",
+                "price_type_id": 1,
+                "price_type_name": "Retail",
+                "price_flag": "actual",
+            },
+        ],
+    )
+    repo.set_country_active_version("SSD", target_version)
+
+    rows = repo.get_price_window("SSD", "2025-03-01", "2025-03-01", commodity_ids=[1])
+    metadata = repo.get_country_metadata("SSD")
+    availability = repo.get_country_availability("SSD")
+
+    assert inserted == 1
+    assert repo.get_active_version_id() == source_version
+    assert repo.get_active_version_id_for_country("SSD") == target_version
+    assert rows[0].price == 14.0
+    assert metadata is not None
+    assert [item.commodity_name for item in metadata.commodities] == ["Beans", "Maize"]
+    assert availability is not None
+    assert availability.date_end.isoformat() == "2025-03-01"
+
+
 def test_refresh_lock_blocks_concurrent_refreshes(tmp_path):
     repo = _repo(tmp_path)
 

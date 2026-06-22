@@ -66,6 +66,10 @@ class ExportDocxOptions(BaseModel):
     template: Optional[str] = None
 
 
+class ReportableMonthsRefreshInput(BaseModel):
+    basket_version_id: Optional[str] = None
+
+
 def _get_price_cache_repository():
     global _PRICE_CACHE_REPOSITORY
     if _PRICE_CACHE_REPOSITORY is not None:
@@ -737,6 +741,39 @@ def get_country_metadata(country: str):
         from .data_loader import PriceCacheUnavailableError, get_country_metadata as get_cached_country_metadata
 
         return get_cached_country_metadata(country)
+    except PriceCacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/countries/{country}/reportable-months")
+def get_country_reportable_months(country: str):
+    try:
+        from .data_loader import PriceCacheUnavailableError, get_reportable_months
+
+        return get_reportable_months(country)
+    except PriceCacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/countries/{country}/reportable-months/refresh")
+def refresh_country_reportable_months(country: str, input_data: ReportableMonthsRefreshInput):
+    try:
+        from .data_loader import PriceCacheUnavailableError, refresh_reportable_months_from_databridges
+
+        return refresh_reportable_months_from_databridges(
+            country,
+            basket_version_id=input_data.basket_version_id,
+        )
+    except BasketVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except PriceCacheUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:

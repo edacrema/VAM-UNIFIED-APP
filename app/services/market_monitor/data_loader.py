@@ -68,7 +68,8 @@ _COUNTRY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _COMMODITY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _MARKET_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _PRICE_CACHE: dict[tuple[Any, ...], tuple[float, pd.DataFrame]] = {}
-_METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_METADATA_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_REPORTABLE_MONTHS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _PRICE_CACHE_REPOSITORY: Optional[PriceCacheRepository] = None
 _PRICE_CACHE_REPOSITORY_LOCK = threading.Lock()
 _ACTIVE_CACHE_VERSION_ID: Optional[str] = None
@@ -91,6 +92,7 @@ def reset_market_monitor_caches_for_tests() -> None:
     _MARKET_CACHE.clear()
     _PRICE_CACHE.clear()
     _METADATA_CACHE.clear()
+    _REPORTABLE_MONTHS_CACHE.clear()
     _PRICE_CACHE_REPOSITORY = None
     _ACTIVE_CACHE_VERSION_ID = None
 
@@ -110,6 +112,7 @@ def _sync_active_cache_version(active_version_id: Optional[str]) -> None:
         _MARKET_CACHE.clear()
         _PRICE_CACHE.clear()
         _METADATA_CACHE.clear()
+        _REPORTABLE_MONTHS_CACHE.clear()
         _ACTIVE_CACHE_VERSION_ID = version
 
 
@@ -359,12 +362,14 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     status = repo.get_cache_status()
     _sync_active_cache_version(status.active_version_id)
 
-    cached = _cache_get(_METADATA_CACHE, iso3)
-    if cached is not None:
-        return dict(cached)
-
     if not status.has_active_cache:
         raise PriceCacheUnavailableError("No active PriceCache version is available. Run a cache refresh first.")
+
+    country_cache_version = repo.get_active_version_id_for_country(iso3) or status.active_version_id or ""
+    cache_key = (iso3, country_cache_version)
+    cached = _cache_get(_METADATA_CACHE, cache_key)
+    if cached is not None:
+        return dict(cached)
 
     cache_metadata = repo.get_country_metadata(iso3)
     if cache_metadata is None:
@@ -458,8 +463,258 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
         "warnings": warnings,
         "operator_warnings": operator_warnings,
     }
-    _cache_set(_METADATA_CACHE, iso3, metadata)
+    _cache_set(_METADATA_CACHE, cache_key, metadata)
     return dict(metadata)
+
+
+def get_reportable_months(country: str) -> Dict[str, Any]:
+    canonical, iso3 = resolve_country(country)
+    repo = _get_price_cache_repository()
+    status = repo.get_cache_status()
+    _sync_active_cache_version(status.active_version_id)
+    if not status.has_active_cache:
+        raise PriceCacheUnavailableError("No active PriceCache version is available. Run a cache refresh first.")
+
+    availability = repo.get_country_availability(iso3)
+    cache_version_id = getattr(availability, "cache_version_id", None) if availability else None
+    basket = _get_active_food_basket(iso3)
+    basket_version_id = getattr(basket, "basket_version_id", None) if basket else None
+    cache_key = (iso3, cache_version_id or "", basket_version_id or "")
+    cached = _cache_get(_REPORTABLE_MONTHS_CACHE, cache_key)
+    if cached is not None:
+        return dict(cached)
+
+    result = _build_reportable_months_payload(
+        canonical=canonical,
+        iso3=iso3,
+        repo=repo,
+        availability=availability,
+        basket=basket,
+    )
+    _cache_set(_REPORTABLE_MONTHS_CACHE, cache_key, result)
+    return dict(result)
+
+
+def refresh_reportable_months_from_databridges(
+    country: str,
+    *,
+    basket_version_id: Optional[str] = None,
+    adapter: Optional[DataBridgesClientAdapter] = None,
+) -> Dict[str, Any]:
+    canonical, iso3 = resolve_country(country)
+    before = get_reportable_months(country)
+    warnings: list[str] = []
+    if not _manual_refresh_enabled():
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="unavailable",
+            before=before,
+            warnings=["Manual DataBridges refresh is disabled."],
+        )
+
+    repo = _get_price_cache_repository()
+    availability = repo.get_country_availability(iso3)
+    if availability is None or not availability.cache_version_id:
+        raise PriceCacheUnavailableError(f"No active PriceCache availability is available for {canonical} ({iso3}).")
+    source_cache_version_id = availability.cache_version_id
+    requested_basket_version = str(basket_version_id or "").strip()
+    basket = _get_active_food_basket(iso3)
+    if basket is None:
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="no_update",
+            before=before,
+            source_cache_version_id=source_cache_version_id,
+            warnings=[f"No active food basket is configured for {canonical}; refresh skipped."],
+        )
+    if requested_basket_version and requested_basket_version != basket.basket_version_id:
+        from app.services.market_monitor.food_basket import BasketVersionConflict
+
+        raise BasketVersionConflict(
+            "The selected food basket version is no longer active. Refresh the country basket and run the report again."
+        )
+
+    start_month, end_month = _manual_refresh_window(before)
+    months_checked = _month_labels_between(start_month, end_month)
+    if not months_checked:
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="no_update",
+            before=before,
+            source_cache_version_id=source_cache_version_id,
+            checked_start_month=_month_label(start_month),
+            checked_end_month=_month_label(end_month),
+            months_checked=[],
+            warnings=["The active cache already has a reportable current month."],
+        )
+
+    priced_ids = {int(item) for item in availability.priced_commodity_ids or []}
+    if not priced_ids:
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="no_update",
+            before=before,
+            source_cache_version_id=source_cache_version_id,
+            checked_start_month=_month_label(start_month),
+            checked_end_month=_month_label(end_month),
+            months_checked=months_checked,
+            warnings=[f"PriceCache has no priced commodity IDs for {canonical}; refresh skipped."],
+        )
+
+    adapter = adapter or DataBridgesClientAdapter()
+    try:
+        raw_rows = adapter.fetch_monthly_price_rows(
+            iso3,
+            start_date=start_month.isoformat(),
+            end_date=_month_end(end_month).isoformat(),
+        )
+    except Exception as exc:
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="unavailable",
+            before=before,
+            source_cache_version_id=source_cache_version_id,
+            checked_start_month=_month_label(start_month),
+            checked_end_month=_month_label(end_month),
+            months_checked=months_checked,
+            rows_fetched=0,
+            warnings=[f"DataBridges refresh unavailable: {_safe_adapter_error(exc)}"],
+        )
+
+    try:
+        commodities = adapter.fetch_commodities(iso3)
+    except Exception as exc:
+        commodities = []
+        warnings.append(f"Could not refresh DataBridges commodity metadata: {_safe_adapter_error(exc)}")
+    try:
+        markets = adapter.fetch_markets(iso3)
+    except Exception as exc:
+        markets = []
+        warnings.append(f"Could not refresh DataBridges market metadata: {_safe_adapter_error(exc)}")
+
+    priced_rows = [
+        dict(row)
+        for row in raw_rows
+        if _to_int(row.get("commodity_id")) in priced_ids
+    ]
+    real_filter = filter_real_monthly_price_rows(priced_rows)
+    future_filter = filter_future_monthly_price_rows(real_filter.rows, current_month_start=_current_month_start())
+    enriched = enrich_price_rows_with_metadata(future_filter.rows, markets=markets, commodities=commodities)
+    deduped = deduplicate_monthly_price_rows(enriched)
+    source_records = repo.get_price_window(
+        iso3,
+        start_month.isoformat(),
+        _month_end(end_month).isoformat(),
+        commodity_ids=sorted(priced_ids),
+    )
+    source_keys = {price_deduplication_key(_monthly_record_to_row_dict(row)) for row in source_records}
+    new_rows = [row for row in deduped.rows if price_deduplication_key(row) not in source_keys]
+    skipped_existing = len(deduped.rows) - len(new_rows)
+
+    if not new_rows:
+        warnings.extend(_manual_refresh_filter_warnings(real_filter, future_filter, deduped))
+        after = before
+        return _manual_refresh_response(
+            canonical=canonical,
+            iso3=iso3,
+            status="no_update",
+            before=before,
+            after=after,
+            source_cache_version_id=source_cache_version_id,
+            checked_start_month=_month_label(start_month),
+            checked_end_month=_month_label(end_month),
+            months_checked=months_checked,
+            rows_fetched=len(raw_rows),
+            rows_real=len(real_filter.rows),
+            rows_saved=0,
+            rows_skipped_existing=skipped_existing,
+            excluded_non_real_rows=real_filter.excluded_rows,
+            excluded_future_rows=future_filter.excluded_rows,
+            deduplicated_rows=deduped.duplicate_rows,
+            warnings=warnings,
+        )
+
+    new_version_id = repo.create_cache_version(
+        refresh_type="manual_country_latest",
+        triggered_by="manual",
+        source_host=_optional_text(getattr(getattr(adapter, "config", None), "base_url", None)),
+        source_env=_optional_text(getattr(getattr(adapter, "config", None), "env", None)),
+    )
+    repo.copy_country_snapshot(
+        source_cache_version_id=source_cache_version_id,
+        target_cache_version_id=new_version_id,
+        country_iso3=iso3,
+    )
+    repo.upsert_country_metadata(
+        cache_version_id=new_version_id,
+        country_iso3=iso3,
+        commodities=commodities,
+        markets=markets,
+    )
+    rows_saved = repo.upsert_monthly_prices(
+        cache_version_id=new_version_id,
+        country_iso3=iso3,
+        prices=new_rows,
+    )
+    rows_total = repo.count_country_price_rows(cache_version_id=new_version_id, country_iso3=iso3)
+    repo.record_country_result(
+        cache_version_id=new_version_id,
+        country_iso3=iso3,
+        status="success",
+        rows_prices=rows_total,
+        rows_commodities=len(commodities),
+        rows_markets=len(markets),
+        latest_price_date=max(
+            [parsed for parsed in (_date_obj(row.get("price_date")) for row in new_rows) if parsed is not None],
+            default=None,
+        ),
+        validation_summary={
+            "manual_country_latest": True,
+            "source_cache_version_id": source_cache_version_id,
+            "rows_fetched": len(raw_rows),
+            "rows_real": len(real_filter.rows),
+            "rows_saved": rows_saved,
+            "rows_skipped_existing": skipped_existing,
+            "excluded_non_real_rows": real_filter.excluded_rows,
+            "excluded_future_rows": future_filter.excluded_rows,
+            "deduplicated_rows": deduped.duplicate_rows,
+            "warnings": list(warnings),
+        },
+    )
+    repo.finalize_cache_version(
+        new_version_id,
+        status="partial_active",
+        validation_summary={"manual_country_latest": True, "country_iso3": iso3},
+    )
+    repo.set_country_active_version(iso3, new_version_id)
+    _invalidate_country_price_cache(iso3)
+    after = get_reportable_months(country)
+    warnings.extend(_manual_refresh_filter_warnings(real_filter, future_filter, deduped))
+    return _manual_refresh_response(
+        canonical=canonical,
+        iso3=iso3,
+        status="updated" if rows_saved else "no_update",
+        before=before,
+        after=after,
+        source_cache_version_id=source_cache_version_id,
+        new_cache_version_id=new_version_id,
+        checked_start_month=_month_label(start_month),
+        checked_end_month=_month_label(end_month),
+        months_checked=months_checked,
+        rows_fetched=len(raw_rows),
+        rows_real=len(real_filter.rows),
+        rows_saved=rows_saved,
+        rows_skipped_existing=skipped_existing,
+        excluded_non_real_rows=real_filter.excluded_rows,
+        excluded_future_rows=future_filter.excluded_rows,
+        deduplicated_rows=deduped.duplicate_rows,
+        warnings=warnings,
+    )
 
 
 def get_cache_metadata_for_report(country: str) -> Dict[str, Any]:
@@ -1860,13 +2115,14 @@ def _get_country_price_df(
     status = repo.get_cache_status()
     _sync_active_cache_version(status.active_version_id)
 
+    availability = repo.get_country_availability(iso3)
+    country_cache_version = getattr(availability, "cache_version_id", None) if availability else None
     ids = tuple(sorted({int(item) for item in commodity_ids or [] if item is not None}))
-    cache_key = (iso3, start_date, end_date, ids, latest_value_only)
+    cache_key = (iso3, country_cache_version or "", start_date, end_date, ids, latest_value_only)
     cached = _cache_get(_PRICE_CACHE, cache_key)
     if cached is not None:
         return cached.copy()
 
-    availability = repo.get_country_availability(iso3)
     if availability is None:
         df = _empty_price_df()
         _cache_set(_PRICE_CACHE, cache_key, df)
@@ -2173,6 +2429,222 @@ def _get_repository_country_metadata(iso3: str) -> CountryMetadata:
     if metadata is None:
         raise PriceCacheUnavailableError(f"No active PriceCache metadata is available for {iso3}.")
     return metadata
+
+
+def _build_reportable_months_payload(
+    *,
+    canonical: str,
+    iso3: str,
+    repo: PriceCacheRepository,
+    availability: Any,
+    basket: Any,
+) -> dict[str, Any]:
+    cache_version_id = getattr(availability, "cache_version_id", None) if availability else None
+    start_d = _date_obj(getattr(availability, "date_start", None)) if availability else None
+    latest_cached = _date_obj(getattr(availability, "date_end", None)) if availability else None
+    current_month = _current_month_start()
+    if latest_cached and latest_cached > current_month:
+        latest_cached = current_month
+
+    base = {
+        "country": canonical,
+        "iso3": iso3,
+        "cache_version_id": cache_version_id,
+        "basket_version_id": getattr(basket, "basket_version_id", None) if basket else None,
+        "reportable_months": [],
+        "latest_reportable_month": None,
+        "latest_cached_month": _month_label(latest_cached),
+        "latest_cached_real_month": None,
+        "missing_by_month": {},
+        "warnings": [],
+    }
+    if availability is None:
+        base["warnings"].append(f"No active PriceCache availability is available for {canonical}.")
+        return base
+    if basket is None:
+        base["warnings"].append(f"No active food basket is configured for {canonical}.")
+        return base
+    basket_items = list(getattr(basket, "items", []) or [])
+    basket_ids = _dedupe_ints([getattr(item, "commodity_id", None) for item in basket_items])
+    if not basket_ids:
+        base["warnings"].append(f"The active food basket for {canonical} has no commodities.")
+        return base
+    if start_d is None or latest_cached is None or start_d > latest_cached:
+        base["warnings"].append(f"PriceCache has no monthly price date range for {canonical}.")
+        return base
+
+    basket_names = {
+        int(getattr(item, "commodity_id")): (
+            _optional_text(getattr(item, "commodity_name_snapshot", None))
+            or f"commodity_id={getattr(item, 'commodity_id')}"
+        )
+        for item in basket_items
+        if getattr(item, "commodity_id", None) is not None
+    }
+    rows = repo.get_price_window(
+        iso3,
+        start_d.isoformat(),
+        _month_end(latest_cached).isoformat(),
+        commodity_ids=basket_ids,
+    )
+    df = _normalise_cached_price_rows(rows, canonical, iso3)
+    months_by_id: dict[int, set[str]] = {commodity_id: set() for commodity_id in basket_ids}
+    if not df.empty:
+        working = df[pd.to_numeric(df["Price"], errors="coerce").notna()].copy()
+        if not working.empty:
+            working["MonthLabel"] = working["Price Date"].dt.to_period("M").astype(str)
+            for commodity_id, group in working.groupby("Commodity ID"):
+                parsed_id = _to_int(commodity_id)
+                if parsed_id is not None:
+                    months_by_id.setdefault(parsed_id, set()).update(group["MonthLabel"].dropna().astype(str))
+            latest_real = working["Price Date"].max()
+            if pd.notna(latest_real):
+                base["latest_cached_real_month"] = pd.Timestamp(latest_real).strftime("%Y-%m")
+
+    reportable: list[str] = []
+    missing_by_month: dict[str, list[str]] = {}
+    for month in pd.date_range(start=start_d, end=latest_cached, freq="MS"):
+        label = month.strftime("%Y-%m")
+        missing = [
+            basket_names.get(commodity_id, f"commodity_id={commodity_id}")
+            for commodity_id in basket_ids
+            if label not in months_by_id.get(commodity_id, set())
+        ]
+        if missing:
+            missing_by_month[label] = missing
+        else:
+            reportable.append(label)
+
+    base["reportable_months"] = reportable
+    base["latest_reportable_month"] = reportable[-1] if reportable else None
+    base["missing_by_month"] = missing_by_month
+    if not reportable:
+        base["warnings"].append(f"No complete actual-price basket month is available for {canonical}.")
+    return base
+
+
+def _get_active_food_basket(iso3: str) -> Any:
+    from app.services.market_monitor.food_basket import create_food_basket_repository
+
+    return create_food_basket_repository().get_active_basket(iso3)
+
+
+def _manual_refresh_enabled() -> bool:
+    value = str(os.environ.get("MARKET_MONITOR_MANUAL_REFRESH_ENABLED", "true")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _manual_refresh_window(reportability: dict[str, Any]) -> tuple[date, date]:
+    current_month = _current_month_start()
+    latest_reportable = _parse_month_label(reportability.get("latest_reportable_month"))
+    if latest_reportable is not None:
+        return _add_months(latest_reportable, 1), current_month
+    start = (pd.Timestamp(current_month) - pd.DateOffset(months=12)).date().replace(day=1)
+    return start, current_month
+
+
+def _manual_refresh_response(
+    *,
+    canonical: str,
+    iso3: str,
+    status: str,
+    before: dict[str, Any],
+    after: Optional[dict[str, Any]] = None,
+    source_cache_version_id: Optional[str] = None,
+    new_cache_version_id: Optional[str] = None,
+    checked_start_month: Optional[str] = None,
+    checked_end_month: Optional[str] = None,
+    months_checked: Optional[list[str]] = None,
+    rows_fetched: int = 0,
+    rows_real: int = 0,
+    rows_saved: int = 0,
+    rows_skipped_existing: int = 0,
+    excluded_non_real_rows: int = 0,
+    excluded_future_rows: int = 0,
+    deduplicated_rows: int = 0,
+    warnings: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    after = after or before
+    before_months = set(before.get("reportable_months") or [])
+    after_months = set(after.get("reportable_months") or [])
+    return {
+        "country": canonical,
+        "iso3": iso3,
+        "status": status,
+        "source_cache_version_id": source_cache_version_id or before.get("cache_version_id"),
+        "new_cache_version_id": new_cache_version_id,
+        "checked_start_month": checked_start_month,
+        "checked_end_month": checked_end_month,
+        "months_checked": months_checked or [],
+        "latest_reportable_month_before": before.get("latest_reportable_month"),
+        "latest_reportable_month_after": after.get("latest_reportable_month"),
+        "new_reportable_months": sorted(after_months - before_months),
+        "rows_fetched": rows_fetched,
+        "rows_real": rows_real,
+        "rows_saved": rows_saved,
+        "rows_skipped_existing": rows_skipped_existing,
+        "excluded_non_real_rows": excluded_non_real_rows,
+        "excluded_future_rows": excluded_future_rows,
+        "deduplicated_rows": deduplicated_rows,
+        "missing_by_month": after.get("missing_by_month") or {},
+        "warnings": _dedupe_preserve_order([str(item) for item in warnings or []]),
+    }
+
+
+def _manual_refresh_filter_warnings(flag_filter: Any, future_filter: Any, deduplication: Any) -> list[str]:
+    warnings: list[str] = []
+    if getattr(flag_filter, "excluded_rows", 0):
+        parts = ", ".join(f"{flag}={count}" for flag, count in getattr(flag_filter, "excluded_flags", ()) or ())
+        warnings.append(f"DataBridges refresh excluded {flag_filter.excluded_rows} non-real monthly price row(s): {parts}.")
+    if getattr(future_filter, "excluded_rows", 0):
+        warnings.append(
+            "DataBridges refresh excluded "
+            f"{future_filter.excluded_rows} future-dated monthly price row(s)."
+        )
+    if getattr(deduplication, "duplicate_rows", 0):
+        warnings.append(
+            f"DataBridges refresh deduplicated {deduplication.duplicate_rows} duplicate monthly price row(s)."
+        )
+    return warnings
+
+
+def _invalidate_country_price_cache(iso3: str) -> None:
+    country = str(iso3 or "").upper()
+    _COUNTRY_CACHE.clear()
+    _COMMODITY_CACHE.pop(country, None)
+    _MARKET_CACHE.pop(country, None)
+    for cache in (_PRICE_CACHE, _METADATA_CACHE, _REPORTABLE_MONTHS_CACHE):
+        for key in list(cache.keys()):
+            if key == country or (isinstance(key, tuple) and key and key[0] == country):
+                cache.pop(key, None)
+
+
+def _month_label(value: Any) -> Optional[str]:
+    parsed = _date_obj(value)
+    return parsed.strftime("%Y-%m") if parsed else None
+
+
+def _parse_month_label(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.strptime(str(value)[:7], "%Y-%m").date().replace(day=1)
+    except ValueError:
+        return None
+
+
+def _month_labels_between(start: date, end: date) -> list[str]:
+    if start > end:
+        return []
+    return [month.strftime("%Y-%m") for month in pd.date_range(start=start, end=end, freq="MS")]
+
+
+def _add_months(value: date, months: int) -> date:
+    return (pd.Timestamp(value) + pd.DateOffset(months=months)).date().replace(day=1)
+
+
+def _month_end(value: date) -> date:
+    return (pd.Timestamp(value) + pd.offsets.MonthEnd(0)).date()
 
 
 def _markets_payload(metadata: CountryMetadata, *, country_name: str, iso3: str) -> list[dict[str, Any]]:

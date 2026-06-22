@@ -42,3 +42,40 @@ class PriceCacheRepository(Protocol):
         admin1_names: Optional[Sequence[str]] = None,
     ) -> List[MonthlyPriceRecord]:
         ...
+
+    def copy_country_snapshot(
+        self,
+        *,
+        source_cache_version_id: str,
+        target_cache_version_id: str,
+        country_iso3: str,
+    ) -> None:
+        ...
+
+    def upsert_country_metadata(
+        self,
+        *,
+        cache_version_id: str,
+        country_iso3: str,
+        commodities: Sequence[dict],
+        markets: Sequence[dict],
+    ) -> None:
+        ...
+
+    def upsert_monthly_prices(
+        self,
+        *,
+        cache_version_id: str,
+        country_iso3: str,
+        prices: Sequence[dict],
+    ) -> int:
+        ...
+
+    def get_country_price_keys(self, *, cache_version_id: str, country_iso3: str) -> set[tuple]:
+        ...
+
+    def count_country_price_rows(self, *, cache_version_id: str, country_iso3: str) -> int:
+        ...
+
+    def set_country_active_version(self, country_iso3: str, cache_version_id: str) -> None:
+        ...
