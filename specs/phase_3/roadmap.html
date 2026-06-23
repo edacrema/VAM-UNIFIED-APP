@@ -154,6 +154,7 @@
   <ul>
     <li>Country selection does not call Databridges.</li>
     <li>Forecast-only or incomplete basket months are not selectable as reference months.</li>
+    <li>Reportable-month endpoints work through both the FastAPI router and the Streamlit local dispatcher.</li>
     <li>Report generation works from fixture cache rows.</li>
     <li>Cache status appears in the form.</li>
   </ul>
@@ -215,6 +216,7 @@
   <ul>
     <li>Manual refresh updates only the selected country's active cache version.</li>
     <li>Forecast-only refresh responses return no update and leave cache pointers unchanged.</li>
+    <li>Manual refresh endpoints work through both the FastAPI router and the Streamlit local dispatcher.</li>
     <li>Stale basket versions return a conflict so the form can refetch basket/reportable-month state.</li>
     <li>Refresh metadata captures source cache, new country cache, skipped rows, and missing basket coverage.</li>
   </ul>

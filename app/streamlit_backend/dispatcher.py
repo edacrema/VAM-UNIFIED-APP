@@ -51,8 +51,10 @@ from app.services.market_monitor.data_loader import (
     get_cache_status_snapshot,
     get_country_metadata as get_market_monitor_country_metadata,
     get_commodity_categories,
+    get_reportable_months,
     get_supported_countries as get_market_monitor_supported_countries,
     normalize_country_name,
+    refresh_reportable_months_from_databridges,
 )
 from app.services.market_monitor.price_backfill import PriceDataGateError
 from app.services.market_monitor.food_basket import (
@@ -1567,6 +1569,21 @@ def _dispatch_market_monitor(
         return _market_monitor_commodities(params=params)
     if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "metadata":
         return _market_monitor_country_metadata(parts[1])
+    if (
+        method == "GET"
+        and len(parts) == 3
+        and parts[0] == "countries"
+        and parts[2] == "reportable-months"
+    ):
+        return _market_monitor_country_reportable_months(parts[1])
+    if (
+        method == "POST"
+        and len(parts) == 4
+        and parts[0] == "countries"
+        and parts[2] == "reportable-months"
+        and parts[3] == "refresh"
+    ):
+        return _market_monitor_refresh_country_reportable_months(parts[1], json_body=json_body)
     if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
         return _market_monitor_country_basket(parts[1])
     if method == "POST" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
@@ -2038,6 +2055,36 @@ def _market_monitor_commodities(*, params: Dict[str, Any]) -> LocalResponse:
 def _market_monitor_country_metadata(country: str) -> LocalResponse:
     try:
         return _json_response(get_market_monitor_country_metadata(country))
+    except PriceCacheUnavailableError as exc:
+        raise LocalHTTPException(503, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_country_reportable_months(country: str) -> LocalResponse:
+    try:
+        return _json_response(get_reportable_months(country))
+    except PriceCacheUnavailableError as exc:
+        raise LocalHTTPException(503, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_refresh_country_reportable_months(country: str, *, json_body: Any) -> LocalResponse:
+    payload = json_body if isinstance(json_body, dict) else {}
+    try:
+        return _json_response(
+            refresh_reportable_months_from_databridges(
+                country,
+                basket_version_id=payload.get("basket_version_id"),
+            )
+        )
+    except BasketVersionConflict as exc:
+        raise LocalHTTPException(409, str(exc))
     except PriceCacheUnavailableError as exc:
         raise LocalHTTPException(503, str(exc))
     except ValueError as exc:

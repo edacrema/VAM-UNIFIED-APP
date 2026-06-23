@@ -208,6 +208,110 @@ def test_market_monitor_async_failure_stores_price_gap_report(monkeypatch):
     assert run.status == "failed"
     assert run.error == str(BasketReferenceMonthMissing(gap_report))
     assert run.metadata["price_gap_report"]["hard_missing"][0]["commodity_id"] == 52
+
+
+def test_market_monitor_dispatcher_routes_reportable_months(monkeypatch):
+    monkeypatch.setattr(
+        dispatcher,
+        "get_reportable_months",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "cache_version_id": "cache-v1",
+            "basket_version_id": "basket-v1",
+            "reportable_months": ["2025-01", "2025-02"],
+            "latest_reportable_month": "2025-02",
+            "latest_cached_month": "2025-03",
+            "latest_cached_real_month": "2025-02",
+            "missing_by_month": {"2025-03": ["Beans"]},
+            "warnings": [],
+        },
+    )
+
+    response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/reportable-months",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["country"] == "South Sudan"
+    assert response.json()["latest_reportable_month"] == "2025-02"
+    assert response.json()["missing_by_month"] == {"2025-03": ["Beans"]}
+
+
+def test_market_monitor_dispatcher_routes_reportable_months_refresh(monkeypatch):
+    captured = {}
+
+    def fake_refresh(country, *, basket_version_id=None):
+        captured["country"] = country
+        captured["basket_version_id"] = basket_version_id
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "status": "updated",
+            "source_cache_version_id": "cache-v1",
+            "new_cache_version_id": "cache-v2",
+            "checked_start_month": "2025-03",
+            "checked_end_month": "2025-03",
+            "months_checked": ["2025-03"],
+            "latest_reportable_month_before": "2025-02",
+            "latest_reportable_month_after": "2025-03",
+            "new_reportable_months": ["2025-03"],
+            "rows_fetched": 2,
+            "rows_real": 2,
+            "rows_saved": 2,
+            "rows_skipped_existing": 0,
+            "excluded_non_real_rows": 0,
+            "excluded_future_rows": 0,
+            "deduplicated_rows": 0,
+            "missing_by_month": {},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(dispatcher, "refresh_reportable_months_from_databridges", fake_refresh)
+
+    response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/countries/South%20Sudan/reportable-months/refresh",
+        json_body={"basket_version_id": "basket-v1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "updated"
+    assert captured == {"country": "South Sudan", "basket_version_id": "basket-v1"}
+
+
+def test_market_monitor_dispatcher_reportable_months_unavailable_returns_503(monkeypatch):
+    def fake_reportable_months(_country):
+        raise dispatcher.PriceCacheUnavailableError("cache unavailable")
+
+    monkeypatch.setattr(dispatcher, "get_reportable_months", fake_reportable_months)
+
+    response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/reportable-months",
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "cache unavailable"
+
+
+def test_market_monitor_dispatcher_reportable_months_refresh_conflict_returns_409(monkeypatch):
+    def fake_refresh(_country, *, basket_version_id=None):
+        raise dispatcher.BasketVersionConflict("refresh basket")
+
+    monkeypatch.setattr(dispatcher, "refresh_reportable_months_from_databridges", fake_refresh)
+
+    response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/countries/South%20Sudan/reportable-months/refresh",
+        json_body={"basket_version_id": "old"},
+    )
+
+    assert response.status_code == 409
+    assert "refresh basket" in response.json()["detail"]
+
+
 def test_mfi_dispatcher_routes_csv_endpoints(monkeypatch):
     calls = []
 

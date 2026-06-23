@@ -65,6 +65,10 @@ Cloud Scheduler
       -> Staging tables
       -> Cache validation
       -> Atomic active-version promotion</code></pre>
+  <p>
+    The current Streamlit-only runtime routes page requests through <code>app/streamlit_backend/dispatcher.py</code>, which mirrors the FastAPI
+    routers in-process. Any FastAPI endpoint used by a Streamlit page must also be registered in this dispatcher and covered by dispatcher tests.
+  </p>
 
   <h2>Database Choice</h2>
   <p>
@@ -278,7 +282,8 @@ basket_price = sum(component_value for all available basket components)</code></
     The Price Bulletin form reads <code>GET /market-monitor/countries/{country}/reportable-months</code> to populate only basket-complete reference
     months. When the user clicks refresh, <code>POST /market-monitor/countries/{country}/reportable-months/refresh</code> fetches all priced
     commodities for the selected country from Databridges between the latest reportable cached month and the current month. New actual or aggregate
-    rows are normalized, deduplicated, written into a <code>manual_country_latest</code> cache version, and activated for that country only.
+    rows are normalized, deduplicated, written into a <code>manual_country_latest</code> cache version, and activated for that country only. These
+    reportable-month and refresh routes must work through both the FastAPI router and the Streamlit local dispatcher.
   </p>
   <pre><code>country reportable months response
 - cache_version_id
