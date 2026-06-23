@@ -50,8 +50,12 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 _CACHE_TTL_SECONDS = 15 * 60
 _RECENT_METADATA_MONTHS = 36
-_CHART_HISTORY_MONTHS = 60
+_CHART_HISTORY_MONTHS = 73
 _REAL_PRICE_FLAG_COMPONENTS = {"actual", "aggregate", "aggregated"}
+_FX_NEAR_STATIC_MAX_RANGE_RATIO = 0.005
+_FX_FOOD_BASKET_USD_MAX = 250.0
+_FX_COMMODITY_MEDIAN_USD_MAX = 20.0
+_FX_MIN_COMMODITY_USD_SAMPLE = 3
 
 # Worker-side ETL telemetry that operators need but officers should not be
 # shown as report warnings.
@@ -1016,6 +1020,7 @@ def resolve_report_price_data(
         currency_name=selected_currency,
         full_date_index=full_date_index,
         adapter=adapter,
+        price_frame=df_national,
     )
     for column, series in fx_result["series"].items():
         df_national[column] = series.reindex(full_date_index)
@@ -1133,6 +1138,7 @@ def _resolve_exchange_rate_series(
     currency_name: Optional[str],
     full_date_index: pd.DatetimeIndex,
     adapter: Optional[DataBridgesClientAdapter],
+    price_frame: Optional[pd.DataFrame] = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "enabled": _market_monitor_fx_enabled(),
@@ -1144,6 +1150,7 @@ def _resolve_exchange_rate_series(
         "error": None,
         "official": {"included": False, "missing_months": []},
         "unofficial": {"included": False, "missing_months": []},
+        "usability": _empty_fx_usability_metadata(),
     }
     empty = {"series": {}, "warnings": [], "metadata": metadata, "exchange_rate_data": None}
     if not metadata["enabled"]:
@@ -1254,10 +1261,35 @@ def _resolve_exchange_rate_series(
             "monthly averages use available observations."
         )
 
+    usability = _assess_exchange_rate_usability(
+        official_series=series.get("ExchangeRate"),
+        unofficial_series=series.get("ExchangeRateUnofficial"),
+        price_frame=price_frame,
+    )
+    metadata["usability"] = usability
+    selected_series_name = usability.get("selected_series")
+    if selected_series_name == "unofficial":
+        if "ExchangeRate" in series:
+            series.pop("ExchangeRate", None)
+            metadata["official"]["included"] = False
+        warnings.append(
+            "Official FX omitted: near-static official rate is inconsistent with the local price scale; "
+            "using unofficial/parallel FX for exchange-rate analysis."
+        )
+    elif selected_series_name is None and series.get("ExchangeRate") is not None:
+        series.clear()
+        metadata["official"]["included"] = False
+        reason = usability.get("omitted_reason") or "official FX did not pass usability checks"
+        warnings.append(f"DataBridges FX omitted: {reason}.")
+
+    selected_column = "ExchangeRate" if selected_series_name == "official" else "ExchangeRateUnofficial"
+    selected_rate_series = series.get(selected_column)
     exchange_rate_data = _exchange_rate_data_from_series(
-        series.get("ExchangeRate"),
+        selected_rate_series,
         currency_code=code,
         target_date=full_date_index[-1],
+        source_series=str(selected_series_name) if selected_series_name else None,
+        rate_type=str(selected_series_name) if selected_series_name else None,
     )
     return {
         "series": series,
@@ -1294,6 +1326,142 @@ def _monthly_exchange_rate_series(
     if missing:
         return None, missing
     return monthly.astype(float).round(6), []
+
+
+def _empty_fx_usability_metadata() -> dict[str, Any]:
+    return {
+        "official_usable": None,
+        "selected_series": None,
+        "omitted_reason": None,
+        "near_static": False,
+        "price_scale_inconsistent": False,
+        "official_range_ratio": None,
+        "official_range_pct": None,
+        "official_unique_rounded_values": None,
+        "food_basket_usd": None,
+        "commodity_median_usd": None,
+        "commodity_usd_sample_size": 0,
+    }
+
+
+def _assess_exchange_rate_usability(
+    *,
+    official_series: Optional[pd.Series],
+    unofficial_series: Optional[pd.Series],
+    price_frame: Optional[pd.DataFrame],
+) -> dict[str, Any]:
+    usability = _empty_fx_usability_metadata()
+    official_present = official_series is not None and not official_series.dropna().empty
+    unofficial_present = unofficial_series is not None and not unofficial_series.dropna().empty
+    if not official_present:
+        usability["official_usable"] = False if unofficial_present else None
+        usability["selected_series"] = "unofficial" if unofficial_present else None
+        return usability
+
+    static_diag = _fx_static_diagnostics(official_series)
+    scale_diag = _fx_price_scale_diagnostics(price_frame, official_series)
+    usability.update(static_diag)
+    usability.update(scale_diag)
+    official_usable = not (bool(static_diag["near_static"]) and bool(scale_diag["price_scale_inconsistent"]))
+    usability["official_usable"] = official_usable
+    if official_usable:
+        usability["selected_series"] = "official"
+    elif unofficial_present:
+        usability["selected_series"] = "unofficial"
+        usability["omitted_reason"] = "near-static official rate inconsistent with local price scale"
+    else:
+        usability["selected_series"] = None
+        usability["omitted_reason"] = (
+            "near-static official-only rate inconsistent with local price scale and no usable unofficial FX"
+        )
+    return usability
+
+
+def _fx_static_diagnostics(series: pd.Series) -> dict[str, Any]:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return {
+            "near_static": False,
+            "official_range_ratio": None,
+            "official_range_pct": None,
+            "official_unique_rounded_values": 0,
+        }
+    median = float(values.median())
+    range_value = float(values.max() - values.min())
+    range_ratio = None if median == 0 else abs(range_value / median)
+    unique_rounded = int(values.round(6).nunique())
+    near_static = unique_rounded <= 1 or (
+        range_ratio is not None and range_ratio <= _FX_NEAR_STATIC_MAX_RANGE_RATIO
+    )
+    return {
+        "near_static": bool(near_static),
+        "official_range_ratio": None if range_ratio is None else round(float(range_ratio), 8),
+        "official_range_pct": None if range_ratio is None else round(float(range_ratio * 100.0), 4),
+        "official_unique_rounded_values": unique_rounded,
+    }
+
+
+def _fx_price_scale_diagnostics(
+    price_frame: Optional[pd.DataFrame],
+    fx_series: pd.Series,
+) -> dict[str, Any]:
+    diagnostics = {
+        "price_scale_inconsistent": False,
+        "food_basket_usd": None,
+        "commodity_median_usd": None,
+        "commodity_usd_sample_size": 0,
+    }
+    if price_frame is None or price_frame.empty or fx_series is None or fx_series.dropna().empty:
+        return diagnostics
+    try:
+        rate = float(pd.to_numeric(fx_series, errors="coerce").dropna().iloc[-1])
+    except Exception:
+        return diagnostics
+    if rate <= 0 or pd.isna(rate):
+        return diagnostics
+
+    frame = price_frame.copy()
+    try:
+        frame.index = pd.to_datetime(frame.index, errors="coerce")
+        frame = frame[frame.index.notna()].sort_index()
+    except Exception:
+        pass
+    if frame.empty:
+        return diagnostics
+    current = frame.iloc[-1]
+
+    try:
+        food_basket = float(pd.to_numeric(pd.Series([current.get("FoodBasket")]), errors="coerce").iloc[0])
+    except Exception:
+        food_basket = float("nan")
+    if not pd.isna(food_basket) and food_basket > 0:
+        diagnostics["food_basket_usd"] = round(food_basket / rate, 4)
+
+    commodity_values = []
+    for column in frame.columns:
+        if column in {"FoodBasket", "ExchangeRate", "ExchangeRateUnofficial", "FuelPrice"}:
+            continue
+        try:
+            value = float(pd.to_numeric(pd.Series([current.get(column)]), errors="coerce").iloc[0])
+        except Exception:
+            continue
+        if not pd.isna(value) and value > 0:
+            commodity_values.append(value / rate)
+    diagnostics["commodity_usd_sample_size"] = len(commodity_values)
+    if commodity_values:
+        diagnostics["commodity_median_usd"] = round(float(pd.Series(commodity_values).median()), 4)
+
+    basket_flag = (
+        diagnostics["food_basket_usd"] is not None
+        and float(diagnostics["food_basket_usd"]) > _FX_FOOD_BASKET_USD_MAX
+    )
+    commodity_flag = (
+        diagnostics["commodity_usd_sample_size"] >= _FX_MIN_COMMODITY_USD_SAMPLE
+        and diagnostics["commodity_median_usd"] is not None
+        and float(diagnostics["commodity_median_usd"]) > _FX_COMMODITY_MEDIAN_USD_MAX
+    )
+    diagnostics["price_scale_inconsistent"] = bool(basket_flag or commodity_flag)
+    return diagnostics
 
 
 def _partial_latest_fx_month(
@@ -1340,6 +1508,8 @@ def _exchange_rate_data_from_series(
     *,
     currency_code: str,
     target_date: pd.Timestamp,
+    source_series: Optional[str] = None,
+    rate_type: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     if series is None or series.dropna().empty:
         return None
@@ -1363,6 +1533,8 @@ def _exchange_rate_data_from_series(
         "historical_data_json": history.to_json(date_format="iso"),
         "is_mock": False,
         "source": "DataBridges",
+        "source_series": source_series,
+        "rate_type": rate_type,
     }
 
 

@@ -128,6 +128,18 @@
     Price Bulletin basket price calculations and graphs use the active saved basket version. Missing basket components must be surfaced as warnings
     and must never be silently treated as zero.
   </p>
+  <p>
+    Chart history must be truthful and readable. Food-basket and single-commodity charts may show prior-year and full five-year same-month
+    overlays when the cache contains enough history; multi-commodity charts should prioritize current-period lines instead of crowding the page
+    with repeated overlays.
+  </p>
+
+  <h3>5a. Exchange-Rate Usability</h3>
+  <p>
+    Exchange-rate sections are gated by both coverage and generic usability diagnostics. A complete official DataBridges series is not enough when
+    it is official-only, near-static, and inconsistent with the local price scale. In that case the report should use a usable unofficial series or
+    configured fallback source when available, otherwise omit FX and record the reason in report metadata.
+  </p>
 
   <h3>6. Manual Latest Refresh</h3>
   <p>
@@ -188,8 +200,9 @@
     <li>Cache-first Price Bulletin country selection and data loading.</li>
     <li>Shared country food basket editor, storage, versioning, and audit trail.</li>
     <li>Basket-driven national and regional basket price calculations.</li>
-    <li>Basket graph updates and missing-coverage warnings.</li>
-    <li>Manual latest overlay for the active Price Bulletin run.</li>
+    <li>Basket graph updates, truthful history overlays, and missing-coverage warnings.</li>
+    <li>Exchange-rate usability checks and diagnostics for misleading official-only nominal rates.</li>
+    <li>Manual latest country refresh for the selected Price Bulletin country.</li>
     <li>GCP beta deployment design for the cache database and weekly worker.</li>
   </ul>
 

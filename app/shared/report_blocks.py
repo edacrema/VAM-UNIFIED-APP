@@ -127,6 +127,20 @@ def _blocks_from_text_with_figures(text: str) -> List[ReportBlock]:
     return blocks
 
 
+def _module_section_title(module_id: Any) -> str:
+    module_key = str(module_id or "").strip()
+    known_titles = {
+        "exchange_rate": "Exchange Rate Analysis",
+    }
+    if module_key in known_titles:
+        return known_titles[module_key]
+    words = [word for word in re.split(r"[_\-\s]+", module_key) if word]
+    base = " ".join(word.capitalize() for word in words) if words else "Module"
+    if base.lower().endswith(" analysis"):
+        return base
+    return f"{base} Analysis"
+
+
 def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     country = (result.get("country") or "").strip()
     time_period = (result.get("time_period") or "").strip()
@@ -219,7 +233,7 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
         for module_id, section_text in module_sections.items():
             if not isinstance(section_text, str) or not section_text.strip():
                 continue
-            blocks.append(ReportBlock(type="heading", text=f"{module_id.upper()} Analysis", level=2))
+            blocks.append(ReportBlock(type="heading", text=_module_section_title(module_id), level=2))
             blocks.extend(_text_to_paragraph_blocks(section_text))
 
     if document_references:

@@ -50,7 +50,7 @@
       <tr><td>4</td><td>Cache-first Price Bulletin</td><td>Country selection and report data load from active cache</td><td>No full Databridges call on country selection</td></tr>
       <tr><td>5</td><td>Shared country food baskets</td><td>Basket storage, editor, versioning, validation</td><td>Country baskets persist and are shared</td></tr>
       <tr><td>6</td><td>Basket calculation and graph integration</td><td>Weighted basket engine, coverage metadata, chart/report inputs</td><td>Bulletins use saved basket composition</td></tr>
-      <tr><td>7</td><td>Latest overlay and audit</td><td>Run-local recent Databridges overlay, provenance, admin sync status</td><td>Freshness and provenance visible</td></tr>
+      <tr><td>7</td><td>Manual latest refresh and audit</td><td>Country-specific recent Databridges refresh, provenance, admin sync status</td><td>Freshness and provenance visible</td></tr>
       <tr><td>8</td><td>Hardening and rollout</td><td>Failure tests, performance checks, feature flags, rollback docs</td><td>Phase 3 is pilot-ready</td></tr>
     </tbody>
   </table>
@@ -190,6 +190,8 @@
     <li>Add national and regional aggregation support.</li>
     <li>Add missing-component coverage metadata.</li>
     <li>Update basket graph and report statistics to use calculated basket series.</li>
+    <li>Keep historical overlays readable: show prior-year and full five-year same-month overlays on food-basket and single-commodity charts only.</li>
+    <li>Require five prior same-calendar-month cached observations before plotting a five-year average or range label.</li>
     <li>Update DOCX and prompt inputs to include basket version and coverage warnings.</li>
   </ul>
   <h3>Tests</h3>
@@ -197,6 +199,8 @@
     <li>Known fixture basket produces expected monthly values.</li>
     <li>Changing weights changes graph data.</li>
     <li>Missing commodity prices produce explicit warnings.</li>
+    <li>Multi-commodity charts remain current-period only, while food-basket and single-commodity charts keep valid overlays.</li>
+    <li>Short cache history does not produce a five-year average or range label.</li>
   </ul>
   <h3>Exit Criteria</h3>
   <p>Generated Price Bulletins use the saved country basket in calculations, charts, and report text.</p>
@@ -210,6 +214,8 @@
     <li>Filter non-real rows, deduplicate against active country cache rows, and skip existing canonical rows.</li>
     <li>When new usable rows exist, create and activate a country-specific cache version without changing the global active cache pointer.</li>
     <li>Record source cache version, new country cache version, skipped rows, missing months, and basket version in refresh metadata.</li>
+    <li>Apply exchange-rate usability diagnostics before report FX sections, charts, and module narratives are populated.</li>
+    <li>Omit or replace misleading official-only, near-static, price-scale-inconsistent FX while preserving stable pegs with plausible price scales.</li>
     <li>Add admin sync status page or panel for weekly refresh history.</li>
   </ul>
   <h3>Tests</h3>
@@ -219,6 +225,7 @@
     <li>Manual refresh endpoints work through both the FastAPI router and the Streamlit local dispatcher.</li>
     <li>Stale basket versions return a conflict so the form can refetch basket/reportable-month state.</li>
     <li>Refresh metadata captures source cache, new country cache, skipped rows, and missing basket coverage.</li>
+    <li>FX usability diagnostics suppress misleading official-only nominal rates, protect plausible stable official rates, and preserve fallback behavior.</li>
   </ul>
   <h3>Exit Criteria</h3>
   <p>Users and admins can see exactly which cache version and optional manual country refresh data were used.</p>

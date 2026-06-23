@@ -360,18 +360,20 @@ def _history_overlay_values(
     history: pd.DataFrame,
     target_index: pd.DatetimeIndex,
     column: str,
-) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     empty = pd.Series(index=target_index, dtype=float)
+    empty_count = pd.Series(index=target_index, dtype=int)
     if history is None or history.empty or column not in history.columns:
-        return empty, empty, empty, empty
+        return empty, empty, empty, empty, empty_count
     hist = _normalise_time_index(history)
     if hist.empty:
-        return empty, empty, empty, empty
+        return empty, empty, empty, empty, empty_count
     values = pd.to_numeric(hist[column], errors="coerce")
     prior_values = []
     five_year_mean = []
     five_year_low = []
     five_year_high = []
+    five_year_counts = []
     for ts in target_index:
         current_ts = pd.Timestamp(ts)
         prior_values.append(values.get(current_ts - pd.DateOffset(years=1), np.nan))
@@ -381,7 +383,8 @@ def _history_overlay_values(
             & (values.index >= window_start)
             & (values.index.month == current_ts.month)
         ].dropna()
-        if candidates.empty:
+        five_year_counts.append(int(len(candidates)))
+        if len(candidates) < 5:
             five_year_mean.append(np.nan)
             five_year_low.append(np.nan)
             five_year_high.append(np.nan)
@@ -394,6 +397,7 @@ def _history_overlay_values(
         pd.Series(five_year_mean, index=target_index, dtype=float),
         pd.Series(five_year_low, index=target_index, dtype=float),
         pd.Series(five_year_high, index=target_index, dtype=float),
+        pd.Series(five_year_counts, index=target_index, dtype=int),
     )
 
 
@@ -406,7 +410,11 @@ def _plot_history_overlays(
     color: str,
     label_prefix: str = "",
 ) -> None:
-    prior, five_year_mean, five_year_low, five_year_high = _history_overlay_values(history, target_index, column)
+    prior, five_year_mean, five_year_low, five_year_high, _counts = _history_overlay_values(
+        history,
+        target_index,
+        column,
+    )
     prefix = f"{label_prefix} " if label_prefix else ""
     if prior.notna().any():
         ax.plot(target_index, prior, linestyle="--", linewidth=1.5, color=color, alpha=0.65, label=f"{prefix}prior year")
@@ -997,16 +1005,18 @@ def node_graph_designer(state: MarketReportState) -> dict:
                 cat_slug = _slugify(cat)
                 for page_idx, page_cols in enumerate(pages, start=1):
                     fig, ax = plt.subplots(figsize=(12, 6))
+                    show_history_overlays = len(page_cols) == 1
                     for col in page_cols:
                         line = ax.plot(df_national.index, df_national[col], marker='o', label=col)[0]
-                        _plot_history_overlays(
-                            ax,
-                            df_history,
-                            pd.DatetimeIndex(df_national.index),
-                            col,
-                            color=line.get_color(),
-                            label_prefix=col,
-                        )
+                        if show_history_overlays:
+                            _plot_history_overlays(
+                                ax,
+                                df_history,
+                                pd.DatetimeIndex(df_national.index),
+                                col,
+                                color=line.get_color(),
+                                label_prefix=col,
+                            )
                     title_suffix = f"{cat}"
                     if len(pages) > 1:
                         title_suffix = f"{cat} (Page {page_idx}/{len(pages)})"

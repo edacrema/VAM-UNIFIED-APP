@@ -1,5 +1,6 @@
 import pandas as pd
 
+from app.shared.report_blocks import build_market_monitor_report_blocks
 from app.services.market_monitor import graph as market_graph
 
 
@@ -29,13 +30,30 @@ def test_history_overlay_values_skip_gracefully_with_short_history():
     target = pd.date_range("2026-01-01", periods=2, freq="MS")
     history = pd.DataFrame({"FoodBasket": [10.0]}, index=pd.DatetimeIndex(["2025-01-01"]))
 
-    prior, five_year_mean, low, high = market_graph._history_overlay_values(history, target, "FoodBasket")
+    prior, five_year_mean, low, high, counts = market_graph._history_overlay_values(history, target, "FoodBasket")
 
     assert prior.loc[pd.Timestamp("2026-01-01")] == 10.0
     assert pd.isna(prior.loc[pd.Timestamp("2026-02-01")])
-    assert five_year_mean.loc[pd.Timestamp("2026-01-01")] == 10.0
+    assert pd.isna(five_year_mean.loc[pd.Timestamp("2026-01-01")])
+    assert pd.isna(low.loc[pd.Timestamp("2026-01-01")])
+    assert pd.isna(high.loc[pd.Timestamp("2026-01-01")])
+    assert counts.loc[pd.Timestamp("2026-01-01")] == 1
+
+
+def test_history_overlay_values_require_five_prior_same_month_values_for_five_year_band():
+    target = pd.date_range("2026-01-01", periods=1, freq="MS")
+    history = pd.DataFrame(
+        {"FoodBasket": [10.0, 11.0, 12.0, 13.0, 14.0]},
+        index=pd.DatetimeIndex(["2021-01-01", "2022-01-01", "2023-01-01", "2024-01-01", "2025-01-01"]),
+    )
+
+    prior, five_year_mean, low, high, counts = market_graph._history_overlay_values(history, target, "FoodBasket")
+
+    assert prior.loc[pd.Timestamp("2026-01-01")] == 14.0
+    assert five_year_mean.loc[pd.Timestamp("2026-01-01")] == 12.0
     assert low.loc[pd.Timestamp("2026-01-01")] == 10.0
-    assert high.loc[pd.Timestamp("2026-01-01")] == 10.0
+    assert high.loc[pd.Timestamp("2026-01-01")] == 14.0
+    assert counts.loc[pd.Timestamp("2026-01-01")] == 5
 
 
 def test_graph_designer_renders_fx_chart_and_skips_blank_regional_chart():
@@ -73,6 +91,59 @@ def test_graph_designer_renders_fx_chart_and_skips_blank_regional_chart():
     assert "regional_comparison" not in result["visualizations"]
 
 
+def test_graph_designer_applies_commodity_overlays_only_to_single_commodity_pages(monkeypatch):
+    calls = []
+
+    def fake_overlay(_ax, _history, _target_index, column, **kwargs):
+        calls.append((column, kwargs.get("label_prefix")))
+
+    monkeypatch.setattr(market_graph, "_plot_history_overlays", fake_overlay)
+    dates = pd.date_range("2025-02-01", periods=13, freq="MS")
+    history_dates = pd.date_range("2020-02-01", periods=73, freq="MS")
+    df_history = pd.DataFrame(
+        {
+            "FoodBasket": range(73),
+            "Maize": range(100, 173),
+            "Sorghum": range(200, 273),
+        },
+        index=history_dates,
+    )
+    df_multi = pd.DataFrame(
+        {
+            "FoodBasket": range(100, 113),
+            "Maize": range(10, 23),
+            "Sorghum": range(20, 33),
+        },
+        index=dates,
+    )
+
+    market_graph.node_graph_designer(_state_with_frames(df_multi, df_history))
+
+    assert calls == [("FoodBasket", None)]
+
+    calls.clear()
+    df_single = df_multi.drop(columns=["Sorghum"])
+
+    market_graph.node_graph_designer(_state_with_frames(df_single, df_history))
+
+    assert calls == [("FoodBasket", None), ("Maize", "Maize")]
+
+
+def test_market_monitor_report_blocks_use_human_module_heading():
+    blocks = build_market_monitor_report_blocks(
+        {
+            "country": "South Sudan",
+            "time_period": "2026-02",
+            "module_sections": {"exchange_rate": "Exchange rate narrative."},
+        }
+    )
+
+    headings = [block.text for block in blocks if block.type == "heading"]
+
+    assert "Exchange Rate Analysis" in headings
+    assert "EXCHANGE_RATE Analysis" not in headings
+
+
 def test_exchange_rate_module_uses_existing_databridges_data_without_te(monkeypatch):
     module = market_graph.ExchangeRateModule(api_key=None)
 
@@ -108,3 +179,22 @@ def test_exchange_rate_module_falls_back_to_te_when_state_has_no_fx(monkeypatch)
 
     assert result["exchange_rate_data"]["current_rate"] == float(len(dates))
     assert result["exchange_rate_data"]["currency_code"] == "SSP"
+
+
+def test_exchange_rate_module_skip_warning_when_no_databridges_fx_or_te(monkeypatch):
+    monkeypatch.delenv("TE_API_KEY", raising=False)
+    monkeypatch.setattr(market_graph, "get_model", lambda: None)
+
+    result = market_graph.node_module_orchestrator(
+        {
+            "enabled_modules": ["exchange_rate"],
+            "exchange_rate_data": None,
+            "currency_code": "SSP",
+            "country": "South Sudan",
+            "time_period": "2026-02",
+            "llm_calls": 0,
+        }
+    )
+
+    assert result["module_sections"] == {}
+    assert any("no exchange-rate source was available" in warning for warning in result["warnings"])

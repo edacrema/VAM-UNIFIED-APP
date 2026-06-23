@@ -276,6 +276,35 @@ basket_price = sum(component_value for all available basket components)</code></
     count, missing commodity names, and whether the basket is partial for that month or region.
   </p>
 
+  <h2>FX Usability And Chart Quality</h2>
+  <p>
+    DataBridges FX is the primary exchange-rate source, but it must pass a usability gate after the existing 13-month coverage checks. A complete
+    official series should be omitted when it is official-only, near-static, and inconsistent with the local price scale. If a usable unofficial
+    series passes coverage, the report can select it instead; otherwise the optional TradingEconomics module may act as fallback when configured.
+  </p>
+  <pre><code>cache_metadata["fx"]["usability"]
+- official_usable
+- selected_series: official | unofficial | null
+- omitted_reason
+- near_static
+- price_scale_inconsistent
+- official_range_ratio
+- official_unique_rounded_values
+- food_basket_usd
+- commodity_median_usd
+- commodity_usd_sample_size</code></pre>
+  <p>
+    Near-static means the official monthly range divided by median official rate is at most 0.5%, or the 13-month window has one unique rounded
+    value. Price-scale inconsistency is a separate signal based on an implausible USD-equivalent food basket or median commodity price, so stable
+    pegs with plausible local prices remain visible.
+  </p>
+  <p>
+    Chart history for overlays is cache-only and should request 73 months ending at the report month. Food-basket charts always keep valid
+    historical overlays. Commodity charts show prior-year and five-year overlays only when the chart page contains exactly one commodity; pages with
+    multiple commodities show current-period lines only. Five-year average and range overlays must be blank unless five prior same-calendar-month
+    cached observations exist for the plotted point.
+  </p>
+
   <h2>Manual Latest Refresh</h2>
   <p>
     Manual latest refresh remains enabled in Phase 3 behind <code>MARKET_MONITOR_MANUAL_REFRESH_ENABLED</code>. Country selection remains cache-only.
@@ -343,6 +372,8 @@ FOOD_BASKET_EDIT_ROLES=user,admin</code></pre>
     <li>Country selection reads from active cache and does not call Databridges.</li>
     <li>Reference-month options are basket-aware reportable months only.</li>
     <li>Manual latest refresh can promote a country-specific cache version without changing the global active pointer.</li>
+    <li>FX usability metadata is recorded and misleading official-only FX is omitted or replaced by a usable source.</li>
+    <li>Chart overlays use a 73-month cache-only history window and do not label short history as five-year context.</li>
     <li>Basket edits by one user are visible to another user.</li>
     <li>Generated reports record cache version and basket version.</li>
   </ul>

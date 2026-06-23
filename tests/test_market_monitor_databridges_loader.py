@@ -328,8 +328,8 @@ class _FakeFxAdapter:
 def _seed_contiguous_cache(
     repo: SqlPriceCacheRepository,
     *,
-    start_month: str = "2021-03-01",
-    periods: int = 60,
+    start_month: str = "2020-02-01",
+    periods: int = 73,
     country_iso3: str = "SSD",
     country_name: str = "South Sudan",
     currency_code: str = "SSP",
@@ -1103,7 +1103,7 @@ def test_resolve_report_price_data_adds_databridges_fx_and_history(monkeypatch, 
     assert result.cache_metadata["fx"]["official"]["included"] is True
     assert result.cache_metadata["fx"]["unofficial"]["included"] is False
     assert any("Unofficial FX omitted" in warning for warning in result.warnings)
-    assert len(result.df_history_national) == 60
+    assert len(result.df_history_national) == 73
     assert result.df_history_national["FoodBasket"].notna().all()
 
 
@@ -1176,6 +1176,131 @@ def test_resolve_exchange_rate_series_no_unofficial_is_official_only_warning():
     assert result["metadata"]["official"]["included"] is True
     assert result["metadata"]["unofficial"]["included"] is False
     assert any("no unofficial/parallel" in warning for warning in result["warnings"])
+
+
+def test_resolve_exchange_rate_series_suppresses_static_official_when_price_scale_implausible():
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    rows = [
+        {
+            "country_iso3": "SOM",
+            "currency_code": "SOS",
+            "date": month.date(),
+            "value": 571.5,
+            "is_official": True,
+            "frequency": "Daily",
+        }
+        for month in months
+    ]
+    price_frame = pd.DataFrame(
+        {
+            "FoodBasket": [493383.0] * len(months),
+            "Sugar": [32000.0] * len(months),
+            "Rice": [28000.0] * len(months),
+            "Oil": [40000.0] * len(months),
+        },
+        index=months,
+    )
+
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="SOM",
+        currency_code="SOS",
+        currency_name="Somali Shilling",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(rows),
+        price_frame=price_frame,
+    )
+
+    assert result["series"] == {}
+    assert result["exchange_rate_data"] is None
+    usability = result["metadata"]["usability"]
+    assert usability["official_usable"] is False
+    assert usability["near_static"] is True
+    assert usability["price_scale_inconsistent"] is True
+    assert usability["selected_series"] is None
+    assert "near-static official-only rate" in usability["omitted_reason"]
+    assert any("DataBridges FX omitted" in warning for warning in result["warnings"])
+
+
+def test_resolve_exchange_rate_series_keeps_static_official_when_price_scale_plausible():
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    rows = [
+        {
+            "country_iso3": "BFA",
+            "currency_code": "XOF",
+            "date": month.date(),
+            "value": 567.0,
+            "is_official": True,
+            "frequency": "Daily",
+        }
+        for month in months
+    ]
+    price_frame = pd.DataFrame(
+        {
+            "FoodBasket": [3600.0] * len(months),
+            "Rice": [600.0] * len(months),
+            "Millet": [300.0] * len(months),
+            "Sorghum": [250.0] * len(months),
+        },
+        index=months,
+    )
+
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="BFA",
+        currency_code="XOF",
+        currency_name="CFA Franc BCEAO",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(rows),
+        price_frame=price_frame,
+    )
+
+    assert "ExchangeRate" in result["series"]
+    assert result["exchange_rate_data"]["source_series"] == "official"
+    usability = result["metadata"]["usability"]
+    assert usability["official_usable"] is True
+    assert usability["near_static"] is True
+    assert usability["price_scale_inconsistent"] is False
+    assert usability["selected_series"] == "official"
+
+
+def test_resolve_exchange_rate_series_uses_unofficial_when_official_scale_is_unusable():
+    months = pd.date_range(end="2026-02-01", periods=13, freq="MS")
+    official_rows = [
+        {
+            "country_iso3": "SOM",
+            "currency_code": "SOS",
+            "date": month.date(),
+            "value": 571.5,
+            "is_official": True,
+            "frequency": "Daily",
+        }
+        for month in months
+    ]
+    unofficial_rows = _fx_rows(months, official=False, base=25000, country_iso3="SOM", currency_code="SOS")
+    price_frame = pd.DataFrame(
+        {
+            "FoodBasket": [493383.0] * len(months),
+            "Sugar": [32000.0] * len(months),
+            "Rice": [28000.0] * len(months),
+            "Oil": [40000.0] * len(months),
+        },
+        index=months,
+    )
+
+    result = data_loader._resolve_exchange_rate_series(
+        iso3="SOM",
+        currency_code="SOS",
+        currency_name="Somali Shilling",
+        full_date_index=months,
+        adapter=_FakeFxAdapter(official_rows + unofficial_rows),
+        price_frame=price_frame,
+    )
+
+    assert "ExchangeRate" not in result["series"]
+    assert "ExchangeRateUnofficial" in result["series"]
+    assert result["exchange_rate_data"]["source_series"] == "unofficial"
+    assert result["exchange_rate_data"]["rate_type"] == "unofficial"
+    assert result["metadata"]["usability"]["selected_series"] == "unofficial"
+    assert any("using unofficial/parallel FX" in warning for warning in result["warnings"])
 
 
 def test_resolve_exchange_rate_series_partial_current_month_warns(monkeypatch):
