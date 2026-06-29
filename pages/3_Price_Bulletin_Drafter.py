@@ -309,7 +309,7 @@ with st.expander("Edit country food basket", expanded=not bool(active_basket)):
     if hasattr(st, "column_config"):
         column_config = {
             "Include": st.column_config.CheckboxColumn("Include"),
-            "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.1, format="%.3f"),
+            "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01, format="%.2f"),
             "Note": st.column_config.TextColumn("Note"),
         }
     edited_rows = st.data_editor(
@@ -531,7 +531,7 @@ with st.form("market_monitor_form"):
     currency_default = (country_currency.get(country) or "USD") if isinstance(country, str) else "USD"
     currency_code = st.text_input("Currency Code", value=str(currency_default))
 
-    enabled_modules = st.multiselect("Enabled Modules", options=["exchange_rate"], default=[])
+    enabled_modules = st.multiselect("Enabled Modules", options=["exchange_rate", "fuel_energy"], default=[])
 
     previous_report_text = st.text_area("Previous Report Text (optional)", value="", height=120)
 

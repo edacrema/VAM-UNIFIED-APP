@@ -156,6 +156,19 @@ def test_cache_status_endpoint(monkeypatch):
     assert payload["operator_warnings"][0].startswith("CommodityUnits/List")
 
 
+def test_info_endpoint_lists_fuel_energy_module(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.get("/info")
+
+    assert response.status_code == 200
+    payload = response.json()
+    module_ids = {item["id"] for item in payload["available_modules"]}
+    assert {"exchange_rate", "fuel_energy"}.issubset(module_ids)
+    enabled_modules = next(item for item in payload["inputs"] if item["name"] == "enabled_modules")
+    assert "fuel_energy" in enabled_modules["options"]
+
+
 def test_cache_refresh_history_endpoints(monkeypatch):
     client = _client(monkeypatch)
 

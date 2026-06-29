@@ -134,7 +134,7 @@ class GenerateReportInput(BaseModel):
         default=[],
         description=(
             "Optional modules to enable "
-            "(exchange_rate uses DataBridges FX first, with TradingEconomics as fallback when TE_API_KEY is configured)"
+            "(exchange_rate uses DataBridges FX first, fuel_energy uses transport fuel price series)"
         )
     )
     previous_report_text: str = Field(
@@ -164,6 +164,7 @@ class GenerateReportOutput(BaseModel):
     news_counts: Dict[str, int] = {}
     cache_metadata: Dict[str, Any] = {}
     food_basket: Dict[str, Any] = {}
+    fuel_energy_data: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True

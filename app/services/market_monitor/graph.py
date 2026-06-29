@@ -122,6 +122,7 @@ class MarketReportState(TypedDict):
 
     # ===== MODULE OUTPUTS =====
     exchange_rate_data: Optional[Dict[str, Any]]
+    fuel_energy_data: Optional[Dict[str, Any]]
     module_sections: Dict[str, str]
     
     # ===== CENTRAL & QA OUTPUTS =====
@@ -179,6 +180,7 @@ def create_initial_state(
         events=[],
         trend_analysis=None,
         exchange_rate_data=None,
+        fuel_energy_data=None,
         module_sections={},
         report_draft_sections={},
         skeptic_flags=[],
@@ -345,6 +347,11 @@ def _currency_axis_label(label: str, currency_code: str) -> str:
 def _fx_axis_label(currency_code: str) -> str:
     code = str(currency_code or "LCU").strip().upper() or "LCU"
     return f"{code} per 1 USD"
+
+
+def _fuel_axis_label(currency_code: str) -> str:
+    code = str(currency_code or "LCU").strip().upper() or "LCU"
+    return f"{code}/Litre"
 
 
 def _normalise_time_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -678,9 +685,119 @@ Return ONLY the narrative text. No headers or formatting."""
         }
 
 
+class FuelEnergyModule(ReportModule):
+    """Narrative module over resolved transport fuel retail prices."""
+
+    @property
+    def module_id(self) -> str:
+        return "fuel_energy"
+
+    @property
+    def display_name(self) -> str:
+        return "Fuel & Energy"
+
+    @property
+    def required_inputs(self) -> List[str]:
+        return ["country", "time_period", "fuel_energy_data"]
+
+    def fetch_data(self, state: dict) -> Dict[str, Any]:
+        existing = state.get("fuel_energy_data") or {}
+        if existing.get("available") and existing.get("series"):
+            return {"fuel_energy_data": existing}
+        raise RuntimeError("resolved transport fuel price data is unavailable")
+
+    def generate_section(self, state: dict, llm) -> Dict[str, Any]:
+        fuel_data = state.get("fuel_energy_data") or {}
+        series = fuel_data.get("series") or []
+        if not fuel_data.get("available") or not series:
+            raise RuntimeError("Fuel & Energy data is unavailable")
+
+        prompt = f"""You are a WFP market analyst writing the Fuel & Energy section of a food price bulletin.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+- Write one concise paragraph, 3-5 sentences, no heading, no bullets.
+- Keep the focus on transport fuels and food-price transmission.
+- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
+
+COUNTRY AND PERIOD:
+- Country: {state.get('country', 'Unknown')}
+- Report period: {state.get('time_period', 'Unknown')}
+
+FUEL DATA:
+{json.dumps(fuel_data, indent=2)}
+
+CONTEXTUAL MARKET SIGNALS:
+{json.dumps(state.get('trend_analysis') or {}, indent=2)}
+
+Write the paragraph in this exact order:
+1. Lead with diesel current national retail price, unit, month-on-month change, and year-on-year change if available; add petrol/gasoline in the same sentence if available.
+2. Attribute the movement to the most likely driver: international oil/energy prices, regional supply/logistics constraints, or domestic policy/regulated/administered pricing.
+3. Explain implications for food prices and households: fuel affects transport/distribution costs, staples, food baskets, and purchasing power.
+4. If regional_disparities are present, add one short clause on the notable disparity; otherwise omit this.
+
+Return ONLY the narrative text."""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            narrative = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            logger.error(f"Fuel & Energy narrative generation failed: {e}")
+            narrative = self._fallback_narrative(state, fuel_data)
+
+        return {
+            "section_title": self.display_name,
+            "narrative": str(narrative).strip(),
+            "key_metrics": {
+                "series": series,
+                "latest_month": fuel_data.get("latest_month"),
+                "unit": fuel_data.get("unit"),
+            },
+        }
+
+    def _fallback_narrative(self, state: dict, fuel_data: dict[str, Any]) -> str:
+        series = fuel_data.get("series") or []
+        unit = fuel_data.get("unit") or "LCU/Litre"
+        by_kind = {item.get("kind"): item for item in series if isinstance(item, dict)}
+        diesel = by_kind.get("diesel") or series[0]
+        petrol = by_kind.get("petrol_gasoline")
+
+        def metric_sentence(item: dict[str, Any]) -> str:
+            label = str(item.get("label") or "Fuel").lower()
+            current = item.get("current_price")
+            month = item.get("latest_month")
+            mom = format_pct(item.get("mom_change_pct"))
+            yoy_raw = item.get("yoy_change_pct")
+            yoy = "" if yoy_raw is None else f" and {format_pct(yoy_raw)} year-on-year"
+            return f"{label} averaged {current} {unit} in {month}, {mom} month-on-month{yoy}"
+
+        first = metric_sentence(diesel)
+        if petrol:
+            first = f"{first}; {metric_sentence(petrol)}."
+        else:
+            first = f"{first}."
+        driver = fuel_data.get("driver_hint") or (
+            "The movement is consistent with fuel-market, logistics, or administered price conditions."
+        )
+        implication = (
+            "Fuel prices affect transport and distribution costs, feeding into staple and food-basket prices "
+            "and shaping household purchasing power."
+        )
+        regional = ""
+        disparities = fuel_data.get("regional_disparities") or []
+        if disparities:
+            item = disparities[0]
+            regional = (
+                f" Regional differences were notable, with {item.get('highest_region')} above "
+                f"{item.get('lowest_region')} for {str(item.get('label') or 'fuel').lower()}."
+            )
+        return f"{first} {driver} {implication}{regional}"
+
+
 # Registry moduli disponibili
 AVAILABLE_MODULES: Dict[str, type] = {
     "exchange_rate": ExchangeRateModule,
+    "fuel_energy": FuelEnergyModule,
 }
 
 # NODE: DATA AGENT
@@ -853,6 +970,7 @@ def node_data_agent(state: MarketReportState) -> dict:
                 admin1_list=state["admin1_list"],
                 currency_code=state.get("currency_code"),
                 basket_items=basket_items,
+                enabled_modules=state.get("enabled_modules", []),
             )
             df_national = result.df_national
             df_regional = result.df_regional
@@ -869,6 +987,8 @@ def node_data_agent(state: MarketReportState) -> dict:
                 food_basket_components=basket_items,
                 currency_code=cache_metadata.get("currency_code") or state.get("currency_code"),
             )
+            if result.fuel_energy_data:
+                stats["fuel_energy"] = result.fuel_energy_data
             basket_metadata = {
                 "basket_version_id": food_basket.get("basket_version_id"),
                 "basket_version_number": food_basket.get("version_number"),
@@ -918,6 +1038,7 @@ def node_data_agent(state: MarketReportState) -> dict:
         "cache_metadata": cache_metadata,
         "food_basket": food_basket,
         "exchange_rate_data": result.exchange_rate_data if not use_mock and "result" in locals() else None,
+        "fuel_energy_data": result.fuel_energy_data if not use_mock and "result" in locals() else None,
         "warnings": warnings,
         "current_node": "data_agent"
     }
@@ -1059,8 +1180,46 @@ def node_graph_designer(state: MarketReportState) -> dict:
             plt.close()
             buf.seek(0)
             visualizations["exchange_rate_trend"] = base64.b64encode(buf.read()).decode('utf-8')
+
+        # 4. Fuel & Energy Trend
+        fuel_data = state.get("fuel_energy_data") or {}
+        fuel_series = []
+        for item in fuel_data.get("series") or []:
+            if not isinstance(item, dict):
+                continue
+            column = str(item.get("column_name") or "").strip()
+            label = str(item.get("label") or column).strip()
+            if column and column in df_national.columns and df_national[column].dropna().any():
+                fuel_series.append((column, label))
+
+        if fuel_series:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            show_history_overlays = len(fuel_series) <= 2
+            for column, label in fuel_series:
+                line = ax.plot(df_national.index, df_national[column], marker='o', linewidth=2, label=label)[0]
+                if show_history_overlays:
+                    _plot_history_overlays(
+                        ax,
+                        df_history,
+                        pd.DatetimeIndex(df_national.index),
+                        column,
+                        color=line.get_color(),
+                        label_prefix=label,
+                    )
+            ax.set_title(f"Fuel Prices - {state['country']}", fontweight='bold')
+            ax.set_ylabel(_fuel_axis_label(currency_code))
+            ax.legend(loc='upper left')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            visualizations["fuel_prices"] = base64.b64encode(buf.read()).decode('utf-8')
         
-        # 4. Regional Comparison (if data available)
+        # 5. Regional Comparison (if data available)
         if state.get("time_series_data_regional"):
             df_regional = pd.read_json(io.StringIO(state["time_series_data_regional"]))
             if not df_regional.empty and "Region" in df_regional.columns:
@@ -1364,7 +1523,7 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
     if not enabled_modules:
         return {"current_node": "module_orchestrator"}
     
-    llm = get_model()
+    llm = None
     module_sections = {}
     updates = {}
     llm_calls = 0
@@ -1381,6 +1540,11 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
                 warnings.append(
                     "Skipped exchange_rate module because currency_code is USD (no exchange-rate pair to fetch)."
                 )
+                continue
+        if module_id == "fuel_energy":
+            fuel_data = state.get("fuel_energy_data") or {}
+            if not fuel_data.get("available") or not fuel_data.get("series"):
+                warnings.append("Skipped fuel_energy module because no transport fuel price data was available.")
                 continue
         
         try:
@@ -1404,6 +1568,8 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             state.update(data_update)
             
             # Generate section
+            if llm is None:
+                llm = get_model()
             output = module.generate_section(state, llm)
             module_sections[module_id] = output.get("narrative", "")
             llm_calls += 1
@@ -1414,6 +1580,8 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             logger.error(f"Module '{module_id}' failed: {e}")
             if module_id == "exchange_rate":
                 warnings.append(f"Skipped exchange_rate module because no exchange-rate source was available: {e}")
+            elif module_id == "fuel_energy":
+                warnings.append(f"Skipped fuel_energy module because no transport fuel price data was available: {e}")
             continue
     
     updates["module_sections"] = module_sections

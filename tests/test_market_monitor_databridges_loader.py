@@ -392,6 +392,150 @@ def _seed_contiguous_cache(
     return version_id
 
 
+def _country_price(
+    country_iso3,
+    *,
+    commodity_id,
+    commodity,
+    market_id,
+    market,
+    admin1,
+    price_date,
+    price,
+    currency_code,
+    currency_name,
+    unit_id=100,
+    unit_name="kg",
+    flag="actual",
+):
+    row = _price(commodity_id, commodity, market_id, market, admin1, price_date, price, flag=flag)
+    row.update(
+        {
+            "country_iso3": country_iso3,
+            "currency_code": currency_code,
+            "currency_name": currency_name,
+            "commodity_unit_id": unit_id,
+            "commodity_unit_name": unit_name,
+            "source_payload_hash": f"{country_iso3}-{commodity_id}-{market_id}-{price_date}-{flag}",
+        }
+    )
+    return row
+
+
+def _seed_country_fuel_cache(
+    repo: SqlPriceCacheRepository,
+    *,
+    country_iso3: str,
+    country_name: str,
+    currency_code: str,
+    currency_name: str,
+    report_month: str = "2026-06-01",
+    fuel_specs=None,
+) -> str:
+    version_id = repo.create_cache_version()
+    repo.insert_currencies(
+        version_id,
+        [{"currency_id": 200, "currency_code": currency_code, "currency_name": currency_name}],
+    )
+    months = pd.date_range(end=report_month, periods=13, freq="MS")
+    commodities = [
+        {
+            "commodity_id": 1,
+            "commodity_name": "Maize",
+            "commodity_unit_id": 100,
+            "commodity_unit_name": "kg",
+            "category_name": "Cereals",
+        }
+    ]
+    prices = []
+    for index, month in enumerate(months):
+        prices.append(
+            _country_price(
+                country_iso3,
+                commodity_id=1,
+                commodity="Maize",
+                market_id=10,
+                market="Capital",
+                admin1="Central",
+                price_date=month.strftime("%Y-%m-%d"),
+                price=10 + index,
+                currency_code=currency_code,
+                currency_name=currency_name,
+            )
+        )
+
+    for spec in fuel_specs or []:
+        commodity_id = int(spec["commodity_id"])
+        commodity_name = str(spec["commodity_name"])
+        commodities.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": commodity_name,
+                "commodity_unit_id": 200,
+                "commodity_unit_name": "L",
+                "category_name": "Fuel",
+            }
+        )
+        start_offset = int(spec.get("start_offset", 0))
+        end_offset = int(spec.get("end_offset", len(months) - 1))
+        base = float(spec.get("base", 100.0))
+        step = float(spec.get("step", 1.0))
+        markets = spec.get("markets") or [("Capital", "Central", 10, 0.0)]
+        for index, month in enumerate(months):
+            if index < start_offset or index > end_offset:
+                continue
+            for market_name, admin1, market_id, offset in markets:
+                prices.append(
+                    _country_price(
+                        country_iso3,
+                        commodity_id=commodity_id,
+                        commodity=commodity_name,
+                        market_id=market_id,
+                        market=market_name,
+                        admin1=admin1,
+                        price_date=month.strftime("%Y-%m-%d"),
+                        price=base + (step * index) + float(offset),
+                        currency_code=currency_code,
+                        currency_name=currency_name,
+                        unit_id=200,
+                        unit_name="L",
+                    )
+                )
+
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        country_name=country_name,
+        commodities=commodities,
+        markets=[
+            {"market_id": 10, "market_name": "Capital", "admin1_name": "Central"},
+            {"market_id": 11, "market_name": "Remote", "admin1_name": "Remote"},
+        ],
+        prices=prices,
+        latest_price_date=report_month,
+        currency_code=currency_code,
+        currency_name=currency_name,
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        status="success",
+        rows_prices=len(prices),
+        rows_commodities=len(commodities),
+        rows_markets=2,
+        latest_price_date=report_month,
+    )
+    repo.insert_units(
+        version_id,
+        [
+            {"commodity_unit_id": 100, "commodity_unit_name": "kg", "conversion_to_kg_l": 1.0, "active": True},
+            {"commodity_unit_id": 200, "commodity_unit_name": "L", "conversion_to_kg_l": 1.0, "active": True},
+        ],
+    )
+    repo.publish_cache_version(version_id, country_iso3s=[country_iso3], status="active")
+    return version_id
+
+
 def _fx_rows(months, *, official=True, missing=None, base=1000, country_iso3="SSD", currency_code="SSP"):
     missing = set(missing or [])
     rows = []
@@ -1376,6 +1520,162 @@ def test_resolve_report_price_data_fx_flag_disables_fetch(monkeypatch, tmp_path)
     assert result.exchange_rate_data is None
     assert result.cache_metadata["fx"]["source"] == "disabled"
     assert result.df_national["ExchangeRate"].isna().all()
+
+
+def test_fuel_transport_classifier_excludes_cooking_energy_and_false_positives():
+    assert data_loader._fuel_transport_kind("Fuel (diesel)") == "diesel"
+    assert data_loader._fuel_transport_kind("Fuel (petrol-gasoline)") == "petrol_gasoline"
+    assert data_loader._fuel_transport_kind("Fuel (Super Petrol)") == "petrol_gasoline"
+    assert data_loader._fuel_transport_kind("Fuel (gas)") is None
+    assert data_loader._fuel_transport_kind("Fuel (kerosene)") is None
+    assert data_loader._fuel_transport_kind("Firewood") is None
+    assert data_loader._fuel_transport_kind("Fish (live, pangasius)") is None
+
+
+def test_resolve_report_price_data_adds_multi_fuel_without_polluting_food_basket(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_fuel_cache(
+        repo,
+        country_iso3="COD",
+        country_name="Democratic Republic of the Congo",
+        currency_code="CDF",
+        currency_name="Congolese Franc",
+        fuel_specs=[
+            {"commodity_id": 284, "commodity_name": "Fuel (diesel)", "base": 100, "step": 1},
+            {"commodity_id": 285, "commodity_name": "Fuel (petrol-gasoline)", "base": 200, "step": 2},
+            {"commodity_id": 283, "commodity_name": "Fuel (kerosene)", "base": 50, "step": 1},
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Democratic Republic of the Congo",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="CDF",
+        enabled_modules=["fuel_energy"],
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        result.df_national,
+        ["Maize"],
+        food_basket_components=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="CDF",
+    )
+
+    fuel = result.fuel_energy_data
+    assert fuel is not None
+    assert [item["kind"] for item in fuel["series"]] == ["diesel", "petrol_gasoline"]
+    assert result.cache_metadata["fuel_energy"]["series_count"] == 2
+    assert result.df_national.loc[pd.Timestamp("2026-06-01"), "FoodBasket"] == 22
+    assert result.df_national.loc[pd.Timestamp("2026-06-01"), "Fuel (diesel)"] == 112
+    assert result.df_national.loc[pd.Timestamp("2026-06-01"), "Fuel (petrol/gasoline)"] == 224
+    assert "Fuel (kerosene)" not in result.df_national.columns
+    assert "Fuel (diesel)" in stats["auxiliary"]
+    assert "Fuel (diesel)" not in stats["commodities"]
+    diesel = fuel["series"][0]
+    assert diesel["current_price"] == 112
+    assert diesel["mom_change_pct"] == 0.9
+    assert diesel["yoy_change_pct"] == 12.0
+    assert diesel["latest_month"] == "2026-06"
+    assert diesel["axis_unit"] == "CDF/Litre"
+
+
+def test_resolve_report_price_data_diesel_only_country(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_fuel_cache(
+        repo,
+        country_iso3="SOM",
+        country_name="Somalia",
+        currency_code="SOS",
+        currency_name="Somali Shilling",
+        fuel_specs=[{"commodity_id": 284, "commodity_name": "Fuel (diesel)", "base": 1000, "step": 10}],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Somalia",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="SOS",
+        enabled_modules=["fuel_energy"],
+    )
+
+    assert result.fuel_energy_data is not None
+    assert [item["kind"] for item in result.fuel_energy_data["series"]] == ["diesel"]
+    assert "Fuel (diesel)" in result.df_national.columns
+    assert "Fuel (petrol/gasoline)" not in result.df_national.columns
+
+
+def test_resolve_report_price_data_no_fuel_country_omits_module_with_warning(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_fuel_cache(
+        repo,
+        country_iso3="BFA",
+        country_name="Burkina Faso",
+        currency_code="XOF",
+        currency_name="CFA Franc BCEAO",
+        fuel_specs=[],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Burkina Faso",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="XOF",
+        enabled_modules=["fuel_energy"],
+    )
+
+    assert result.fuel_energy_data is None
+    assert result.cache_metadata["fuel_energy"]["series_count"] == 0
+    assert "Fuel (diesel)" not in result.df_national.columns
+    assert any("Fuel & Energy omitted: no transport fuel" in warning for warning in result.warnings)
+
+
+def test_resolve_report_price_data_lagging_bangladesh_fuel_uses_latest_actual_month(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_fuel_cache(
+        repo,
+        country_iso3="BGD",
+        country_name="Bangladesh",
+        currency_code="BDT",
+        currency_name="Bangladeshi Taka",
+        fuel_specs=[
+            {"commodity_id": 284, "commodity_name": "Fuel (diesel)", "base": 90, "step": 1, "end_offset": 11},
+            {"commodity_id": 1041, "commodity_name": "Fuel (petrol)", "base": 110, "step": 1, "end_offset": 11},
+            {"commodity_id": 341, "commodity_name": "Fuel (gas)", "base": 1000, "step": 5, "end_offset": 11},
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Bangladesh",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="BDT",
+        enabled_modules=["fuel_energy"],
+    )
+
+    fuel = result.fuel_energy_data
+    assert fuel is not None
+    assert fuel["latest_month"] == "2026-05"
+    assert pd.isna(result.df_national.loc[pd.Timestamp("2026-06-01"), "Fuel (diesel)"])
+    diesel = next(item for item in fuel["series"] if item["kind"] == "diesel")
+    petrol = next(item for item in fuel["series"] if item["kind"] == "petrol_gasoline")
+    assert diesel["latest_month"] == "2026-05"
+    assert diesel["current_price"] == 101
+    assert diesel["mom_change_pct"] == 1.0
+    assert diesel["yoy_change_pct"] is None
+    assert petrol["current_price"] == 121
+    assert "Fuel (gas)" not in result.df_national.columns
 
 
 def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp_path):

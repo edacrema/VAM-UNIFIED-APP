@@ -131,6 +131,7 @@ def _module_section_title(module_id: Any) -> str:
     module_key = str(module_id or "").strip()
     known_titles = {
         "exchange_rate": "Exchange Rate Analysis",
+        "fuel_energy": "Fuel & Energy",
     }
     if module_key in known_titles:
         return known_titles[module_key]
@@ -235,6 +236,14 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
                 continue
             blocks.append(ReportBlock(type="heading", text=_module_section_title(module_id), level=2))
             blocks.extend(_text_to_paragraph_blocks(section_text))
+            if module_id == "fuel_energy" and isinstance(visualizations, dict) and visualizations.get("fuel_prices"):
+                blocks.append(
+                    ReportBlock(
+                        type="figure",
+                        figure_id="fuel_prices",
+                        caption="Fuel retail price trend",
+                    )
+                )
 
     if document_references:
         blocks.append(ReportBlock(type="references", references=document_references))

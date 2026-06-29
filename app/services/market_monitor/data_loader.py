@@ -834,6 +834,7 @@ def resolve_report_price_data(
     lookback_months: int = 13,
     enable_backfill: bool = True,
     adapter: Optional[DataBridgesClientAdapter] = None,
+    enabled_modules: Optional[Sequence[str]] = None,
 ) -> ReportPriceDataResult:
     """Resolve report-scope prices from cache plus ephemeral targeted backfill."""
     canonical, iso3 = resolve_country(country)
@@ -1014,6 +1015,20 @@ def resolve_report_price_data(
         name_by_id=name_by_id,
         currency_code=selected_currency_code or currency_code,
     )
+    fuel_result = _resolve_fuel_energy_series(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        full_date_index=full_date_index,
+        currency_code=selected_currency_code or currency_code,
+        enabled_modules=enabled_modules,
+    )
+    for column, series in fuel_result["series"].items():
+        df_national[column] = series.reindex(full_date_index)
+    fuel_history = fuel_result.get("history")
+    if isinstance(fuel_history, pd.DataFrame) and not fuel_history.empty:
+        for column in fuel_history.columns:
+            df_history_national[column] = fuel_history[column]
     fx_result = _resolve_exchange_rate_series(
         iso3=iso3,
         currency_code=selected_currency_code,
@@ -1025,6 +1040,7 @@ def resolve_report_price_data(
     for column, series in fx_result["series"].items():
         df_national[column] = series.reindex(full_date_index)
     result_warnings = _dedupe_preserve_order(warnings + gap_report.warning_messages())
+    result_warnings = _dedupe_preserve_order(result_warnings + fuel_result["warnings"])
     result_warnings = _dedupe_preserve_order(result_warnings + fx_result["warnings"])
     gap_report.warnings = result_warnings
 
@@ -1038,6 +1054,7 @@ def resolve_report_price_data(
     cache_metadata = dict(cache_metadata)
     cache_metadata["source"] = "PriceCache + targeted DataBridges backfill" if target_metadata["attempted"] else "PriceCache"
     cache_metadata["currency_code"] = selected_currency_code
+    cache_metadata["fuel_energy"] = fuel_result["metadata"]
     cache_metadata["fx"] = fx_result["metadata"]
     cache_metadata["targeted_backfill"] = target_metadata
     cache_metadata["price_gap_report"] = gap_report.to_dict()
@@ -1049,6 +1066,7 @@ def resolve_report_price_data(
         gap_report=gap_report,
         cache_metadata=cache_metadata,
         exchange_rate_data=fx_result["exchange_rate_data"],
+        fuel_energy_data=fuel_result["fuel_energy_data"],
         df_history_national=df_history_national,
     )
 
@@ -1058,6 +1076,460 @@ def _market_monitor_fx_enabled() -> bool:
     if raw is None or not str(raw).strip():
         return True
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _market_monitor_fuel_enabled() -> bool:
+    raw = os.getenv("MARKET_MONITOR_FUEL_ENABLED")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _module_requested(enabled_modules: Optional[Sequence[str]], module_id: str) -> bool:
+    return module_id in {str(item or "").strip() for item in enabled_modules or []}
+
+
+def _fuel_transport_kind(name: Any) -> Optional[str]:
+    text = str(name or "").strip().lower()
+    if not text.startswith("fuel ("):
+        return None
+    if "diesel" in text:
+        return "diesel"
+    if "petrol" in text or "gasoline" in text or "super petrol" in text or "parallel" in text:
+        return "petrol_gasoline"
+    return None
+
+
+def _fuel_display_name(kind: str) -> str:
+    if kind == "diesel":
+        return "Diesel"
+    if kind == "petrol_gasoline":
+        return "Petrol/Gasoline"
+    return str(kind or "Fuel").replace("_", " ").title()
+
+
+def _fuel_column_name(kind: str) -> str:
+    if kind == "diesel":
+        return "Fuel (diesel)"
+    if kind == "petrol_gasoline":
+        return "Fuel (petrol/gasoline)"
+    return f"Fuel ({str(kind or 'other').replace('_', ' ')})"
+
+
+def _fuel_kind_sort_key(kind: str) -> tuple[int, str]:
+    order = {"diesel": 0, "petrol_gasoline": 1}
+    return (order.get(kind, 99), kind)
+
+
+def _fuel_transport_candidates(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for commodity in _get_commodities(canonical, iso3):
+        commodity_id = _to_int(commodity.get("id"))
+        name = str(commodity.get("name") or "").strip()
+        kind = _fuel_transport_kind(name)
+        if commodity_id is None or not name or kind is None or commodity_id in seen:
+            continue
+        seen.add(commodity_id)
+        candidates.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": name,
+                "kind": kind,
+                "label": _fuel_display_name(kind),
+            }
+        )
+    return sorted(candidates, key=lambda item: (_fuel_kind_sort_key(str(item["kind"])), item["commodity_name"].lower()))
+
+
+def _resolve_fuel_energy_series(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    full_date_index: pd.DatetimeIndex,
+    currency_code: Optional[str],
+    enabled_modules: Optional[Sequence[str]],
+) -> dict[str, Any]:
+    requested = _module_requested(enabled_modules, "fuel_energy")
+    metadata: dict[str, Any] = {
+        "enabled": _market_monitor_fuel_enabled(),
+        "requested": requested,
+        "source": "not_requested" if not requested else "PriceCache",
+        "currency_code": currency_code,
+        "unit": f"{str(currency_code or 'LCU').strip().upper() or 'LCU'}/Litre",
+        "rows_fetched": 0,
+        "series_count": 0,
+        "candidates": [],
+        "omitted_candidates": [],
+        "error": None,
+    }
+    empty_history = pd.DataFrame(index=full_date_index)
+    empty = {
+        "series": {},
+        "history": empty_history,
+        "warnings": [],
+        "metadata": metadata,
+        "fuel_energy_data": None,
+    }
+    if not requested:
+        return empty
+    if not metadata["enabled"]:
+        metadata["source"] = "disabled"
+        return {
+            **empty,
+            "warnings": ["Fuel & Energy omitted: MARKET_MONITOR_FUEL_ENABLED is disabled."],
+            "metadata": metadata,
+        }
+
+    candidates = _fuel_transport_candidates(canonical, iso3)
+    metadata["candidates"] = [
+        {
+            "commodity_id": item["commodity_id"],
+            "commodity_name": item["commodity_name"],
+            "kind": item["kind"],
+        }
+        for item in candidates
+    ]
+    if not candidates:
+        return {
+            **empty,
+            "warnings": [f"Fuel & Energy omitted: no transport fuel price series available for {canonical}."],
+            "metadata": metadata,
+        }
+
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            full_date_index[0].strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+    except Exception as exc:
+        metadata["source"] = "error"
+        metadata["error"] = _safe_adapter_error(exc)
+        return {
+            **empty,
+            "warnings": [f"Fuel & Energy omitted: {metadata['error']}"],
+            "metadata": metadata,
+        }
+
+    metadata["rows_fetched"] = len(records)
+    df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+    if not df.empty:
+        df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+    df, selected_currency, excluded_currencies = _select_report_currency(
+        df,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    if selected_currency and len(str(selected_currency).strip()) == 3:
+        metadata["currency_code"] = str(selected_currency).strip().upper()
+        metadata["unit"] = f"{metadata['currency_code']}/Litre"
+    warnings: list[str] = []
+    if excluded_currencies:
+        warnings.append(
+            f"Fuel prices for {canonical} are quoted in multiple currencies; report uses "
+            f"{metadata['currency_code']} and excludes {excluded_currencies}."
+        )
+
+    frame, series_payloads, omitted = _fuel_frame_and_payload(
+        df,
+        candidate_by_id=candidate_by_id,
+        full_date_index=full_date_index,
+        target_date=target_date,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+    )
+    metadata["omitted_candidates"] = omitted
+    metadata["series_count"] = len(series_payloads)
+    if not series_payloads:
+        warnings.append(
+            f"Fuel & Energy omitted: no transport fuel series for {canonical} has enough monthly observations."
+        )
+        return {
+            **empty,
+            "warnings": _dedupe_preserve_order(warnings),
+            "metadata": metadata,
+        }
+
+    history = _resolve_fuel_history_frame(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        candidates=candidates,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+    )
+    primary = series_payloads[0]
+    fuel_energy_data = {
+        "available": True,
+        "country": canonical,
+        "currency_code": metadata["currency_code"],
+        "unit": metadata["unit"],
+        "latest_month": max(str(item["latest_month"]) for item in series_payloads),
+        "primary_series": primary["kind"],
+        "series": series_payloads,
+        "regional_disparities": _fuel_regional_disparities(df, candidate_by_id, series_payloads),
+        "driver_hint": _fuel_driver_hint(primary),
+        "source": metadata["source"],
+    }
+    return {
+        "series": {column: frame[column] for column in frame.columns},
+        "history": history,
+        "warnings": _dedupe_preserve_order(warnings),
+        "metadata": metadata,
+        "fuel_energy_data": fuel_energy_data,
+    }
+
+
+def _fuel_frame_and_payload(
+    df: pd.DataFrame,
+    *,
+    candidate_by_id: dict[int, dict[str, Any]],
+    full_date_index: pd.DatetimeIndex,
+    target_date: pd.Timestamp,
+    currency_code: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], list[dict[str, Any]]]:
+    frame = pd.DataFrame(index=full_date_index)
+    if df.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "kind": item["kind"],
+                "reason": "no_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working = df.copy()
+    working["Commodity ID"] = pd.to_numeric(working["Commodity ID"], errors="coerce")
+    working = working[working["Commodity ID"].notna()].copy()
+    working["Commodity ID"] = working["Commodity ID"].astype(int)
+    working = working[working["Commodity ID"].isin(candidate_by_id.keys())].copy()
+    working["Price"] = pd.to_numeric(working["Price"], errors="coerce")
+    working["Price Date"] = pd.to_datetime(working["Price Date"], errors="coerce")
+    working = working[working["Price"].notna() & working["Price Date"].notna()]
+    if working.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "kind": item["kind"],
+                "reason": "no_valid_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working["FuelKind"] = working["Commodity ID"].map(lambda cid: candidate_by_id[int(cid)]["kind"])
+    working["Month"] = working["Price Date"].dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        working.groupby(["Month", "FuelKind"], dropna=True)["Price"]
+        .mean()
+        .reset_index()
+    )
+    payloads: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    for kind in sorted(working["FuelKind"].dropna().unique(), key=_fuel_kind_sort_key):
+        column = _fuel_column_name(str(kind))
+        series = (
+            monthly[monthly["FuelKind"] == kind]
+            .set_index("Month")["Price"]
+            .reindex(full_date_index)
+            .astype(float)
+            .round(2)
+        )
+        stats = _fuel_stats_from_series(series, target_date=target_date)
+        kind_rows = working[working["FuelKind"] == kind]
+        kind_candidates = [
+            candidate_by_id[int(cid)]
+            for cid in sorted(kind_rows["Commodity ID"].dropna().astype(int).unique())
+            if int(cid) in candidate_by_id
+        ]
+        if stats is None:
+            for candidate in kind_candidates:
+                omitted.append(
+                    {
+                        "commodity_id": candidate["commodity_id"],
+                        "commodity_name": candidate["commodity_name"],
+                        "kind": candidate["kind"],
+                        "reason": "insufficient_monthly_observations",
+                    }
+                )
+            continue
+        frame[column] = series
+        payloads.append(
+            {
+                "kind": str(kind),
+                "label": _fuel_display_name(str(kind)),
+                "column_name": column,
+                "commodity_ids": [int(item["commodity_id"]) for item in kind_candidates],
+                "commodity_names": [str(item["commodity_name"]) for item in kind_candidates],
+                "current_price": stats["current_price"],
+                "mom_change_pct": stats["mom_change_pct"],
+                "yoy_change_pct": stats["yoy_change_pct"],
+                "latest_month": stats["latest_month"],
+                "previous_month": stats["previous_month"],
+                "yoy_reference_month": stats["yoy_reference_month"],
+                "unit": _fuel_unit_from_rows(kind_rows),
+                "currency_code": currency_code,
+                "axis_unit": f"{str(currency_code or 'LCU').strip().upper() or 'LCU'}/Litre",
+            }
+        )
+    payloads.sort(key=lambda item: _fuel_kind_sort_key(str(item["kind"])))
+    return frame, payloads, omitted
+
+
+def _fuel_stats_from_series(series: pd.Series, *, target_date: pd.Timestamp) -> Optional[dict[str, Any]]:
+    values = pd.to_numeric(series, errors="coerce")
+    values = values[values.index <= target_date].dropna()
+    if values.empty:
+        return None
+    latest_month = pd.Timestamp(values.index[-1])
+    previous_month = latest_month - pd.DateOffset(months=1)
+    previous_value = series.get(previous_month, np.nan)
+    if pd.isna(previous_value):
+        return None
+    yoy_month = latest_month - pd.DateOffset(years=1)
+    yoy_value = series.get(yoy_month, np.nan)
+    current_value = float(values.iloc[-1])
+    mom = _pct_change(current_value, previous_value)
+    yoy = None if pd.isna(yoy_value) else _pct_change(current_value, yoy_value)
+    return {
+        "current_price": round(current_value, 2),
+        "mom_change_pct": None if mom is None else round(float(mom), 1),
+        "yoy_change_pct": None if yoy is None else round(float(yoy), 1),
+        "latest_month": latest_month.strftime("%Y-%m"),
+        "previous_month": previous_month.strftime("%Y-%m"),
+        "yoy_reference_month": yoy_month.strftime("%Y-%m") if not pd.isna(yoy_value) else None,
+    }
+
+
+def _fuel_unit_from_rows(df: pd.DataFrame) -> str:
+    if df.empty or "Unit" not in df.columns:
+        return "Litre"
+    values = [
+        str(item or "").strip()
+        for item in df["Unit"].dropna().astype(str)
+        if str(item or "").strip()
+    ]
+    if not values:
+        return "Litre"
+    unit = pd.Series(values).value_counts().idxmax()
+    if str(unit).strip().lower() in {"l", "lt", "liter", "litre", "litres", "liters"}:
+        return "Litre"
+    return str(unit).strip()
+
+
+def _resolve_fuel_history_frame(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    candidates: list[dict[str, Any]],
+    currency_code: str,
+) -> pd.DataFrame:
+    history_start = target_date - pd.DateOffset(months=_CHART_HISTORY_MONTHS - 1)
+    history_index = pd.date_range(start=history_start, end=target_date, freq="MS")
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            history_start.strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+        df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+        if not df.empty:
+            df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+        df, _selected_currency, _excluded = _select_report_currency(
+            df,
+            requested_code=currency_code,
+            country=canonical,
+        )
+        frame, _payloads, _omitted = _fuel_frame_and_payload(
+            df,
+            candidate_by_id=candidate_by_id,
+            full_date_index=history_index,
+            target_date=target_date,
+            currency_code=currency_code,
+        )
+        return frame
+    except Exception as exc:
+        logger.warning("Could not build fuel history for %s: %s", iso3, _safe_adapter_error(exc))
+        return pd.DataFrame(index=history_index)
+
+
+def _fuel_regional_disparities(
+    df: pd.DataFrame,
+    candidate_by_id: dict[int, dict[str, Any]],
+    series_payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if df.empty or "Admin 1" not in df.columns:
+        return []
+    working = df.copy()
+    working["Commodity ID"] = pd.to_numeric(working["Commodity ID"], errors="coerce")
+    working = working[working["Commodity ID"].notna()].copy()
+    working["Commodity ID"] = working["Commodity ID"].astype(int)
+    working = working[working["Commodity ID"].isin(candidate_by_id.keys())].copy()
+    working["Price"] = pd.to_numeric(working["Price"], errors="coerce")
+    working["Price Date"] = pd.to_datetime(working["Price Date"], errors="coerce")
+    working = working[working["Price"].notna() & working["Price Date"].notna()].copy()
+    if working.empty:
+        return []
+    working["FuelKind"] = working["Commodity ID"].map(lambda cid: candidate_by_id[int(cid)]["kind"])
+    working["Month"] = working["Price Date"].dt.to_period("M").dt.to_timestamp()
+    disparities: list[dict[str, Any]] = []
+    for payload in series_payloads:
+        kind = str(payload.get("kind") or "")
+        latest_month = pd.Timestamp(f"{payload.get('latest_month')}-01")
+        subset = working[(working["FuelKind"] == kind) & (working["Month"] == latest_month)].copy()
+        subset = subset[subset["Admin 1"].notna()]
+        if subset.empty:
+            continue
+        regional = subset.groupby("Admin 1", dropna=True)["Price"].mean().dropna()
+        regional = regional[regional > 0]
+        if len(regional) < 2:
+            continue
+        min_region = str(regional.idxmin())
+        max_region = str(regional.idxmax())
+        min_value = float(regional.loc[min_region])
+        max_value = float(regional.loc[max_region])
+        if min_value <= 0:
+            continue
+        spread_pct = (max_value - min_value) / min_value * 100.0
+        if spread_pct < 10.0:
+            continue
+        disparities.append(
+            {
+                "kind": kind,
+                "label": payload.get("label"),
+                "latest_month": payload.get("latest_month"),
+                "highest_region": max_region,
+                "highest_price": round(max_value, 2),
+                "lowest_region": min_region,
+                "lowest_price": round(min_value, 2),
+                "spread_pct": round(float(spread_pct), 1),
+            }
+        )
+    return disparities
+
+
+def _fuel_driver_hint(primary_series: dict[str, Any]) -> str:
+    mom = primary_series.get("mom_change_pct")
+    try:
+        mom_value = float(mom)
+    except Exception:
+        return "Movement should be attributed cautiously to fuel-market, logistics, or administered price conditions."
+    if mom_value > 2.0:
+        return "The increase is consistent with higher fuel-market, supply/logistics, or administered price pressure."
+    if mom_value < -2.0:
+        return "The decline is consistent with easing fuel-market, supply/logistics, or administered price pressure."
+    return "The limited month-on-month movement is consistent with broadly stable fuel-market or administered pricing conditions."
 
 
 def _resolve_selected_currency_code(
