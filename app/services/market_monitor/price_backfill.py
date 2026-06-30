@@ -141,6 +141,8 @@ class ReportPriceDataResult:
     cache_metadata: dict[str, Any]
     exchange_rate_data: Optional[dict[str, Any]] = None
     fuel_energy_data: Optional[dict[str, Any]] = None
+    livestock_animal_products_data: Optional[dict[str, Any]] = None
+    labour_market_data: Optional[dict[str, Any]] = None
     df_history_national: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 

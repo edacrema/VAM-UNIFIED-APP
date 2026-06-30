@@ -536,6 +536,125 @@ def _seed_country_fuel_cache(
     return version_id
 
 
+def _seed_country_module_cache(
+    repo: SqlPriceCacheRepository,
+    *,
+    country_iso3: str,
+    country_name: str,
+    currency_code: str,
+    currency_name: str,
+    report_month: str = "2026-06-01",
+    extra_specs=None,
+) -> str:
+    version_id = repo.create_cache_version()
+    repo.insert_currencies(
+        version_id,
+        [{"currency_id": 200, "currency_code": currency_code, "currency_name": currency_name}],
+    )
+    months = pd.date_range(end=report_month, periods=13, freq="MS")
+    commodities = [
+        {
+            "commodity_id": 1,
+            "commodity_name": "Maize",
+            "commodity_unit_id": 100,
+            "commodity_unit_name": "kg",
+            "category_name": "Cereals",
+        }
+    ]
+    prices = []
+    for index, month in enumerate(months):
+        prices.append(
+            _country_price(
+                country_iso3,
+                commodity_id=1,
+                commodity="Maize",
+                market_id=10,
+                market="Capital",
+                admin1="Central",
+                price_date=month.strftime("%Y-%m-%d"),
+                price=10 + index,
+                currency_code=currency_code,
+                currency_name=currency_name,
+            )
+        )
+
+    for spec in extra_specs or []:
+        commodity_id = int(spec["commodity_id"])
+        commodity_name = str(spec["commodity_name"])
+        unit_id = int(spec.get("unit_id", 100))
+        unit_name = str(spec.get("unit_name", "kg"))
+        commodities.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": commodity_name,
+                "commodity_unit_id": unit_id,
+                "commodity_unit_name": unit_name,
+                "category_name": str(spec.get("category_name", "Other")),
+            }
+        )
+        start_offset = int(spec.get("start_offset", 0))
+        end_offset = int(spec.get("end_offset", len(months) - 1))
+        base = float(spec.get("base", 100.0))
+        step = float(spec.get("step", 1.0))
+        markets = spec.get("markets") or [("Capital", "Central", 10, 0.0)]
+        for index, month in enumerate(months):
+            if index < start_offset or index > end_offset:
+                continue
+            for market_name, admin1, market_id, offset in markets:
+                prices.append(
+                    _country_price(
+                        country_iso3,
+                        commodity_id=commodity_id,
+                        commodity=commodity_name,
+                        market_id=market_id,
+                        market=market_name,
+                        admin1=admin1,
+                        price_date=month.strftime("%Y-%m-%d"),
+                        price=base + (step * index) + float(offset),
+                        currency_code=currency_code,
+                        currency_name=currency_name,
+                        unit_id=unit_id,
+                        unit_name=unit_name,
+                    )
+                )
+
+    repo.insert_country_snapshot(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        country_name=country_name,
+        commodities=commodities,
+        markets=[
+            {"market_id": 10, "market_name": "Capital", "admin1_name": "Central"},
+            {"market_id": 11, "market_name": "Remote", "admin1_name": "Remote"},
+        ],
+        prices=prices,
+        latest_price_date=report_month,
+        currency_code=currency_code,
+        currency_name=currency_name,
+    )
+    repo.record_country_result(
+        cache_version_id=version_id,
+        country_iso3=country_iso3,
+        status="success",
+        rows_prices=len(prices),
+        rows_commodities=len(commodities),
+        rows_markets=2,
+        latest_price_date=report_month,
+    )
+    repo.insert_units(
+        version_id,
+        [
+            {"commodity_unit_id": 100, "commodity_unit_name": "kg", "conversion_to_kg_l": 1.0, "active": True},
+            {"commodity_unit_id": 200, "commodity_unit_name": "L", "conversion_to_kg_l": 1.0, "active": True},
+            {"commodity_unit_id": 300, "commodity_unit_name": "Head", "conversion_to_kg_l": 1.0, "active": True},
+            {"commodity_unit_id": 400, "commodity_unit_name": "1 piece", "conversion_to_kg_l": 1.0, "active": True},
+            {"commodity_unit_id": 500, "commodity_unit_name": "Day", "conversion_to_kg_l": 1.0, "active": True},
+        ],
+    )
+    repo.publish_cache_version(version_id, country_iso3s=[country_iso3], status="active")
+    return version_id
+
+
 def _fx_rows(months, *, official=True, missing=None, base=1000, country_iso3="SSD", currency_code="SSP"):
     missing = set(missing or [])
     rows = []
@@ -1676,6 +1795,189 @@ def test_resolve_report_price_data_lagging_bangladesh_fuel_uses_latest_actual_mo
     assert diesel["yoy_change_pct"] is None
     assert petrol["current_price"] == 121
     assert "Fuel (gas)" not in result.df_national.columns
+
+
+def test_livestock_and_labour_classifiers_avoid_false_positives():
+    assert data_loader._animal_product_type("Livestock (Goat)", "Head") == "live_animal"
+    assert data_loader._animal_product_type("Meat (beef)", "KG") == "meat"
+    assert data_loader._animal_product_type("Milk (camel)", "L") == "milk"
+    assert data_loader._animal_product_type("Eggs (brown)", "1 piece") == "eggs"
+    assert data_loader._animal_product_type("Eggplants", "KG") is None
+    assert data_loader._animal_product_type("Fish (live, pangasius)", "KG") is None
+    assert data_loader._labour_kind("Wage (non-qualified labour, non-agricultural)", "Day") == "casual_unskilled"
+    assert data_loader._labour_kind("Wage (qualified labour)", "Day") == "skilled_qualified"
+    assert data_loader._labour_kind("Labour availability", "days/week") is None
+
+
+def test_resolve_report_price_data_adds_livestock_dominant_unit_without_polluting_food(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_module_cache(
+        repo,
+        country_iso3="COD",
+        country_name="Democratic Republic of the Congo",
+        currency_code="CDF",
+        currency_name="Congolese Franc",
+        extra_specs=[
+            {"commodity_id": 141, "commodity_name": "Meat (beef)", "unit_name": "KG", "base": 100, "step": 1},
+            {"commodity_id": 140, "commodity_name": "Meat (pork)", "unit_name": "KG", "base": 200, "step": 2},
+            {"commodity_id": 81, "commodity_name": "Milk", "unit_id": 200, "unit_name": "L", "base": 50, "step": 1},
+            {"commodity_id": 434, "commodity_name": "Eggplants", "unit_name": "KG", "base": 30, "step": 1},
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Democratic Republic of the Congo",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="CDF",
+        enabled_modules=["livestock_animal_products"],
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        result.df_national,
+        ["Maize"],
+        food_basket_components=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="CDF",
+    )
+
+    animal = result.livestock_animal_products_data
+    assert animal is not None
+    assert result.cache_metadata["livestock_animal_products"]["series_count"] == 3
+    assert animal["chart"]["mode"] == "absolute"
+    assert [item["unit"] for item in animal["chart"]["series"]] == ["KG", "KG"]
+    assert "Animal Products - Meat (beef)" in result.df_national.columns
+    assert "Animal Products - Eggplants" not in result.df_national.columns
+    assert result.df_national.loc[pd.Timestamp("2026-06-01"), "FoodBasket"] == 22
+    assert "Animal Products - Meat (beef)" in stats["auxiliary"]
+    assert "Animal Products - Meat (beef)" not in stats["commodities"]
+
+
+def test_resolve_report_price_data_adds_livestock_mixed_unit_index_chart(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_module_cache(
+        repo,
+        country_iso3="SOM",
+        country_name="Somalia",
+        currency_code="SOS",
+        currency_name="Somali Shilling",
+        extra_specs=[
+            {
+                "commodity_id": 383,
+                "commodity_name": "Livestock (Goat)",
+                "unit_id": 300,
+                "unit_name": "Head",
+                "base": 1000,
+                "step": 10,
+            },
+            {"commodity_id": 342, "commodity_name": "Milk (camel)", "unit_id": 200, "unit_name": "L", "base": 50, "step": 1},
+            {"commodity_id": 451, "commodity_name": "Meat (goat)", "unit_name": "KG", "base": 200, "step": 2},
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Somalia",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="SOS",
+        enabled_modules=["livestock_animal_products"],
+    )
+
+    animal = result.livestock_animal_products_data
+    assert animal is not None
+    assert animal["chart"]["mode"] == "indexed"
+    assert animal["chart"]["axis_label"] == "Index (first month = 100)"
+    assert {item["group"] for item in animal["series"]} == {"live_animal", "milk", "meat"}
+
+
+def test_resolve_report_price_data_labour_market_purchasing_power(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_module_cache(
+        repo,
+        country_iso3="AFG",
+        country_name="Afghanistan",
+        currency_code="AFN",
+        currency_name="Afghani",
+        extra_specs=[
+            {
+                "commodity_id": 465,
+                "commodity_name": "Wage (non-qualified labour, non-agricultural)",
+                "unit_id": 500,
+                "unit_name": "Day",
+                "base": 300,
+                "step": 10,
+            },
+            {
+                "commodity_id": 274,
+                "commodity_name": "Wage (qualified labour)",
+                "unit_id": 500,
+                "unit_name": "Day",
+                "base": 500,
+                "step": 5,
+            },
+        ],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Afghanistan",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1, "databridges_unit": "kg"}],
+        currency_code="AFN",
+        enabled_modules=["labour_market"],
+    )
+    stats = data_loader.calculate_statistics_from_csv(
+        result.df_national,
+        ["Maize"],
+        food_basket_components=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="AFN",
+    )
+
+    labour = result.labour_market_data
+    assert labour is not None
+    assert [item["kind"] for item in labour["series"]] == ["casual_unskilled", "skilled_qualified"]
+    assert labour["purchasing_power"]["staple_name"] == "Maize"
+    assert labour["purchasing_power"]["current_kg"] == round(420 / 22, 2)
+    assert labour["chart"]["mode"] == "purchasing_power"
+    assert "Labour - Purchasing power (Maize)" in result.df_national.columns
+    assert "Labour - Casual wage" in stats["auxiliary"]
+    assert "Labour - Casual wage" not in stats["commodities"]
+
+
+def test_resolve_report_price_data_no_livestock_or_labour_omits_with_warning(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_country_module_cache(
+        repo,
+        country_iso3="BFA",
+        country_name="Burkina Faso",
+        currency_code="XOF",
+        currency_name="CFA Franc BCEAO",
+        extra_specs=[],
+    )
+    _patch_repo(monkeypatch, repo)
+
+    result = data_loader.resolve_report_price_data(
+        "Burkina Faso",
+        "2026-06",
+        ["Maize"],
+        [],
+        basket_items=[{"commodity_id": 1, "commodity_name_snapshot": "Maize", "weight_quantity": 1}],
+        currency_code="XOF",
+        enabled_modules=["livestock_animal_products", "labour_market"],
+    )
+
+    assert result.livestock_animal_products_data is None
+    assert result.labour_market_data is None
+    assert result.cache_metadata["livestock_animal_products"]["series_count"] == 0
+    assert result.cache_metadata["labour_market"]["series_count"] == 0
+    assert any("Livestock & Animal Products omitted: no animal product" in warning for warning in result.warnings)
+    assert any("Labour Market omitted: no wage" in warning for warning in result.warnings)
 
 
 def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp_path):

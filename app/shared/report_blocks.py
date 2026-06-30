@@ -132,6 +132,8 @@ def _module_section_title(module_id: Any) -> str:
     known_titles = {
         "exchange_rate": "Exchange Rate Analysis",
         "fuel_energy": "Fuel & Energy",
+        "livestock_animal_products": "Livestock & Animal Products",
+        "labour_market": "Labour Market",
     }
     if module_key in known_titles:
         return known_titles[module_key]
@@ -242,6 +244,26 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
                         type="figure",
                         figure_id="fuel_prices",
                         caption="Fuel retail price trend",
+                    )
+                )
+            if (
+                module_id == "livestock_animal_products"
+                and isinstance(visualizations, dict)
+                and visualizations.get("livestock_animal_products")
+            ):
+                blocks.append(
+                    ReportBlock(
+                        type="figure",
+                        figure_id="livestock_animal_products",
+                        caption="Livestock and animal product price trend",
+                    )
+                )
+            if module_id == "labour_market" and isinstance(visualizations, dict) and visualizations.get("labour_market"):
+                blocks.append(
+                    ReportBlock(
+                        type="figure",
+                        figure_id="labour_market",
+                        caption="Labour market trend",
                     )
                 )
 

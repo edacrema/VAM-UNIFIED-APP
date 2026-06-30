@@ -123,6 +123,8 @@ class MarketReportState(TypedDict):
     # ===== MODULE OUTPUTS =====
     exchange_rate_data: Optional[Dict[str, Any]]
     fuel_energy_data: Optional[Dict[str, Any]]
+    livestock_animal_products_data: Optional[Dict[str, Any]]
+    labour_market_data: Optional[Dict[str, Any]]
     module_sections: Dict[str, str]
     
     # ===== CENTRAL & QA OUTPUTS =====
@@ -181,6 +183,8 @@ def create_initial_state(
         trend_analysis=None,
         exchange_rate_data=None,
         fuel_energy_data=None,
+        livestock_animal_products_data=None,
+        labour_market_data=None,
         module_sections={},
         report_draft_sections={},
         skeptic_flags=[],
@@ -247,6 +251,9 @@ def _is_auxiliary_series(name: str) -> bool:
         "salary",
         "labour",
         "labor",
+        "animal products -",
+        "livestock -",
+        "purchasing power",
         "milling",
         "transport",
         "freight",
@@ -354,6 +361,25 @@ def _fuel_axis_label(currency_code: str) -> str:
     return f"{code}/Litre"
 
 
+def _animal_axis_label(data: Dict[str, Any], currency_code: str) -> str:
+    chart = data.get("chart") or {}
+    axis = chart.get("axis_label")
+    if axis:
+        return str(axis)
+    code = str(currency_code or "LCU").strip().upper() or "LCU"
+    unit = chart.get("unit") or "unit"
+    return f"{code}/{unit}"
+
+
+def _labour_axis_label(data: Dict[str, Any], currency_code: str) -> str:
+    chart = data.get("chart") or {}
+    axis = chart.get("axis_label")
+    if axis:
+        return str(axis)
+    code = str(currency_code or "LCU").strip().upper() or "LCU"
+    return f"{code}/day"
+
+
 def _normalise_time_index(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -361,6 +387,17 @@ def _normalise_time_index(df: pd.DataFrame) -> pd.DataFrame:
     out.index = pd.to_datetime(out.index, errors="coerce")
     out = out[out.index.notna()]
     return out.sort_index()
+
+
+def _index_to_first_observation(series: pd.Series) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    valid = values.dropna()
+    if valid.empty:
+        return values
+    base = float(valid.iloc[0])
+    if base == 0:
+        return values * np.nan
+    return (values / base * 100.0).round(2)
 
 
 def _history_overlay_values(
@@ -794,10 +831,211 @@ Return ONLY the narrative text."""
         return f"{first} {driver} {implication}{regional}"
 
 
+class LivestockAnimalProductsModule(ReportModule):
+    """Narrative module over resolved livestock and animal-source food prices."""
+
+    @property
+    def module_id(self) -> str:
+        return "livestock_animal_products"
+
+    @property
+    def display_name(self) -> str:
+        return "Livestock & Animal Products"
+
+    @property
+    def required_inputs(self) -> List[str]:
+        return ["country", "time_period", "livestock_animal_products_data"]
+
+    def fetch_data(self, state: dict) -> Dict[str, Any]:
+        existing = state.get("livestock_animal_products_data") or {}
+        if existing.get("available") and existing.get("series"):
+            return {"livestock_animal_products_data": existing}
+        raise RuntimeError("resolved livestock and animal product price data is unavailable")
+
+    def generate_section(self, state: dict, llm) -> Dict[str, Any]:
+        data = state.get("livestock_animal_products_data") or {}
+        series = data.get("series") or []
+        if not data.get("available") or not series:
+            raise RuntimeError("Livestock & Animal Products data is unavailable")
+
+        prompt = f"""You are a WFP market analyst writing the Livestock & Animal Products section of a food price bulletin.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+- Write one concise paragraph, 3-5 sentences, no heading, no bullets.
+- Discuss only the animal items present in LIVESTOCK_AND_ANIMAL_DATA. Do not mention absent commodities.
+- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
+
+COUNTRY AND PERIOD:
+- Country: {state.get('country', 'Unknown')}
+- Report period: {state.get('time_period', 'Unknown')}
+
+LIVESTOCK_AND_ANIMAL_DATA:
+{json.dumps(data, indent=2)}
+
+CONTEXTUAL MARKET SIGNALS:
+{json.dumps(state.get('trend_analysis') or {}, indent=2)}
+
+Write the paragraph in this exact order:
+1. Lead with available animal product price levels and MoM/YoY changes in native units; include the live-animal series only if present.
+2. Attribute the movement to likely seasonal/holiday demand, feed/pasture/water conditions, supply/production, or import dependence.
+3. Explain implications for animal-source protein affordability and dietary diversity. If live_animal data is present, also mention pastoralist income or livestock-to-cereal terms of trade.
+4. If regional_disparities are present, add one short clause on the notable disparity; otherwise omit this.
+
+Return ONLY the narrative text."""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            narrative = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            logger.error(f"Livestock & Animal Products narrative generation failed: {e}")
+            narrative = self._fallback_narrative(data)
+
+        return {
+            "section_title": self.display_name,
+            "narrative": str(narrative).strip(),
+            "key_metrics": {
+                "series": series,
+                "latest_month": data.get("latest_month"),
+                "chart": data.get("chart"),
+            },
+        }
+
+    def _fallback_narrative(self, data: dict[str, Any]) -> str:
+        series = [item for item in data.get("series") or [] if isinstance(item, dict)]
+        parts = []
+        for item in series[:4]:
+            yoy = "" if item.get("yoy_change_pct") is None else f" and {format_pct(item.get('yoy_change_pct'))} year-on-year"
+            parts.append(
+                f"{item.get('label')} averaged {item.get('current_price')} {item.get('axis_unit')} "
+                f"in {item.get('latest_month')}, {format_pct(item.get('mom_change_pct'))} month-on-month{yoy}"
+            )
+        first = "; ".join(parts).rstrip() + "."
+        driver = data.get("driver_hint") or (
+            "The movement is consistent with seasonal demand, supply, feed, pasture, or water conditions."
+        )
+        implication = (
+            "These prices shape animal-source protein affordability and dietary diversity for households."
+        )
+        if any(item.get("group") == "live_animal" for item in series):
+            implication += " Live-animal prices also affect pastoralist income and livestock-to-cereal terms of trade."
+        regional = ""
+        disparities = data.get("regional_disparities") or []
+        if disparities:
+            item = disparities[0]
+            regional = (
+                f" Regional differences were notable, with {item.get('highest_region')} above "
+                f"{item.get('lowest_region')} for {str(item.get('label') or 'animal products').lower()}."
+            )
+        return f"{first} {driver} {implication}{regional}"
+
+
+class LabourMarketModule(ReportModule):
+    """Narrative module over daily wages and food purchasing power."""
+
+    @property
+    def module_id(self) -> str:
+        return "labour_market"
+
+    @property
+    def display_name(self) -> str:
+        return "Labour Market"
+
+    @property
+    def required_inputs(self) -> List[str]:
+        return ["country", "time_period", "labour_market_data"]
+
+    def fetch_data(self, state: dict) -> Dict[str, Any]:
+        existing = state.get("labour_market_data") or {}
+        if existing.get("available") and existing.get("series"):
+            return {"labour_market_data": existing}
+        raise RuntimeError("resolved labour market data is unavailable")
+
+    def generate_section(self, state: dict, llm) -> Dict[str, Any]:
+        data = state.get("labour_market_data") or {}
+        series = data.get("series") or []
+        if not data.get("available") or not series:
+            raise RuntimeError("Labour Market data is unavailable")
+
+        prompt = f"""You are a WFP market analyst writing the Labour Market section of a food price bulletin.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Language: English only.
+- Write one concise paragraph, 3-4 sentences, no heading, no bullets.
+- Discuss only wage, availability, and purchasing-power elements present in LABOUR_DATA. Do not invent labour availability if it is null.
+- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
+
+COUNTRY AND PERIOD:
+- Country: {state.get('country', 'Unknown')}
+- Report period: {state.get('time_period', 'Unknown')}
+
+LABOUR_DATA:
+{json.dumps(data, indent=2)}
+
+CONTEXTUAL MARKET SIGNALS:
+{json.dumps(state.get('trend_analysis') or {}, indent=2)}
+
+Write the paragraph in this exact order:
+1. Lead with the casual/unskilled daily wage where available, otherwise the primary daily wage, including MoM and YoY where available; include skilled wage only if present.
+2. Mention labour availability only if LABOUR_DATA.availability is present.
+3. If purchasing_power is present, express kg of the named staple obtainable from one day's wage and whether it improved or eroded.
+4. Attribute the movement to likely seasonal labour demand, harvest cycle, or broader economic conditions.
+
+Return ONLY the narrative text."""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            narrative = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            logger.error(f"Labour Market narrative generation failed: {e}")
+            narrative = self._fallback_narrative(data)
+
+        return {
+            "section_title": self.display_name,
+            "narrative": str(narrative).strip(),
+            "key_metrics": {
+                "series": series,
+                "purchasing_power": data.get("purchasing_power"),
+                "latest_month": data.get("latest_month"),
+            },
+        }
+
+    def _fallback_narrative(self, data: dict[str, Any]) -> str:
+        series = [item for item in data.get("series") or [] if isinstance(item, dict)]
+        primary = next((item for item in series if item.get("kind") == "casual_unskilled"), series[0])
+        yoy = "" if primary.get("yoy_change_pct") is None else f" and {format_pct(primary.get('yoy_change_pct'))} year-on-year"
+        first = (
+            f"{primary.get('label')} averaged {primary.get('current_wage')} {primary.get('axis_unit')} "
+            f"in {primary.get('latest_month')}, {format_pct(primary.get('mom_change_pct'))} month-on-month{yoy}."
+        )
+        skilled = next((item for item in series if item is not primary and item.get("kind") == "skilled_qualified"), None)
+        if skilled:
+            first = (
+                f"{first} {skilled.get('label')} averaged {skilled.get('current_wage')} "
+                f"{skilled.get('axis_unit')}."
+            )
+        availability = ""
+        if data.get("availability"):
+            availability = f" Labour availability was {data.get('availability')}."
+        pp = data.get("purchasing_power")
+        purchasing = ""
+        if isinstance(pp, dict):
+            purchasing = (
+                f" One day's wage bought about {pp.get('current_kg')} kg of {pp.get('staple_name')} "
+                f"in {pp.get('latest_month')}, {format_pct(pp.get('mom_change_pct'))} month-on-month."
+            )
+        driver = data.get("driver_hint") or (
+            "The movement is consistent with seasonal labour demand, harvest-cycle effects, or broader economic conditions."
+        )
+        return f"{first}{availability} {purchasing} {driver}".strip()
+
+
 # Registry moduli disponibili
 AVAILABLE_MODULES: Dict[str, type] = {
     "exchange_rate": ExchangeRateModule,
     "fuel_energy": FuelEnergyModule,
+    "livestock_animal_products": LivestockAnimalProductsModule,
+    "labour_market": LabourMarketModule,
 }
 
 # NODE: DATA AGENT
@@ -989,6 +1227,10 @@ def node_data_agent(state: MarketReportState) -> dict:
             )
             if result.fuel_energy_data:
                 stats["fuel_energy"] = result.fuel_energy_data
+            if result.livestock_animal_products_data:
+                stats["livestock_animal_products"] = result.livestock_animal_products_data
+            if result.labour_market_data:
+                stats["labour_market"] = result.labour_market_data
             basket_metadata = {
                 "basket_version_id": food_basket.get("basket_version_id"),
                 "basket_version_number": food_basket.get("version_number"),
@@ -1039,6 +1281,10 @@ def node_data_agent(state: MarketReportState) -> dict:
         "food_basket": food_basket,
         "exchange_rate_data": result.exchange_rate_data if not use_mock and "result" in locals() else None,
         "fuel_energy_data": result.fuel_energy_data if not use_mock and "result" in locals() else None,
+        "livestock_animal_products_data": (
+            result.livestock_animal_products_data if not use_mock and "result" in locals() else None
+        ),
+        "labour_market_data": result.labour_market_data if not use_mock and "result" in locals() else None,
         "warnings": warnings,
         "current_node": "data_agent"
     }
@@ -1218,8 +1464,110 @@ def node_graph_designer(state: MarketReportState) -> dict:
             plt.close()
             buf.seek(0)
             visualizations["fuel_prices"] = base64.b64encode(buf.read()).decode('utf-8')
+
+        # 5. Livestock & Animal Products Trend
+        animal_data = state.get("livestock_animal_products_data") or {}
+        animal_chart = animal_data.get("chart") or {}
+        animal_series = []
+        for item in animal_chart.get("series") or []:
+            if not isinstance(item, dict):
+                continue
+            column = str(item.get("column_name") or "").strip()
+            label = str(item.get("label") or column).strip()
+            if column and column in df_national.columns and df_national[column].dropna().any():
+                animal_series.append((column, label))
+
+        if animal_series:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            chart_mode = str(animal_chart.get("mode") or "absolute")
+            show_history_overlays = chart_mode == "absolute" and len(animal_series) <= 2
+            for column, label in animal_series:
+                values = df_national[column]
+                if chart_mode == "indexed":
+                    values = _index_to_first_observation(values)
+                line = ax.plot(df_national.index, values, marker='o', linewidth=2, label=label)[0]
+                if show_history_overlays:
+                    _plot_history_overlays(
+                        ax,
+                        df_history,
+                        pd.DatetimeIndex(df_national.index),
+                        column,
+                        color=line.get_color(),
+                        label_prefix=label,
+                    )
+            ax.set_title(f"Livestock & Animal Products - {state['country']}", fontweight='bold')
+            ax.set_ylabel(_animal_axis_label(animal_data, currency_code))
+            ax.legend(loc='upper left')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            visualizations["livestock_animal_products"] = base64.b64encode(buf.read()).decode('utf-8')
+
+        # 6. Labour Market Trend
+        labour_data = state.get("labour_market_data") or {}
+        labour_chart = labour_data.get("chart") or {}
+        labour_series = []
+        for item in labour_chart.get("series") or []:
+            if not isinstance(item, dict):
+                continue
+            column = str(item.get("column_name") or "").strip()
+            label = str(item.get("label") or column).strip()
+            axis_name = str(item.get("axis") or "primary")
+            if column and column in df_national.columns and df_national[column].dropna().any():
+                labour_series.append((column, label, axis_name, item))
+
+        if labour_series:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            secondary_ax = None
+            plotted_for_overlays = []
+            for column, label, axis_name, item in labour_series:
+                target_ax = ax
+                if axis_name == "secondary":
+                    secondary_ax = secondary_ax or ax.twinx()
+                    target_ax = secondary_ax
+                line = target_ax.plot(df_national.index, df_national[column], marker='o', linewidth=2, label=label)[0]
+                if axis_name != "secondary":
+                    plotted_for_overlays.append((column, label, line.get_color()))
+            show_history_overlays = len(labour_series) <= 2
+            if show_history_overlays:
+                for column, label, color in plotted_for_overlays:
+                    _plot_history_overlays(
+                        ax,
+                        df_history,
+                        pd.DatetimeIndex(df_national.index),
+                        column,
+                        color=color,
+                        label_prefix=label,
+                    )
+            ax.set_title(f"Labour Market - {state['country']}", fontweight='bold')
+            ax.set_ylabel(_labour_axis_label(labour_data, currency_code))
+            if secondary_ax is not None:
+                secondary_label = next(
+                    (str(item.get("axis_label")) for _c, _l, axis_name, item in labour_series if axis_name == "secondary" and item.get("axis_label")),
+                    _currency_axis_label("Wage", currency_code),
+                )
+                secondary_ax.set_ylabel(secondary_label)
+                lines = ax.get_lines() + secondary_ax.get_lines()
+                labels = [line.get_label() for line in lines]
+                ax.legend(lines, labels, loc='upper left')
+            else:
+                ax.legend(loc='upper left')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            visualizations["labour_market"] = base64.b64encode(buf.read()).decode('utf-8')
         
-        # 5. Regional Comparison (if data available)
+        # 7. Regional Comparison (if data available)
         if state.get("time_series_data_regional"):
             df_regional = pd.read_json(io.StringIO(state["time_series_data_regional"]))
             if not df_regional.empty and "Region" in df_regional.columns:
@@ -1546,6 +1894,18 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             if not fuel_data.get("available") or not fuel_data.get("series"):
                 warnings.append("Skipped fuel_energy module because no transport fuel price data was available.")
                 continue
+        if module_id == "livestock_animal_products":
+            animal_data = state.get("livestock_animal_products_data") or {}
+            if not animal_data.get("available") or not animal_data.get("series"):
+                warnings.append(
+                    "Skipped livestock_animal_products module because no livestock or animal product price data was available."
+                )
+                continue
+        if module_id == "labour_market":
+            labour_data = state.get("labour_market_data") or {}
+            if not labour_data.get("available") or not labour_data.get("series"):
+                warnings.append("Skipped labour_market module because no wage price data was available.")
+                continue
         
         try:
             module_class = AVAILABLE_MODULES[module_id]
@@ -1582,6 +1942,12 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
                 warnings.append(f"Skipped exchange_rate module because no exchange-rate source was available: {e}")
             elif module_id == "fuel_energy":
                 warnings.append(f"Skipped fuel_energy module because no transport fuel price data was available: {e}")
+            elif module_id == "livestock_animal_products":
+                warnings.append(
+                    f"Skipped livestock_animal_products module because no livestock or animal product price data was available: {e}"
+                )
+            elif module_id == "labour_market":
+                warnings.append(f"Skipped labour_market module because no wage price data was available: {e}")
             continue
     
     updates["module_sections"] = module_sections

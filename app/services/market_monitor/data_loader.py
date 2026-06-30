@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
@@ -56,6 +57,11 @@ _FX_NEAR_STATIC_MAX_RANGE_RATIO = 0.005
 _FX_FOOD_BASKET_USD_MAX = 250.0
 _FX_COMMODITY_MEDIAN_USD_MAX = 20.0
 _FX_MIN_COMMODITY_USD_SAMPLE = 3
+_STAPLE_NAME_TOKENS = ("maize", "rice", "wheat", "sorghum", "millet", "teff", "barley", "flour")
+_KG_UNITS = {"kg", "kgs", "kilogram", "kilograms"}
+_LITRE_UNITS = {"l", "lt", "liter", "litre", "liters", "litres"}
+_HEAD_UNITS = {"head", "heads"}
+_PIECE_UNITS = {"piece", "pieces", "1 piece", "unit", "units"}
 
 # Worker-side ETL telemetry that operators need but officers should not be
 # shown as report warnings.
@@ -1029,6 +1035,38 @@ def resolve_report_price_data(
     if isinstance(fuel_history, pd.DataFrame) and not fuel_history.empty:
         for column in fuel_history.columns:
             df_history_national[column] = fuel_history[column]
+    livestock_result = _resolve_livestock_animal_products_series(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        full_date_index=full_date_index,
+        currency_code=selected_currency_code or currency_code,
+        enabled_modules=enabled_modules,
+    )
+    for column, series in livestock_result["series"].items():
+        df_national[column] = series.reindex(full_date_index)
+    livestock_history = livestock_result.get("history")
+    if isinstance(livestock_history, pd.DataFrame) and not livestock_history.empty:
+        for column in livestock_history.columns:
+            df_history_national[column] = livestock_history[column]
+    labour_result = _resolve_labour_market_series(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        full_date_index=full_date_index,
+        currency_code=selected_currency_code or currency_code,
+        enabled_modules=enabled_modules,
+        price_frame=df_national,
+        history_price_frame=df_history_national,
+        basket_components=basket_components,
+        valid_names=valid_names,
+    )
+    for column, series in labour_result["series"].items():
+        df_national[column] = series.reindex(full_date_index)
+    labour_history = labour_result.get("history")
+    if isinstance(labour_history, pd.DataFrame) and not labour_history.empty:
+        for column in labour_history.columns:
+            df_history_national[column] = labour_history[column]
     fx_result = _resolve_exchange_rate_series(
         iso3=iso3,
         currency_code=selected_currency_code,
@@ -1041,6 +1079,8 @@ def resolve_report_price_data(
         df_national[column] = series.reindex(full_date_index)
     result_warnings = _dedupe_preserve_order(warnings + gap_report.warning_messages())
     result_warnings = _dedupe_preserve_order(result_warnings + fuel_result["warnings"])
+    result_warnings = _dedupe_preserve_order(result_warnings + livestock_result["warnings"])
+    result_warnings = _dedupe_preserve_order(result_warnings + labour_result["warnings"])
     result_warnings = _dedupe_preserve_order(result_warnings + fx_result["warnings"])
     gap_report.warnings = result_warnings
 
@@ -1055,6 +1095,8 @@ def resolve_report_price_data(
     cache_metadata["source"] = "PriceCache + targeted DataBridges backfill" if target_metadata["attempted"] else "PriceCache"
     cache_metadata["currency_code"] = selected_currency_code
     cache_metadata["fuel_energy"] = fuel_result["metadata"]
+    cache_metadata["livestock_animal_products"] = livestock_result["metadata"]
+    cache_metadata["labour_market"] = labour_result["metadata"]
     cache_metadata["fx"] = fx_result["metadata"]
     cache_metadata["targeted_backfill"] = target_metadata
     cache_metadata["price_gap_report"] = gap_report.to_dict()
@@ -1067,6 +1109,8 @@ def resolve_report_price_data(
         cache_metadata=cache_metadata,
         exchange_rate_data=fx_result["exchange_rate_data"],
         fuel_energy_data=fuel_result["fuel_energy_data"],
+        livestock_animal_products_data=livestock_result["livestock_animal_products_data"],
+        labour_market_data=labour_result["labour_market_data"],
         df_history_national=df_history_national,
     )
 
@@ -1080,6 +1124,20 @@ def _market_monitor_fx_enabled() -> bool:
 
 def _market_monitor_fuel_enabled() -> bool:
     raw = os.getenv("MARKET_MONITOR_FUEL_ENABLED")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _market_monitor_livestock_enabled() -> bool:
+    raw = os.getenv("MARKET_MONITOR_LIVESTOCK_ENABLED")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _market_monitor_labour_enabled() -> bool:
+    raw = os.getenv("MARKET_MONITOR_LABOUR_ENABLED")
     if raw is None or not str(raw).strip():
         return True
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
@@ -1530,6 +1588,1031 @@ def _fuel_driver_hint(primary_series: dict[str, Any]) -> str:
     if mom_value < -2.0:
         return "The decline is consistent with easing fuel-market, supply/logistics, or administered price pressure."
     return "The limited month-on-month movement is consistent with broadly stable fuel-market or administered pricing conditions."
+
+
+def _unit_key(unit: Any) -> str:
+    text = str(unit or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    if text in _KG_UNITS:
+        return "kg"
+    if text in _LITRE_UNITS:
+        return "l"
+    if text in _HEAD_UNITS:
+        return "head"
+    if text in _PIECE_UNITS:
+        return "piece"
+    if text in {"day", "days"}:
+        return "day"
+    return text
+
+
+def _unit_label(unit: Any, *, default: str = "unit") -> str:
+    key = _unit_key(unit)
+    if key == "kg":
+        return "KG"
+    if key == "l":
+        return "L"
+    if key == "head":
+        return "Head"
+    if key == "piece":
+        return "piece"
+    if key == "day":
+        return "day"
+    return str(unit or default).strip() or default
+
+
+def _price_axis_unit(currency_code: Optional[str], unit: Any) -> str:
+    code = str(currency_code or "LCU").strip().upper() or "LCU"
+    return f"{code}/{_unit_label(unit)}"
+
+
+def _series_stats_from_series(
+    series: pd.Series,
+    *,
+    target_date: pd.Timestamp,
+    current_key: str,
+) -> Optional[dict[str, Any]]:
+    values = pd.to_numeric(series, errors="coerce")
+    values = values[values.index <= target_date].dropna()
+    if values.empty:
+        return None
+    latest_month = pd.Timestamp(values.index[-1])
+    previous_month = latest_month - pd.DateOffset(months=1)
+    previous_value = series.get(previous_month, np.nan)
+    if pd.isna(previous_value):
+        return None
+    yoy_month = latest_month - pd.DateOffset(years=1)
+    yoy_value = series.get(yoy_month, np.nan)
+    current_value = float(values.iloc[-1])
+    mom = _pct_change(current_value, previous_value)
+    yoy = None if pd.isna(yoy_value) else _pct_change(current_value, yoy_value)
+    return {
+        current_key: round(current_value, 2),
+        "mom_change_pct": None if mom is None else round(float(mom), 1),
+        "yoy_change_pct": None if yoy is None else round(float(yoy), 1),
+        "latest_month": latest_month.strftime("%Y-%m"),
+        "previous_month": previous_month.strftime("%Y-%m"),
+        "yoy_reference_month": yoy_month.strftime("%Y-%m") if not pd.isna(yoy_value) else None,
+    }
+
+
+def _animal_product_type(name: Any, unit: Any = None) -> Optional[str]:
+    text = str(name or "").strip().lower()
+    unit_key = _unit_key(unit)
+    if not text:
+        return None
+    if text.startswith("livestock (") and unit_key in {"head", ""}:
+        return "live_animal"
+    if text.startswith("meat (") and unit_key in {"kg", ""}:
+        return "meat"
+    if text.startswith("poultry") and unit_key in {"kg", ""}:
+        return "meat"
+    if (text == "milk" or text.startswith("milk (")) and unit_key in {"l", "kg", ""}:
+        return "milk"
+    if re.match(r"^eggs?(\s*\(|$)", text) and unit_key in {"piece", ""}:
+        return "eggs"
+    return None
+
+
+def _animal_group_display(group: str) -> str:
+    labels = {
+        "live_animal": "Live animal",
+        "meat": "Meat",
+        "milk": "Milk",
+        "eggs": "Eggs",
+    }
+    return labels.get(group, str(group or "Animal product").replace("_", " ").title())
+
+
+def _animal_column_name(group: str, commodity_name: str) -> str:
+    prefix = "Livestock" if group == "live_animal" else "Animal Products"
+    return f"{prefix} - {str(commodity_name or '').strip()}"
+
+
+def _animal_sort_key(group: str, label: str) -> tuple[int, str]:
+    order = {"meat": 0, "milk": 1, "eggs": 2, "live_animal": 3}
+    return (order.get(group, 99), str(label or "").lower())
+
+
+def _livestock_animal_candidates(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for commodity in _get_commodities(canonical, iso3):
+        commodity_id = _to_int(commodity.get("id"))
+        name = str(commodity.get("name") or "").strip()
+        unit = commodity.get("unit") or commodity.get("unit_name")
+        group = _animal_product_type(name, unit)
+        if commodity_id is None or not name or group is None or commodity_id in seen:
+            continue
+        seen.add(commodity_id)
+        candidates.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": name,
+                "group": group,
+                "label": name,
+                "unit": _unit_label(unit, default="unit"),
+            }
+        )
+    return sorted(candidates, key=lambda item: _animal_sort_key(str(item["group"]), str(item["label"])))
+
+
+def _resolve_livestock_animal_products_series(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    full_date_index: pd.DatetimeIndex,
+    currency_code: Optional[str],
+    enabled_modules: Optional[Sequence[str]],
+) -> dict[str, Any]:
+    requested = _module_requested(enabled_modules, "livestock_animal_products")
+    metadata: dict[str, Any] = {
+        "enabled": _market_monitor_livestock_enabled(),
+        "requested": requested,
+        "source": "not_requested" if not requested else "PriceCache",
+        "currency_code": currency_code,
+        "rows_fetched": 0,
+        "series_count": 0,
+        "chart_mode": None,
+        "candidates": [],
+        "omitted_candidates": [],
+        "error": None,
+    }
+    empty_history = pd.DataFrame(index=full_date_index)
+    empty = {
+        "series": {},
+        "history": empty_history,
+        "warnings": [],
+        "metadata": metadata,
+        "livestock_animal_products_data": None,
+    }
+    if not requested:
+        return empty
+    if not metadata["enabled"]:
+        metadata["source"] = "disabled"
+        return {
+            **empty,
+            "warnings": ["Livestock & Animal Products omitted: MARKET_MONITOR_LIVESTOCK_ENABLED is disabled."],
+            "metadata": metadata,
+        }
+
+    candidates = _livestock_animal_candidates(canonical, iso3)
+    metadata["candidates"] = [
+        {
+            "commodity_id": item["commodity_id"],
+            "commodity_name": item["commodity_name"],
+            "group": item["group"],
+            "unit": item.get("unit"),
+        }
+        for item in candidates
+    ]
+    if not candidates:
+        return {
+            **empty,
+            "warnings": [f"Livestock & Animal Products omitted: no animal product price series available for {canonical}."],
+            "metadata": metadata,
+        }
+
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            full_date_index[0].strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+    except Exception as exc:
+        metadata["source"] = "error"
+        metadata["error"] = _safe_adapter_error(exc)
+        return {
+            **empty,
+            "warnings": [f"Livestock & Animal Products omitted: {metadata['error']}"],
+            "metadata": metadata,
+        }
+
+    metadata["rows_fetched"] = len(records)
+    df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+    if not df.empty:
+        df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+    df, selected_currency, excluded_currencies = _select_report_currency(
+        df,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    if selected_currency and len(str(selected_currency).strip()) == 3:
+        metadata["currency_code"] = str(selected_currency).strip().upper()
+    warnings: list[str] = []
+    if excluded_currencies:
+        warnings.append(
+            f"Livestock and animal product prices for {canonical} are quoted in multiple currencies; report uses "
+            f"{metadata['currency_code']} and excludes {excluded_currencies}."
+        )
+
+    frame, series_payloads, omitted = _animal_frame_and_payload(
+        df,
+        candidate_by_id=candidate_by_id,
+        full_date_index=full_date_index,
+        target_date=target_date,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+    )
+    metadata["omitted_candidates"] = omitted
+    metadata["series_count"] = len(series_payloads)
+    if not series_payloads:
+        warnings.append(
+            f"Livestock & Animal Products omitted: no animal product series for {canonical} has enough monthly observations."
+        )
+        return {
+            **empty,
+            "warnings": _dedupe_preserve_order(warnings),
+            "metadata": metadata,
+        }
+
+    chart = _animal_chart_metadata(series_payloads, str(metadata["currency_code"] or currency_code or "LCU"))
+    metadata["chart_mode"] = chart["mode"]
+    history = _resolve_animal_history_frame(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        candidates=candidates,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+    )
+    primary = series_payloads[0]
+    livestock_data = {
+        "available": True,
+        "country": canonical,
+        "currency_code": metadata["currency_code"],
+        "latest_month": max(str(item["latest_month"]) for item in series_payloads),
+        "primary_series": primary["column_name"],
+        "series": series_payloads,
+        "chart": chart,
+        "regional_disparities": _animal_regional_disparities(df, candidate_by_id, series_payloads),
+        "driver_hint": _animal_driver_hint(primary),
+        "source": metadata["source"],
+    }
+    return {
+        "series": {column: frame[column] for column in frame.columns},
+        "history": history,
+        "warnings": _dedupe_preserve_order(warnings),
+        "metadata": metadata,
+        "livestock_animal_products_data": livestock_data,
+    }
+
+
+def _animal_frame_and_payload(
+    df: pd.DataFrame,
+    *,
+    candidate_by_id: dict[int, dict[str, Any]],
+    full_date_index: pd.DatetimeIndex,
+    target_date: pd.Timestamp,
+    currency_code: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], list[dict[str, Any]]]:
+    frame = pd.DataFrame(index=full_date_index)
+    if df.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "group": item["group"],
+                "reason": "no_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working = df.copy()
+    working["Commodity ID"] = pd.to_numeric(working["Commodity ID"], errors="coerce")
+    working = working[working["Commodity ID"].notna()].copy()
+    working["Commodity ID"] = working["Commodity ID"].astype(int)
+    working = working[working["Commodity ID"].isin(candidate_by_id.keys())].copy()
+    working["Price"] = pd.to_numeric(working["Price"], errors="coerce")
+    working["Price Date"] = pd.to_datetime(working["Price Date"], errors="coerce")
+    working = working[working["Price"].notna() & working["Price Date"].notna()]
+    if working.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "group": item["group"],
+                "reason": "no_valid_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working["Month"] = working["Price Date"].dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        working.groupby(["Month", "Commodity ID"], dropna=True)["Price"]
+        .mean()
+        .reset_index()
+    )
+    payloads: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    for commodity_id in sorted(working["Commodity ID"].dropna().astype(int).unique()):
+        candidate = candidate_by_id.get(int(commodity_id))
+        if not candidate:
+            continue
+        column = _animal_column_name(str(candidate["group"]), str(candidate["commodity_name"]))
+        series = (
+            monthly[monthly["Commodity ID"] == commodity_id]
+            .set_index("Month")["Price"]
+            .reindex(full_date_index)
+            .astype(float)
+            .round(2)
+        )
+        stats = _series_stats_from_series(series, target_date=target_date, current_key="current_price")
+        rows = working[working["Commodity ID"] == commodity_id]
+        if stats is None:
+            omitted.append(
+                {
+                    "commodity_id": candidate["commodity_id"],
+                    "commodity_name": candidate["commodity_name"],
+                    "group": candidate["group"],
+                    "reason": "insufficient_monthly_observations",
+                }
+            )
+            continue
+        unit = _module_unit_from_rows(rows, default=str(candidate.get("unit") or "unit"))
+        frame[column] = series
+        payloads.append(
+            {
+                "group": str(candidate["group"]),
+                "group_label": _animal_group_display(str(candidate["group"])),
+                "label": str(candidate["label"]),
+                "column_name": column,
+                "commodity_id": int(candidate["commodity_id"]),
+                "commodity_name": str(candidate["commodity_name"]),
+                "current_price": stats["current_price"],
+                "mom_change_pct": stats["mom_change_pct"],
+                "yoy_change_pct": stats["yoy_change_pct"],
+                "latest_month": stats["latest_month"],
+                "previous_month": stats["previous_month"],
+                "yoy_reference_month": stats["yoy_reference_month"],
+                "unit": unit,
+                "unit_key": _unit_key(unit),
+                "currency_code": currency_code,
+                "axis_unit": _price_axis_unit(currency_code, unit),
+            }
+        )
+    payloads.sort(key=lambda item: _animal_sort_key(str(item["group"]), str(item["label"])))
+    return frame, payloads, omitted
+
+
+def _module_unit_from_rows(df: pd.DataFrame, *, default: str) -> str:
+    if df.empty or "Unit" not in df.columns:
+        return _unit_label(default, default=default)
+    values = [
+        str(item or "").strip()
+        for item in df["Unit"].dropna().astype(str)
+        if str(item or "").strip()
+    ]
+    if not values:
+        return _unit_label(default, default=default)
+    return _unit_label(pd.Series(values).value_counts().idxmax(), default=default)
+
+
+def _animal_chart_metadata(series_payloads: list[dict[str, Any]], currency_code: str) -> dict[str, Any]:
+    unit_counts = Counter(str(item.get("unit_key") or "") for item in series_payloads)
+    ordered = unit_counts.most_common()
+    dominant_unit = ordered[0][0] if ordered else ""
+    dominant_count = ordered[0][1] if ordered else 0
+    next_count = ordered[1][1] if len(ordered) > 1 else 0
+    use_absolute = len(unit_counts) == 1 or (dominant_count >= 2 and dominant_count > next_count)
+    if use_absolute:
+        chart_series = [item for item in series_payloads if str(item.get("unit_key") or "") == dominant_unit]
+        unit = chart_series[0].get("unit") if chart_series else "unit"
+        return {
+            "mode": "absolute",
+            "series": [
+                {"column_name": item["column_name"], "label": item["label"], "unit": item.get("unit")}
+                for item in chart_series
+            ],
+            "axis_label": _price_axis_unit(currency_code, unit),
+            "unit": unit,
+        }
+    return {
+        "mode": "indexed",
+        "series": [
+            {"column_name": item["column_name"], "label": item["label"], "unit": item.get("unit")}
+            for item in series_payloads
+        ],
+        "axis_label": "Index (first month = 100)",
+        "unit": None,
+    }
+
+
+def _resolve_animal_history_frame(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    candidates: list[dict[str, Any]],
+    currency_code: str,
+) -> pd.DataFrame:
+    history_start = target_date - pd.DateOffset(months=_CHART_HISTORY_MONTHS - 1)
+    history_index = pd.date_range(start=history_start, end=target_date, freq="MS")
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            history_start.strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+        df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+        if not df.empty:
+            df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+        df, _selected_currency, _excluded = _select_report_currency(
+            df,
+            requested_code=currency_code,
+            country=canonical,
+        )
+        frame, _payloads, _omitted = _animal_frame_and_payload(
+            df,
+            candidate_by_id=candidate_by_id,
+            full_date_index=history_index,
+            target_date=target_date,
+            currency_code=currency_code,
+        )
+        return frame
+    except Exception as exc:
+        logger.warning("Could not build animal product history for %s: %s", iso3, _safe_adapter_error(exc))
+        return pd.DataFrame(index=history_index)
+
+
+def _animal_regional_disparities(
+    df: pd.DataFrame,
+    candidate_by_id: dict[int, dict[str, Any]],
+    series_payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if df.empty or "Admin 1" not in df.columns:
+        return []
+    working = df.copy()
+    working["Commodity ID"] = pd.to_numeric(working["Commodity ID"], errors="coerce")
+    working = working[working["Commodity ID"].notna()].copy()
+    working["Commodity ID"] = working["Commodity ID"].astype(int)
+    working = working[working["Commodity ID"].isin(candidate_by_id.keys())].copy()
+    working["Price"] = pd.to_numeric(working["Price"], errors="coerce")
+    working["Price Date"] = pd.to_datetime(working["Price Date"], errors="coerce")
+    working = working[working["Price"].notna() & working["Price Date"].notna()].copy()
+    if working.empty:
+        return []
+    working["Month"] = working["Price Date"].dt.to_period("M").dt.to_timestamp()
+    disparities: list[dict[str, Any]] = []
+    for payload in series_payloads:
+        commodity_id = int(payload.get("commodity_id") or -1)
+        latest_month = pd.Timestamp(f"{payload.get('latest_month')}-01")
+        subset = working[(working["Commodity ID"] == commodity_id) & (working["Month"] == latest_month)].copy()
+        subset = subset[subset["Admin 1"].notna()]
+        if subset.empty:
+            continue
+        regional = subset.groupby("Admin 1", dropna=True)["Price"].mean().dropna()
+        regional = regional[regional > 0]
+        if len(regional) < 2:
+            continue
+        min_region = str(regional.idxmin())
+        max_region = str(regional.idxmax())
+        min_value = float(regional.loc[min_region])
+        max_value = float(regional.loc[max_region])
+        if min_value <= 0:
+            continue
+        spread_pct = (max_value - min_value) / min_value * 100.0
+        if spread_pct < 10.0:
+            continue
+        disparities.append(
+            {
+                "commodity_id": commodity_id,
+                "label": payload.get("label"),
+                "latest_month": payload.get("latest_month"),
+                "highest_region": max_region,
+                "highest_price": round(max_value, 2),
+                "lowest_region": min_region,
+                "lowest_price": round(min_value, 2),
+                "spread_pct": round(float(spread_pct), 1),
+            }
+        )
+    return disparities
+
+
+def _animal_driver_hint(primary_series: dict[str, Any]) -> str:
+    mom = primary_series.get("mom_change_pct")
+    try:
+        mom_value = float(mom)
+    except Exception:
+        return "Movement should be attributed cautiously to seasonal demand, supply, feed, pasture, or water conditions."
+    if mom_value > 2.0:
+        return "The increase is consistent with seasonal demand, supply constraints, or feed, pasture, and water pressure."
+    if mom_value < -2.0:
+        return "The decline is consistent with easing demand, improved supply, or better feed, pasture, and water conditions."
+    return "The limited month-on-month movement is consistent with broadly stable animal-product market conditions."
+
+
+def _labour_kind(name: Any, unit: Any = None) -> Optional[str]:
+    text = str(name or "").strip().lower()
+    unit_key = _unit_key(unit)
+    if not text.startswith("wage (") or unit_key not in {"day", ""}:
+        return None
+    if "non-qualified" in text or "non qualified" in text or "casual" in text or "unskilled" in text:
+        return "casual_unskilled"
+    if "qualified" in text or "skilled" in text:
+        return "skilled_qualified"
+    return "other_wage"
+
+
+def _labour_display_name(kind: str) -> str:
+    if kind == "casual_unskilled":
+        return "Casual/unskilled wage"
+    if kind == "skilled_qualified":
+        return "Skilled/qualified wage"
+    return "Daily wage"
+
+
+def _labour_column_name(kind: str) -> str:
+    if kind == "casual_unskilled":
+        return "Labour - Casual wage"
+    if kind == "skilled_qualified":
+        return "Labour - Skilled wage"
+    return "Labour - Daily wage"
+
+
+def _labour_sort_key(kind: str) -> tuple[int, str]:
+    order = {"casual_unskilled": 0, "skilled_qualified": 1, "other_wage": 2}
+    return (order.get(kind, 99), kind)
+
+
+def _labour_candidates(canonical: str, iso3: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for commodity in _get_commodities(canonical, iso3):
+        commodity_id = _to_int(commodity.get("id"))
+        name = str(commodity.get("name") or "").strip()
+        unit = commodity.get("unit") or commodity.get("unit_name")
+        kind = _labour_kind(name, unit)
+        if commodity_id is None or not name or kind is None or commodity_id in seen:
+            continue
+        seen.add(commodity_id)
+        candidates.append(
+            {
+                "commodity_id": commodity_id,
+                "commodity_name": name,
+                "kind": kind,
+                "label": _labour_display_name(kind),
+                "unit": _unit_label(unit, default="day"),
+            }
+        )
+    return sorted(candidates, key=lambda item: (_labour_sort_key(str(item["kind"])), item["commodity_name"].lower()))
+
+
+def _resolve_labour_market_series(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    full_date_index: pd.DatetimeIndex,
+    currency_code: Optional[str],
+    enabled_modules: Optional[Sequence[str]],
+    price_frame: pd.DataFrame,
+    history_price_frame: pd.DataFrame,
+    basket_components: list[dict[str, Any]],
+    valid_names: list[str],
+) -> dict[str, Any]:
+    requested = _module_requested(enabled_modules, "labour_market")
+    metadata: dict[str, Any] = {
+        "enabled": _market_monitor_labour_enabled(),
+        "requested": requested,
+        "source": "not_requested" if not requested else "PriceCache",
+        "currency_code": currency_code,
+        "rows_fetched": 0,
+        "series_count": 0,
+        "candidates": [],
+        "omitted_candidates": [],
+        "staple": None,
+        "error": None,
+    }
+    empty_history = pd.DataFrame(index=full_date_index)
+    empty = {
+        "series": {},
+        "history": empty_history,
+        "warnings": [],
+        "metadata": metadata,
+        "labour_market_data": None,
+    }
+    if not requested:
+        return empty
+    if not metadata["enabled"]:
+        metadata["source"] = "disabled"
+        return {
+            **empty,
+            "warnings": ["Labour Market omitted: MARKET_MONITOR_LABOUR_ENABLED is disabled."],
+            "metadata": metadata,
+        }
+
+    candidates = _labour_candidates(canonical, iso3)
+    metadata["candidates"] = [
+        {
+            "commodity_id": item["commodity_id"],
+            "commodity_name": item["commodity_name"],
+            "kind": item["kind"],
+            "unit": item.get("unit"),
+        }
+        for item in candidates
+    ]
+    if not candidates:
+        return {
+            **empty,
+            "warnings": [f"Labour Market omitted: no wage price series available for {canonical}."],
+            "metadata": metadata,
+        }
+
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            full_date_index[0].strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+    except Exception as exc:
+        metadata["source"] = "error"
+        metadata["error"] = _safe_adapter_error(exc)
+        return {
+            **empty,
+            "warnings": [f"Labour Market omitted: {metadata['error']}"],
+            "metadata": metadata,
+        }
+
+    metadata["rows_fetched"] = len(records)
+    df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+    if not df.empty:
+        df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+    df, selected_currency, excluded_currencies = _select_report_currency(
+        df,
+        requested_code=currency_code,
+        country=canonical,
+    )
+    if selected_currency and len(str(selected_currency).strip()) == 3:
+        metadata["currency_code"] = str(selected_currency).strip().upper()
+    warnings: list[str] = []
+    if excluded_currencies:
+        warnings.append(
+            f"Wage prices for {canonical} are quoted in multiple currencies; report uses "
+            f"{metadata['currency_code']} and excludes {excluded_currencies}."
+        )
+
+    frame, wage_payloads, omitted = _labour_frame_and_payload(
+        df,
+        candidate_by_id=candidate_by_id,
+        full_date_index=full_date_index,
+        target_date=target_date,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+    )
+    metadata["omitted_candidates"] = omitted
+    metadata["series_count"] = len(wage_payloads)
+    if not wage_payloads:
+        warnings.append(f"Labour Market omitted: no wage series for {canonical} has enough monthly observations.")
+        return {
+            **empty,
+            "warnings": _dedupe_preserve_order(warnings),
+            "metadata": metadata,
+        }
+
+    staple = _select_labour_staple_series(
+        price_frame,
+        basket_components=basket_components,
+        valid_names=valid_names,
+    )
+    metadata["staple"] = None if staple is None else {"name": staple[0], "source": staple[2]}
+    primary = wage_payloads[0]
+    primary_series = frame[primary["column_name"]]
+    purchasing_power = None
+    if staple is not None:
+        staple_name, staple_series, staple_source = staple
+        pp_series = (pd.to_numeric(primary_series, errors="coerce") / pd.to_numeric(staple_series, errors="coerce")).replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
+        pp_column = f"Labour - Purchasing power ({staple_name})"
+        pp_stats = _series_stats_from_series(pp_series, target_date=target_date, current_key="current_kg")
+        if pp_stats is not None:
+            frame[pp_column] = pp_series.astype(float).round(2)
+            purchasing_power = {
+                "available": True,
+                "column_name": pp_column,
+                "label": f"{staple_name} purchasing power",
+                "staple_name": staple_name,
+                "staple_source": staple_source,
+                "current_kg": pp_stats["current_kg"],
+                "mom_change_pct": pp_stats["mom_change_pct"],
+                "yoy_change_pct": pp_stats["yoy_change_pct"],
+                "latest_month": pp_stats["latest_month"],
+                "previous_month": pp_stats["previous_month"],
+                "yoy_reference_month": pp_stats["yoy_reference_month"],
+                "unit": f"kg of {staple_name} per day's wage",
+            }
+
+    history = _resolve_labour_history_frame(
+        canonical=canonical,
+        iso3=iso3,
+        target_date=target_date,
+        candidates=candidates,
+        currency_code=str(metadata["currency_code"] or currency_code or "LCU"),
+        history_price_frame=history_price_frame,
+        purchasing_power=purchasing_power,
+    )
+    chart_series = []
+    chart_axis = _price_axis_unit(str(metadata["currency_code"] or currency_code or "LCU"), "day")
+    chart_mode = "nominal_wage"
+    if purchasing_power:
+        chart_mode = "purchasing_power"
+        chart_axis = purchasing_power["unit"]
+        chart_series.append(
+            {
+                "column_name": purchasing_power["column_name"],
+                "label": "Purchasing power",
+                "axis": "primary",
+            }
+        )
+        chart_series.append(
+            {
+                "column_name": primary["column_name"],
+                "label": primary["label"],
+                "axis": "secondary",
+                "axis_label": primary["axis_unit"],
+            }
+        )
+    else:
+        chart_series.append({"column_name": primary["column_name"], "label": primary["label"], "axis": "primary"})
+
+    labour_data = {
+        "available": True,
+        "country": canonical,
+        "currency_code": metadata["currency_code"],
+        "latest_month": max(str(item["latest_month"]) for item in wage_payloads),
+        "primary_series": primary["kind"],
+        "series": wage_payloads,
+        "purchasing_power": purchasing_power,
+        "availability": None,
+        "chart": {
+            "mode": chart_mode,
+            "series": chart_series,
+            "axis_label": chart_axis,
+        },
+        "driver_hint": _labour_driver_hint(primary, purchasing_power),
+        "source": metadata["source"],
+    }
+    return {
+        "series": {column: frame[column] for column in frame.columns},
+        "history": history,
+        "warnings": _dedupe_preserve_order(warnings),
+        "metadata": metadata,
+        "labour_market_data": labour_data,
+    }
+
+
+def _labour_frame_and_payload(
+    df: pd.DataFrame,
+    *,
+    candidate_by_id: dict[int, dict[str, Any]],
+    full_date_index: pd.DatetimeIndex,
+    target_date: pd.Timestamp,
+    currency_code: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], list[dict[str, Any]]]:
+    frame = pd.DataFrame(index=full_date_index)
+    if df.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "kind": item["kind"],
+                "reason": "no_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working = df.copy()
+    working["Commodity ID"] = pd.to_numeric(working["Commodity ID"], errors="coerce")
+    working = working[working["Commodity ID"].notna()].copy()
+    working["Commodity ID"] = working["Commodity ID"].astype(int)
+    working = working[working["Commodity ID"].isin(candidate_by_id.keys())].copy()
+    working["Price"] = pd.to_numeric(working["Price"], errors="coerce")
+    working["Price Date"] = pd.to_datetime(working["Price Date"], errors="coerce")
+    working = working[working["Price"].notna() & working["Price Date"].notna()]
+    if working.empty:
+        return frame, [], [
+            {
+                "commodity_id": item["commodity_id"],
+                "commodity_name": item["commodity_name"],
+                "kind": item["kind"],
+                "reason": "no_valid_price_rows",
+            }
+            for item in candidate_by_id.values()
+        ]
+
+    working["LabourKind"] = working["Commodity ID"].map(lambda cid: candidate_by_id[int(cid)]["kind"])
+    working["Month"] = working["Price Date"].dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        working.groupby(["Month", "LabourKind"], dropna=True)["Price"]
+        .mean()
+        .reset_index()
+    )
+    payloads: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    for kind in sorted(working["LabourKind"].dropna().unique(), key=_labour_sort_key):
+        column = _labour_column_name(str(kind))
+        series = (
+            monthly[monthly["LabourKind"] == kind]
+            .set_index("Month")["Price"]
+            .reindex(full_date_index)
+            .astype(float)
+            .round(2)
+        )
+        stats = _series_stats_from_series(series, target_date=target_date, current_key="current_wage")
+        kind_rows = working[working["LabourKind"] == kind]
+        kind_candidates = [
+            candidate_by_id[int(cid)]
+            for cid in sorted(kind_rows["Commodity ID"].dropna().astype(int).unique())
+            if int(cid) in candidate_by_id
+        ]
+        if stats is None:
+            for candidate in kind_candidates:
+                omitted.append(
+                    {
+                        "commodity_id": candidate["commodity_id"],
+                        "commodity_name": candidate["commodity_name"],
+                        "kind": candidate["kind"],
+                        "reason": "insufficient_monthly_observations",
+                    }
+                )
+            continue
+        unit = _module_unit_from_rows(kind_rows, default="day")
+        frame[column] = series
+        payloads.append(
+            {
+                "kind": str(kind),
+                "label": _labour_display_name(str(kind)),
+                "column_name": column,
+                "commodity_ids": [int(item["commodity_id"]) for item in kind_candidates],
+                "commodity_names": [str(item["commodity_name"]) for item in kind_candidates],
+                "current_wage": stats["current_wage"],
+                "mom_change_pct": stats["mom_change_pct"],
+                "yoy_change_pct": stats["yoy_change_pct"],
+                "latest_month": stats["latest_month"],
+                "previous_month": stats["previous_month"],
+                "yoy_reference_month": stats["yoy_reference_month"],
+                "unit": unit,
+                "currency_code": currency_code,
+                "axis_unit": _price_axis_unit(currency_code, unit),
+            }
+        )
+    payloads.sort(key=lambda item: _labour_sort_key(str(item["kind"])))
+    return frame, payloads, omitted
+
+
+def _select_labour_staple_series(
+    price_frame: pd.DataFrame,
+    *,
+    basket_components: list[dict[str, Any]],
+    valid_names: list[str],
+) -> Optional[tuple[str, pd.Series, str]]:
+    if price_frame is None or price_frame.empty:
+        return None
+    for component in basket_components:
+        name = str(component.get("commodity_name") or "").strip()
+        unit = component.get("databridges_unit")
+        if name in price_frame.columns and _is_staple_name(name) and _unit_key(unit) in {"kg", ""}:
+            series = pd.to_numeric(price_frame[name], errors="coerce")
+            if series.dropna().gt(0).any():
+                return name, series, "food_basket"
+    candidates: list[tuple[int, str, pd.Series]] = []
+    for name in valid_names:
+        if not isinstance(name, str) or name not in price_frame.columns:
+            continue
+        if not _is_staple_name(name):
+            continue
+        if _is_module_auxiliary_column(name):
+            continue
+        series = pd.to_numeric(price_frame[name], errors="coerce")
+        usable = int(series.dropna().gt(0).sum())
+        if usable <= 0:
+            continue
+        candidates.append((usable, name, series))
+    if not candidates:
+        for name in price_frame.columns:
+            if not isinstance(name, str) or not _is_staple_name(name) or _is_module_auxiliary_column(name):
+                continue
+            series = pd.to_numeric(price_frame[name], errors="coerce")
+            usable = int(series.dropna().gt(0).sum())
+            if usable > 0:
+                candidates.append((usable, name, series))
+    if not candidates:
+        return None
+    usable, name, series = sorted(candidates, key=lambda item: (-item[0], item[1].lower()))[0]
+    return name, series, "report_data"
+
+
+def _is_staple_name(name: Any) -> bool:
+    text = str(name or "").strip().lower()
+    return any(token in text for token in _STAPLE_NAME_TOKENS)
+
+
+def _is_module_auxiliary_column(name: Any) -> bool:
+    text = str(name or "").strip().lower()
+    return any(
+        token in text
+        for token in (
+            "exchange",
+            "fuel",
+            "petrol",
+            "diesel",
+            "gasoline",
+            "wage",
+            "labour",
+            "labor",
+            "animal products -",
+            "livestock -",
+            "purchasing power",
+            "milling",
+            "transport",
+            "freight",
+        )
+    )
+
+
+def _resolve_labour_history_frame(
+    *,
+    canonical: str,
+    iso3: str,
+    target_date: pd.Timestamp,
+    candidates: list[dict[str, Any]],
+    currency_code: str,
+    history_price_frame: pd.DataFrame,
+    purchasing_power: Optional[dict[str, Any]],
+) -> pd.DataFrame:
+    history_start = target_date - pd.DateOffset(months=_CHART_HISTORY_MONTHS - 1)
+    history_index = pd.date_range(start=history_start, end=target_date, freq="MS")
+    commodity_ids = _dedupe_ints([item["commodity_id"] for item in candidates])
+    candidate_by_id = {int(item["commodity_id"]): item for item in candidates}
+    name_by_id = {int(item["commodity_id"]): str(item["commodity_name"]) for item in candidates}
+    try:
+        records = _read_report_price_records(
+            iso3,
+            history_start.strftime("%Y-%m-%d"),
+            (target_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            commodity_ids=commodity_ids,
+        )
+        df = _price_records_to_report_df(records, canonical, iso3, name_by_id)
+        if not df.empty:
+            df = df[df["Commodity ID"].isin(commodity_ids)].copy()
+        df, _selected_currency, _excluded = _select_report_currency(
+            df,
+            requested_code=currency_code,
+            country=canonical,
+        )
+        frame, payloads, _omitted = _labour_frame_and_payload(
+            df,
+            candidate_by_id=candidate_by_id,
+            full_date_index=history_index,
+            target_date=target_date,
+            currency_code=currency_code,
+        )
+        if purchasing_power and payloads and isinstance(history_price_frame, pd.DataFrame):
+            primary_column = payloads[0]["column_name"]
+            staple_name = purchasing_power.get("staple_name")
+            pp_column = purchasing_power.get("column_name")
+            if (
+                primary_column in frame.columns
+                and isinstance(staple_name, str)
+                and staple_name in history_price_frame.columns
+                and isinstance(pp_column, str)
+            ):
+                staple_series = pd.to_numeric(history_price_frame[staple_name], errors="coerce").reindex(history_index)
+                pp_series = (
+                    pd.to_numeric(frame[primary_column], errors="coerce") / staple_series
+                ).replace([np.inf, -np.inf], np.nan)
+                frame[pp_column] = pp_series.astype(float).round(2)
+        return frame
+    except Exception as exc:
+        logger.warning("Could not build labour market history for %s: %s", iso3, _safe_adapter_error(exc))
+        return pd.DataFrame(index=history_index)
+
+
+def _labour_driver_hint(primary_series: dict[str, Any], purchasing_power: Optional[dict[str, Any]]) -> str:
+    mom = primary_series.get("mom_change_pct")
+    try:
+        mom_value = float(mom)
+    except Exception:
+        return "Movement should be attributed cautiously to seasonal labour demand, harvest cycles, or broader economic conditions."
+    if mom_value > 2.0:
+        return "The wage increase is consistent with stronger seasonal labour demand, harvest activity, or broader economic conditions."
+    if mom_value < -2.0:
+        return "The wage decline is consistent with weaker seasonal labour demand, harvest-cycle effects, or broader economic pressure."
+    if purchasing_power:
+        return "Stable nominal wages mean food purchasing power is driven mainly by staple price movements."
+    return "The limited wage movement is consistent with broadly stable labour-market conditions."
 
 
 def _resolve_selected_currency_code(
@@ -2639,7 +3722,7 @@ def calculate_statistics_from_csv(
                 stats["exchange_rate"]["official"] = fx_item
             else:
                 stats["exchange_rate"]["unofficial"] = fx_item
-        elif any(token in column.lower() for token in ["exchange", "fuel", "wage", "milling"]):
+        elif _is_module_auxiliary_column(column):
             stats["auxiliary"][column] = item
         elif column in commodities:
             stats["commodities"][column] = item

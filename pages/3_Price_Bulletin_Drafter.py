@@ -531,7 +531,11 @@ with st.form("market_monitor_form"):
     currency_default = (country_currency.get(country) or "USD") if isinstance(country, str) else "USD"
     currency_code = st.text_input("Currency Code", value=str(currency_default))
 
-    enabled_modules = st.multiselect("Enabled Modules", options=["exchange_rate", "fuel_energy"], default=[])
+    enabled_modules = st.multiselect(
+        "Enabled Modules",
+        options=["exchange_rate", "fuel_energy", "livestock_animal_products", "labour_market"],
+        default=[],
+    )
 
     previous_report_text = st.text_area("Previous Report Text (optional)", value="", height=120)
 

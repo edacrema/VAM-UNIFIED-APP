@@ -134,7 +134,8 @@ class GenerateReportInput(BaseModel):
         default=[],
         description=(
             "Optional modules to enable "
-            "(exchange_rate uses DataBridges FX first, fuel_energy uses transport fuel price series)"
+            "(exchange_rate uses DataBridges FX first, fuel_energy uses transport fuel price series, "
+            "livestock_animal_products uses animal product price series, labour_market uses wage series)"
         )
     )
     previous_report_text: str = Field(
@@ -165,6 +166,8 @@ class GenerateReportOutput(BaseModel):
     cache_metadata: Dict[str, Any] = {}
     food_basket: Dict[str, Any] = {}
     fuel_energy_data: Optional[Dict[str, Any]] = None
+    livestock_animal_products_data: Optional[Dict[str, Any]] = None
+    labour_market_data: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True
