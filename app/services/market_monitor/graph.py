@@ -41,6 +41,18 @@ from .data_loader import (
     resolve_report_price_data,
 )
 from .food_basket import get_active_basket_for_report
+from .i18n import (
+    format_currency_value,
+    format_decimal_value,
+    format_month_label,
+    format_percent_value,
+    localize_axis_label,
+    normalize_generated_text,
+    prompt_base_context,
+    resolve_report_language,
+    t,
+)
+from .prompt_registry import render_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +108,9 @@ class MarketReportState(TypedDict):
     previous_report_text: str
     currency_code: str
     use_mock_data: bool
+    language: str
+    locale: str
+    language_source: str
     
     # ===== MODULE CONFIG =====
     enabled_modules: List[str]
@@ -150,7 +165,10 @@ def create_initial_state(
     news_start_date: Optional[str] = None,
     news_end_date: Optional[str] = None,
     previous_report_text: str = "",
-    use_mock_data: bool = False
+    use_mock_data: bool = False,
+    language: str = "en",
+    locale: str = "en_US",
+    language_source: str = "default",
 ) -> MarketReportState:
     """Crea stato iniziale per il grafo."""
     return MarketReportState(
@@ -164,6 +182,9 @@ def create_initial_state(
         previous_report_text=previous_report_text,
         currency_code=currency_code,
         use_mock_data=use_mock_data,
+        language=language,
+        locale=locale,
+        language_source=language_source,
         enabled_modules=enabled_modules,
         time_series_data_national=None,
         time_series_data_regional=None,
@@ -222,18 +243,33 @@ def robust_json_parse(response: Any) -> Optional[Dict]:
         return None
 
 
-def format_pct(value) -> str:
-    """Formatta la percentuale con frecce ↑/↓."""
-    try:
-        val = float(value)
-        if val > 0:
-            return f"↑{abs(val):.1f}%"
-        elif val < 0:
-            return f"↓{abs(val):.1f}%"
-        else:
-            return f"{val:.1f}%"
-    except (TypeError, ValueError):
-        return "N/A"
+def _state_language(state: Dict[str, Any]) -> str:
+    return str(state.get("language") or "en").strip().lower() or "en"
+
+
+def _json_for_prompt(value: Any) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _report_month_for_prompt(state: Dict[str, Any]) -> str:
+    return format_month_label(state.get("time_period"), _state_language(state))
+
+
+def _normalize_output_text(text: Any, state: Dict[str, Any]) -> tuple[str, List[str]]:
+    refs = state.get("document_references") or []
+    titles = [str(ref.get("title") or "") for ref in refs if isinstance(ref, dict)]
+    return normalize_generated_text(text, _state_language(state), reference_titles=titles)
+
+
+def _plain_or_localized_number(value: Any, language: str, *, decimals: int = 1) -> str:
+    if language == "en":
+        return str(value)
+    return format_decimal_value(value, language, decimals=decimals)
+
+
+def format_pct(value, language: str = "en") -> str:
+    """Format percentage deltas with direction arrows."""
+    return format_percent_value(value, language, include_arrow=True)
 
 
 def _is_auxiliary_series(name: str) -> bool:
@@ -347,37 +383,82 @@ def _state_currency_code(state: Dict[str, Any]) -> str:
     return code or "LCU"
 
 
-def _currency_axis_label(label: str, currency_code: str) -> str:
-    return f"{label} ({currency_code or 'LCU'})"
+def _currency_axis_label(label: str, currency_code: str, language: str = "en") -> str:
+    label_key = f"chart.axis.{str(label or '').strip().lower()}"
+    try:
+        localized_label = t(language, label_key)
+    except KeyError:
+        localized_label = str(label or "")
+    return t(language, "chart.axis.currency", label=localized_label, currency=currency_code or "LCU")
 
 
-def _fx_axis_label(currency_code: str) -> str:
+def _fx_axis_label(currency_code: str, language: str = "en") -> str:
     code = str(currency_code or "LCU").strip().upper() or "LCU"
-    return f"{code} per 1 USD"
+    return t(language, "chart.axis.fx", currency=code)
 
 
-def _fuel_axis_label(currency_code: str) -> str:
+def _fuel_axis_label(currency_code: str, language: str = "en") -> str:
     code = str(currency_code or "LCU").strip().upper() or "LCU"
-    return f"{code}/Litre"
+    return t(language, "chart.axis.fuel", currency=code)
 
 
-def _animal_axis_label(data: Dict[str, Any], currency_code: str) -> str:
+def _animal_axis_label(data: Dict[str, Any], currency_code: str, language: str = "en") -> str:
     chart = data.get("chart") or {}
     axis = chart.get("axis_label")
     if axis:
-        return str(axis)
+        return localize_axis_label(axis, language)
     code = str(currency_code or "LCU").strip().upper() or "LCU"
     unit = chart.get("unit") or "unit"
-    return f"{code}/{unit}"
+    return t(language, "chart.axis.unit", currency=code, unit=unit)
 
 
-def _labour_axis_label(data: Dict[str, Any], currency_code: str) -> str:
+def _labour_axis_label(data: Dict[str, Any], currency_code: str, language: str = "en") -> str:
     chart = data.get("chart") or {}
     axis = chart.get("axis_label")
     if axis:
-        return str(axis)
+        return localize_axis_label(axis, language)
     code = str(currency_code or "LCU").strip().upper() or "LCU"
-    return f"{code}/day"
+    return t(language, "chart.axis.day", currency=code)
+
+
+def _localized_category_name(category: str, language: str) -> str:
+    key = f"commodity_category.{_slugify(category)}"
+    try:
+        return t(language, key)
+    except KeyError:
+        return str(category)
+
+
+def _localized_page_suffix(category: str, page_idx: int, page_count: int, language: str) -> str:
+    localized = _localized_category_name(category, language)
+    if page_count <= 1:
+        return localized
+    return t(language, "chart.page_suffix", category=localized, page_idx=page_idx, page_count=page_count)
+
+
+def _set_localized_numeric_axis(ax: Any, language: str) -> None:
+    try:
+        import matplotlib.ticker as mticker
+
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _pos: format_decimal_value(value, language, decimals=0))
+        )
+    except Exception:
+        return
+
+
+def _set_localized_month_axis(ax: Any, language: str) -> None:
+    try:
+        import matplotlib.dates as mdates
+        import matplotlib.ticker as mticker
+
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda value, _pos: format_month_label(mdates.num2date(value), language, width="abbrev")
+            )
+        )
+    except Exception:
+        return
 
 
 def _normalise_time_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -677,41 +758,41 @@ class ExchangeRateModule(ReportModule):
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
         """Genera la sezione narrativa."""
         exchange_data = state.get("exchange_rate_data", {})
+        language = _state_language(state)
         
         if not exchange_data or exchange_data.get("current_rate") is None:
             raise RuntimeError("Exchange rate data is unavailable (no mock fallback is permitted)")
         
-        prompt = f"""You are a WFP economic analyst writing the Exchange Rate Analysis section.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-
-CONTEXT:
-- Country: {state.get('country', 'Unknown')}
-- Currency: {exchange_data.get('currency_code', 'LCU')}
-- Current exchange rate: {exchange_data.get('current_rate', 'N/A')} {exchange_data.get('unit') or 'local currency per 1 USD'}
-- Month-on-month change: {exchange_data.get('monthly_change_pct', 'N/A')}%
-- Year-on-year change: {exchange_data.get('yearly_change_pct', 'N/A')}%
-- Recent trend: {exchange_data.get('trend', 'unknown')}
-- Quotation direction: local currency per 1 USD; higher values indicate local-currency depreciation.
-
-Write a concise analysis (100-150 words) covering:
-1. Current exchange rate status and recent trend
-2. Month-on-month change and its significance for import costs
-3. Year-on-year comparison showing longer-term trajectory
-4. Implications for food prices (wheat, rice, cooking oil, fuel)
-
-Return ONLY the narrative text. No headers or formatting."""
+        prompt_context = {
+            **prompt_base_context(language),
+            "country": state.get("country", "Unknown"),
+            "currency_code": exchange_data.get("currency_code", "LCU"),
+            "current_rate": exchange_data.get("current_rate", "N/A"),
+            "current_rate_localized": format_decimal_value(exchange_data.get("current_rate"), language, decimals=1),
+            "unit": exchange_data.get("unit") or "local currency per 1 USD",
+            "monthly_change_pct": exchange_data.get("monthly_change_pct", "N/A"),
+            "monthly_change_pct_localized": format_percent_value(exchange_data.get("monthly_change_pct"), language),
+            "yearly_change_pct": exchange_data.get("yearly_change_pct", "N/A"),
+            "yearly_change_pct_localized": format_percent_value(exchange_data.get("yearly_change_pct"), language),
+            "trend": exchange_data.get("trend", "unknown"),
+        }
+        prompt = render_prompt("exchange_rate", language, prompt_context)
         
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             narrative = response.content if hasattr(response, 'content') else str(response)
+            narrative, _warnings = _normalize_output_text(narrative, state)
         except Exception as e:
             logger.error(f"Error generating narrative: {e}")
-            narrative = f"The {exchange_data.get('currency_code')} is at {exchange_data.get('current_rate')} per USD."
+            narrative = t(
+                language,
+                "fallback.exchange",
+                currency=exchange_data.get("currency_code", "LCU"),
+                rate=format_decimal_value(exchange_data.get("current_rate"), language, decimals=1),
+            )
         
         return {
-            "section_title": self.display_name,
+            "section_title": t(language, "module.exchange_rate"),
             "narrative": narrative,
             "key_metrics": {
                 "current_rate": exchange_data.get("current_rate"),
@@ -746,44 +827,33 @@ class FuelEnergyModule(ReportModule):
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
         fuel_data = state.get("fuel_energy_data") or {}
         series = fuel_data.get("series") or []
+        language = _state_language(state)
         if not fuel_data.get("available") or not series:
             raise RuntimeError("Fuel & Energy data is unavailable")
 
-        prompt = f"""You are a WFP market analyst writing the Fuel & Energy section of a food price bulletin.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Write one concise paragraph, 3-5 sentences, no heading, no bullets.
-- Keep the focus on transport fuels and food-price transmission.
-- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
-
-COUNTRY AND PERIOD:
-- Country: {state.get('country', 'Unknown')}
-- Report period: {state.get('time_period', 'Unknown')}
-
-FUEL DATA:
-{json.dumps(fuel_data, indent=2)}
-
-CONTEXTUAL MARKET SIGNALS:
-{json.dumps(state.get('trend_analysis') or {}, indent=2)}
-
-Write the paragraph in this exact order:
-1. Lead with diesel current national retail price, unit, month-on-month change, and year-on-year change if available; add petrol/gasoline in the same sentence if available.
-2. Attribute the movement to the most likely driver: international oil/energy prices, regional supply/logistics constraints, or domestic policy/regulated/administered pricing.
-3. Explain implications for food prices and households: fuel affects transport/distribution costs, staples, food baskets, and purchasing power.
-4. If regional_disparities are present, add one short clause on the notable disparity; otherwise omit this.
-
-Return ONLY the narrative text."""
+        prompt = render_prompt(
+            "fuel_energy",
+            language,
+            {
+                **prompt_base_context(language),
+                "country": state.get("country", "Unknown"),
+                "time_period": state.get("time_period", "Unknown"),
+                "report_month_localized": _report_month_for_prompt(state),
+                "fuel_data_json": _json_for_prompt(fuel_data),
+                "trend_analysis_json": _json_for_prompt(state.get("trend_analysis") or {}),
+            },
+        )
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             narrative = response.content if hasattr(response, "content") else str(response)
+            narrative, _warnings = _normalize_output_text(narrative, state)
         except Exception as e:
             logger.error(f"Fuel & Energy narrative generation failed: {e}")
             narrative = self._fallback_narrative(state, fuel_data)
 
         return {
-            "section_title": self.display_name,
+            "section_title": t(language, "module.fuel_energy"),
             "narrative": str(narrative).strip(),
             "key_metrics": {
                 "series": series,
@@ -793,6 +863,7 @@ Return ONLY the narrative text."""
         }
 
     def _fallback_narrative(self, state: dict, fuel_data: dict[str, Any]) -> str:
+        language = _state_language(state)
         series = fuel_data.get("series") or []
         unit = fuel_data.get("unit") or "LCU/Litre"
         by_kind = {item.get("kind"): item for item in series if isinstance(item, dict)}
@@ -801,12 +872,21 @@ Return ONLY the narrative text."""
 
         def metric_sentence(item: dict[str, Any]) -> str:
             label = str(item.get("label") or "Fuel").lower()
-            current = item.get("current_price")
-            month = item.get("latest_month")
-            mom = format_pct(item.get("mom_change_pct"))
+            current = _plain_or_localized_number(item.get("current_price"), language, decimals=1)
+            month = format_month_label(item.get("latest_month"), language) if language != "en" else item.get("latest_month")
+            mom = format_pct(item.get("mom_change_pct"), language)
             yoy_raw = item.get("yoy_change_pct")
-            yoy = "" if yoy_raw is None else f" and {format_pct(yoy_raw)} year-on-year"
-            return f"{label} averaged {current} {unit} in {month}, {mom} month-on-month{yoy}"
+            yoy = "" if yoy_raw is None else t(language, "fallback.yoy", value=format_pct(yoy_raw, language))
+            return t(
+                language,
+                "fallback.fuel.metric",
+                label=label,
+                current=current,
+                unit=unit,
+                month=month,
+                mom=mom,
+                yoy=yoy,
+            )
 
         first = metric_sentence(diesel)
         if petrol:
@@ -814,19 +894,19 @@ Return ONLY the narrative text."""
         else:
             first = f"{first}."
         driver = fuel_data.get("driver_hint") or (
-            "The movement is consistent with fuel-market, logistics, or administered price conditions."
+            t(language, "fallback.fuel.driver")
         )
-        implication = (
-            "Fuel prices affect transport and distribution costs, feeding into staple and food-basket prices "
-            "and shaping household purchasing power."
-        )
+        implication = t(language, "fallback.fuel.implication")
         regional = ""
         disparities = fuel_data.get("regional_disparities") or []
         if disparities:
             item = disparities[0]
-            regional = (
-                f" Regional differences were notable, with {item.get('highest_region')} above "
-                f"{item.get('lowest_region')} for {str(item.get('label') or 'fuel').lower()}."
+            regional = t(
+                language,
+                "fallback.fuel.regional",
+                highest=item.get("highest_region"),
+                lowest=item.get("lowest_region"),
+                label=str(item.get("label") or "fuel").lower(),
             )
         return f"{first} {driver} {implication}{regional}"
 
@@ -855,44 +935,33 @@ class LivestockAnimalProductsModule(ReportModule):
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
         data = state.get("livestock_animal_products_data") or {}
         series = data.get("series") or []
+        language = _state_language(state)
         if not data.get("available") or not series:
             raise RuntimeError("Livestock & Animal Products data is unavailable")
 
-        prompt = f"""You are a WFP market analyst writing the Livestock & Animal Products section of a food price bulletin.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Write one concise paragraph, 3-5 sentences, no heading, no bullets.
-- Discuss only the animal items present in LIVESTOCK_AND_ANIMAL_DATA. Do not mention absent commodities.
-- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
-
-COUNTRY AND PERIOD:
-- Country: {state.get('country', 'Unknown')}
-- Report period: {state.get('time_period', 'Unknown')}
-
-LIVESTOCK_AND_ANIMAL_DATA:
-{json.dumps(data, indent=2)}
-
-CONTEXTUAL MARKET SIGNALS:
-{json.dumps(state.get('trend_analysis') or {}, indent=2)}
-
-Write the paragraph in this exact order:
-1. Lead with available animal product price levels and MoM/YoY changes in native units; include the live-animal series only if present.
-2. Attribute the movement to likely seasonal/holiday demand, feed/pasture/water conditions, supply/production, or import dependence.
-3. Explain implications for animal-source protein affordability and dietary diversity. If live_animal data is present, also mention pastoralist income or livestock-to-cereal terms of trade.
-4. If regional_disparities are present, add one short clause on the notable disparity; otherwise omit this.
-
-Return ONLY the narrative text."""
+        prompt = render_prompt(
+            "livestock_animal_products",
+            language,
+            {
+                **prompt_base_context(language),
+                "country": state.get("country", "Unknown"),
+                "time_period": state.get("time_period", "Unknown"),
+                "report_month_localized": _report_month_for_prompt(state),
+                "livestock_data_json": _json_for_prompt(data),
+                "trend_analysis_json": _json_for_prompt(state.get("trend_analysis") or {}),
+            },
+        )
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             narrative = response.content if hasattr(response, "content") else str(response)
+            narrative, _warnings = _normalize_output_text(narrative, state)
         except Exception as e:
             logger.error(f"Livestock & Animal Products narrative generation failed: {e}")
-            narrative = self._fallback_narrative(data)
+            narrative = self._fallback_narrative(state, data)
 
         return {
-            "section_title": self.display_name,
+            "section_title": t(language, "module.livestock_animal_products"),
             "narrative": str(narrative).strip(),
             "key_metrics": {
                 "series": series,
@@ -901,31 +970,49 @@ Return ONLY the narrative text."""
             },
         }
 
-    def _fallback_narrative(self, data: dict[str, Any]) -> str:
+    def _fallback_narrative(self, state: dict, data: dict[str, Any]) -> str:
+        language = _state_language(state)
         series = [item for item in data.get("series") or [] if isinstance(item, dict)]
         parts = []
         for item in series[:4]:
-            yoy = "" if item.get("yoy_change_pct") is None else f" and {format_pct(item.get('yoy_change_pct'))} year-on-year"
+            yoy = (
+                ""
+                if item.get("yoy_change_pct") is None
+                else t(language, "fallback.yoy", value=format_pct(item.get("yoy_change_pct"), language))
+            )
             parts.append(
-                f"{item.get('label')} averaged {item.get('current_price')} {item.get('axis_unit')} "
-                f"in {item.get('latest_month')}, {format_pct(item.get('mom_change_pct'))} month-on-month{yoy}"
+                t(
+                    language,
+                    "fallback.livestock.metric",
+                    label=item.get("label"),
+                    current=_plain_or_localized_number(item.get("current_price"), language, decimals=1),
+                    unit=item.get("axis_unit"),
+                    month=(
+                        format_month_label(item.get("latest_month"), language)
+                        if language != "en"
+                        else item.get("latest_month")
+                    ),
+                    mom=format_pct(item.get("mom_change_pct"), language),
+                    yoy=yoy,
+                )
             )
         first = "; ".join(parts).rstrip() + "."
         driver = data.get("driver_hint") or (
-            "The movement is consistent with seasonal demand, supply, feed, pasture, or water conditions."
+            t(language, "fallback.livestock.driver")
         )
-        implication = (
-            "These prices shape animal-source protein affordability and dietary diversity for households."
-        )
+        implication = t(language, "fallback.livestock.implication")
         if any(item.get("group") == "live_animal" for item in series):
-            implication += " Live-animal prices also affect pastoralist income and livestock-to-cereal terms of trade."
+            implication += t(language, "fallback.livestock.live_animal")
         regional = ""
         disparities = data.get("regional_disparities") or []
         if disparities:
             item = disparities[0]
-            regional = (
-                f" Regional differences were notable, with {item.get('highest_region')} above "
-                f"{item.get('lowest_region')} for {str(item.get('label') or 'animal products').lower()}."
+            regional = t(
+                language,
+                "fallback.livestock.regional",
+                highest=item.get("highest_region"),
+                lowest=item.get("lowest_region"),
+                label=str(item.get("label") or "animal products").lower(),
             )
         return f"{first} {driver} {implication}{regional}"
 
@@ -954,44 +1041,33 @@ class LabourMarketModule(ReportModule):
     def generate_section(self, state: dict, llm) -> Dict[str, Any]:
         data = state.get("labour_market_data") or {}
         series = data.get("series") or []
+        language = _state_language(state)
         if not data.get("available") or not series:
             raise RuntimeError("Labour Market data is unavailable")
 
-        prompt = f"""You are a WFP market analyst writing the Labour Market section of a food price bulletin.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Write one concise paragraph, 3-4 sentences, no heading, no bullets.
-- Discuss only wage, availability, and purchasing-power elements present in LABOUR_DATA. Do not invent labour availability if it is null.
-- Hedge drivers appropriately with "likely" or "consistent with" unless explicitly supported.
-
-COUNTRY AND PERIOD:
-- Country: {state.get('country', 'Unknown')}
-- Report period: {state.get('time_period', 'Unknown')}
-
-LABOUR_DATA:
-{json.dumps(data, indent=2)}
-
-CONTEXTUAL MARKET SIGNALS:
-{json.dumps(state.get('trend_analysis') or {}, indent=2)}
-
-Write the paragraph in this exact order:
-1. Lead with the casual/unskilled daily wage where available, otherwise the primary daily wage, including MoM and YoY where available; include skilled wage only if present.
-2. Mention labour availability only if LABOUR_DATA.availability is present.
-3. If purchasing_power is present, express kg of the named staple obtainable from one day's wage and whether it improved or eroded.
-4. Attribute the movement to likely seasonal labour demand, harvest cycle, or broader economic conditions.
-
-Return ONLY the narrative text."""
+        prompt = render_prompt(
+            "labour_market",
+            language,
+            {
+                **prompt_base_context(language),
+                "country": state.get("country", "Unknown"),
+                "time_period": state.get("time_period", "Unknown"),
+                "report_month_localized": _report_month_for_prompt(state),
+                "labour_data_json": _json_for_prompt(data),
+                "trend_analysis_json": _json_for_prompt(state.get("trend_analysis") or {}),
+            },
+        )
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             narrative = response.content if hasattr(response, "content") else str(response)
+            narrative, _warnings = _normalize_output_text(narrative, state)
         except Exception as e:
             logger.error(f"Labour Market narrative generation failed: {e}")
-            narrative = self._fallback_narrative(data)
+            narrative = self._fallback_narrative(state, data)
 
         return {
-            "section_title": self.display_name,
+            "section_title": t(language, "module.labour_market"),
             "narrative": str(narrative).strip(),
             "key_metrics": {
                 "series": series,
@@ -1000,32 +1076,58 @@ Return ONLY the narrative text."""
             },
         }
 
-    def _fallback_narrative(self, data: dict[str, Any]) -> str:
+    def _fallback_narrative(self, state: dict, data: dict[str, Any]) -> str:
+        language = _state_language(state)
         series = [item for item in data.get("series") or [] if isinstance(item, dict)]
         primary = next((item for item in series if item.get("kind") == "casual_unskilled"), series[0])
-        yoy = "" if primary.get("yoy_change_pct") is None else f" and {format_pct(primary.get('yoy_change_pct'))} year-on-year"
-        first = (
-            f"{primary.get('label')} averaged {primary.get('current_wage')} {primary.get('axis_unit')} "
-            f"in {primary.get('latest_month')}, {format_pct(primary.get('mom_change_pct'))} month-on-month{yoy}."
+        yoy = (
+            ""
+            if primary.get("yoy_change_pct") is None
+            else t(language, "fallback.yoy", value=format_pct(primary.get("yoy_change_pct"), language))
+        )
+        first = t(
+            language,
+            "fallback.labour.metric",
+            label=primary.get("label"),
+            current=_plain_or_localized_number(primary.get("current_wage"), language, decimals=1),
+            unit=primary.get("axis_unit"),
+            month=(
+                format_month_label(primary.get("latest_month"), language)
+                if language != "en"
+                else primary.get("latest_month")
+            ),
+            mom=format_pct(primary.get("mom_change_pct"), language),
+            yoy=yoy,
         )
         skilled = next((item for item in series if item is not primary and item.get("kind") == "skilled_qualified"), None)
         if skilled:
-            first = (
-                f"{first} {skilled.get('label')} averaged {skilled.get('current_wage')} "
-                f"{skilled.get('axis_unit')}."
+            first = first + t(
+                language,
+                "fallback.labour.skilled",
+                label=skilled.get("label"),
+                current=_plain_or_localized_number(skilled.get("current_wage"), language, decimals=1),
+                unit=skilled.get("axis_unit"),
             )
         availability = ""
         if data.get("availability"):
-            availability = f" Labour availability was {data.get('availability')}."
+            availability = t(language, "fallback.labour.availability", availability=data.get("availability"))
         pp = data.get("purchasing_power")
         purchasing = ""
         if isinstance(pp, dict):
-            purchasing = (
-                f" One day's wage bought about {pp.get('current_kg')} kg of {pp.get('staple_name')} "
-                f"in {pp.get('latest_month')}, {format_pct(pp.get('mom_change_pct'))} month-on-month."
+            purchasing = t(
+                language,
+                "fallback.labour.purchasing_power",
+                kg=_plain_or_localized_number(pp.get("current_kg"), language, decimals=2),
+                staple=pp.get("staple_name"),
+                month=(
+                    format_month_label(pp.get("latest_month"), language)
+                    if language != "en"
+                    else pp.get("latest_month")
+                ),
+                mom=format_pct(pp.get("mom_change_pct"), language),
             )
         driver = data.get("driver_hint") or (
-            "The movement is consistent with seasonal labour demand, harvest-cycle effects, or broader economic conditions."
+            t(language, "fallback.labour.driver")
         )
         return f"{first}{availability} {purchasing} {driver}".strip()
 
@@ -1161,6 +1263,7 @@ def node_data_agent(state: MarketReportState) -> dict:
 
     country = state["country"]
     use_mock = state.get("use_mock_data", False)
+    language = _state_language(state)
     requested_commodities = state.get("commodity_list", []) or []
     commodity_list = _dedupe_text(requested_commodities)
 
@@ -1248,10 +1351,15 @@ def node_data_agent(state: MarketReportState) -> dict:
             latest_component_names = food_basket_stats.get("latest_component_names") or []
             if missing_latest_components and selected_component_count:
                 warnings.append(
-                    f"Food basket for {state['time_period']} is based on "
-                    f"{latest_component_count} of {selected_component_count} selected commodities "
-                    f"with target-month data ({', '.join(latest_component_names) or 'none'}). "
-                    f"Missing target-month components: {', '.join(missing_latest_components)}."
+                    t(
+                        language,
+                        "warning.partial_basket",
+                        period=state["time_period"],
+                        latest_count=latest_component_count,
+                        selected_count=selected_component_count,
+                        latest_names=", ".join(latest_component_names) or "none",
+                        missing_names=", ".join(missing_latest_components),
+                    )
                 )
             
             logger.info(
@@ -1314,17 +1422,25 @@ def node_graph_designer(state: MarketReportState) -> dict:
         if history_json:
             df_history = _normalise_time_index(pd.read_json(io.StringIO(history_json)))
         currency_code = _state_currency_code(state)
+        language = _state_language(state)
         
         # 1. Food Basket Trend
         fig, ax = plt.subplots(figsize=(10, 5))
         if "FoodBasket" in df_national.columns and df_national["FoodBasket"].notna().any():
-            ax.plot(df_national.index, df_national["FoodBasket"],
-                   marker='o', linewidth=2, color='#1f77b4', label="Current")
+            ax.plot(
+                df_national.index,
+                df_national["FoodBasket"],
+                marker='o',
+                linewidth=2,
+                color='#1f77b4',
+                label=t(language, "chart.label.current"),
+            )
             _plot_history_overlays(ax, df_history, pd.DatetimeIndex(df_national.index), "FoodBasket", color="#1f77b4")
-            ax.set_title(f"Food Basket Cost Trend - {state['country']}", fontweight='bold')
-            ax.set_ylabel(_currency_axis_label("Cost", currency_code))
+            ax.set_title(t(language, "chart.title.food_basket", country=state["country"]), fontweight='bold')
+            ax.set_ylabel(_currency_axis_label("Cost", currency_code, language))
+            _set_localized_numeric_axis(ax, language)
             ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            _set_localized_month_axis(ax, language)
             plt.xticks(rotation=45)
             plt.tight_layout()
             
@@ -1384,13 +1500,15 @@ def node_graph_designer(state: MarketReportState) -> dict:
                                 color=line.get_color(),
                                 label_prefix=col,
                             )
-                    title_suffix = f"{cat}"
-                    if len(pages) > 1:
-                        title_suffix = f"{cat} (Page {page_idx}/{len(pages)})"
-                    ax.set_title(f"Commodity Price Trends - {state['country']} - {title_suffix}", fontweight='bold')
-                    ax.set_ylabel(_currency_axis_label("Price", currency_code))
+                    title_suffix = _localized_page_suffix(cat, page_idx, len(pages), language)
+                    ax.set_title(
+                        t(language, "chart.title.commodity", country=state["country"], title_suffix=title_suffix),
+                        fontweight='bold',
+                    )
+                    ax.set_ylabel(_currency_axis_label("Price", currency_code, language))
+                    _set_localized_numeric_axis(ax, language)
                     ax.legend(loc='upper left')
-                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+                    _set_localized_month_axis(ax, language)
                     plt.xticks(rotation=45)
                     plt.tight_layout()
 
@@ -1406,18 +1524,19 @@ def node_graph_designer(state: MarketReportState) -> dict:
 
         # 3. Exchange Rate Trend
         fx_cols = [
-            ("ExchangeRate", "Official", "#6f42c1"),
-            ("ExchangeRateUnofficial", "Unofficial", "#d35400"),
+            ("ExchangeRate", t(language, "chart.label.official"), "#6f42c1"),
+            ("ExchangeRateUnofficial", t(language, "chart.label.unofficial"), "#d35400"),
         ]
         if any(col in df_national.columns and df_national[col].dropna().any() for col, _label, _color in fx_cols):
             fig, ax = plt.subplots(figsize=(10, 5))
             for col, label, color in fx_cols:
                 if col in df_national.columns and df_national[col].dropna().any():
                     ax.plot(df_national.index, df_national[col], marker='o', linewidth=2, color=color, label=label)
-            ax.set_title(f"Exchange Rate Trend - {state['country']}", fontweight='bold')
-            ax.set_ylabel(_fx_axis_label(currency_code))
+            ax.set_title(t(language, "chart.title.exchange_rate", country=state["country"]), fontweight='bold')
+            ax.set_ylabel(_fx_axis_label(currency_code, language))
+            _set_localized_numeric_axis(ax, language)
             ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            _set_localized_month_axis(ax, language)
             plt.xticks(rotation=45)
             plt.tight_layout()
 
@@ -1452,10 +1571,11 @@ def node_graph_designer(state: MarketReportState) -> dict:
                         color=line.get_color(),
                         label_prefix=label,
                     )
-            ax.set_title(f"Fuel Prices - {state['country']}", fontweight='bold')
-            ax.set_ylabel(_fuel_axis_label(currency_code))
+            ax.set_title(t(language, "chart.title.fuel", country=state["country"]), fontweight='bold')
+            ax.set_ylabel(_fuel_axis_label(currency_code, language))
+            _set_localized_numeric_axis(ax, language)
             ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            _set_localized_month_axis(ax, language)
             plt.xticks(rotation=45)
             plt.tight_layout()
 
@@ -1495,10 +1615,11 @@ def node_graph_designer(state: MarketReportState) -> dict:
                         color=line.get_color(),
                         label_prefix=label,
                     )
-            ax.set_title(f"Livestock & Animal Products - {state['country']}", fontweight='bold')
-            ax.set_ylabel(_animal_axis_label(animal_data, currency_code))
+            ax.set_title(t(language, "chart.title.livestock", country=state["country"]), fontweight='bold')
+            ax.set_ylabel(_animal_axis_label(animal_data, currency_code, language))
+            _set_localized_numeric_axis(ax, language)
             ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            _set_localized_month_axis(ax, language)
             plt.xticks(rotation=45)
             plt.tight_layout()
 
@@ -1544,20 +1665,26 @@ def node_graph_designer(state: MarketReportState) -> dict:
                         color=color,
                         label_prefix=label,
                     )
-            ax.set_title(f"Labour Market - {state['country']}", fontweight='bold')
-            ax.set_ylabel(_labour_axis_label(labour_data, currency_code))
+            ax.set_title(t(language, "chart.title.labour", country=state["country"]), fontweight='bold')
+            ax.set_ylabel(_labour_axis_label(labour_data, currency_code, language))
+            _set_localized_numeric_axis(ax, language)
             if secondary_ax is not None:
                 secondary_label = next(
-                    (str(item.get("axis_label")) for _c, _l, axis_name, item in labour_series if axis_name == "secondary" and item.get("axis_label")),
-                    _currency_axis_label("Wage", currency_code),
+                    (
+                        localize_axis_label(item.get("axis_label"), language)
+                        for _c, _l, axis_name, item in labour_series
+                        if axis_name == "secondary" and item.get("axis_label")
+                    ),
+                    _currency_axis_label("Wage", currency_code, language),
                 )
                 secondary_ax.set_ylabel(secondary_label)
+                _set_localized_numeric_axis(secondary_ax, language)
                 lines = ax.get_lines() + secondary_ax.get_lines()
                 labels = [line.get_label() for line in lines]
                 ax.legend(lines, labels, loc='upper left')
             else:
                 ax.legend(loc='upper left')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            _set_localized_month_axis(ax, language)
             plt.xticks(rotation=45)
             plt.tight_layout()
 
@@ -1582,8 +1709,17 @@ def node_graph_designer(state: MarketReportState) -> dict:
                 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 bars = ax.barh(latest["Region"], latest["FoodBasket"], color='#2ecc71')
-                ax.set_title(f"Regional Food Basket Cost - {state['time_period']}", fontweight='bold')
-                ax.set_xlabel(_currency_axis_label("Cost", currency_code))
+                period_label = format_month_label(state.get("time_period"), language)
+                ax.set_title(t(language, "chart.title.regional", period=period_label), fontweight='bold')
+                ax.set_xlabel(_currency_axis_label("Cost", currency_code, language))
+                try:
+                    import matplotlib.ticker as mticker
+
+                    ax.xaxis.set_major_formatter(
+                        mticker.FuncFormatter(lambda value, _pos: format_decimal_value(value, language, decimals=0))
+                    )
+                except Exception:
+                    pass
                 plt.tight_layout()
                 
                 buf = io.BytesIO()
@@ -1867,6 +2003,7 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
     logger.info("[ModuleOrchestrator] Running optional modules")
     
     enabled_modules = state.get("enabled_modules", [])
+    language = _state_language(state)
     
     if not enabled_modules:
         return {"current_node": "module_orchestrator"}
@@ -1885,26 +2022,22 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
         if module_id == "exchange_rate":
             currency_code = str(state.get("currency_code") or "").strip().upper()
             if not currency_code or currency_code == "USD":
-                warnings.append(
-                    "Skipped exchange_rate module because currency_code is USD (no exchange-rate pair to fetch)."
-                )
+                warnings.append(t(language, "warning.skip_exchange_usd"))
                 continue
         if module_id == "fuel_energy":
             fuel_data = state.get("fuel_energy_data") or {}
             if not fuel_data.get("available") or not fuel_data.get("series"):
-                warnings.append("Skipped fuel_energy module because no transport fuel price data was available.")
+                warnings.append(t(language, "warning.skip_fuel_missing"))
                 continue
         if module_id == "livestock_animal_products":
             animal_data = state.get("livestock_animal_products_data") or {}
             if not animal_data.get("available") or not animal_data.get("series"):
-                warnings.append(
-                    "Skipped livestock_animal_products module because no livestock or animal product price data was available."
-                )
+                warnings.append(t(language, "warning.skip_livestock_missing"))
                 continue
         if module_id == "labour_market":
             labour_data = state.get("labour_market_data") or {}
             if not labour_data.get("available") or not labour_data.get("series"):
-                warnings.append("Skipped labour_market module because no wage price data was available.")
+                warnings.append(t(language, "warning.skip_labour_missing"))
                 continue
         
         try:
@@ -1918,7 +2051,7 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
                         for f in getattr(module, "required_inputs", [])
                         if f not in state or state[f] is None
                     ]
-                    warnings.append(f"Skipped exchange_rate module due to missing required inputs: {missing}")
+                    warnings.append(t(language, "warning.skip_exchange_required", missing=missing))
                     continue
                 continue
             
@@ -1939,15 +2072,13 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
         except Exception as e:
             logger.error(f"Module '{module_id}' failed: {e}")
             if module_id == "exchange_rate":
-                warnings.append(f"Skipped exchange_rate module because no exchange-rate source was available: {e}")
+                warnings.append(t(language, "warning.skip_exchange_source", error=e))
             elif module_id == "fuel_energy":
-                warnings.append(f"Skipped fuel_energy module because no transport fuel price data was available: {e}")
+                warnings.append(t(language, "warning.skip_fuel_error", error=e))
             elif module_id == "livestock_animal_products":
-                warnings.append(
-                    f"Skipped livestock_animal_products module because no livestock or animal product price data was available: {e}"
-                )
+                warnings.append(t(language, "warning.skip_livestock_error", error=e))
             elif module_id == "labour_market":
-                warnings.append(f"Skipped labour_market module because no wage price data was available: {e}")
+                warnings.append(t(language, "warning.skip_labour_error", error=e))
             continue
     
     updates["module_sections"] = module_sections
@@ -1968,16 +2099,18 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     logger.info("[HighlightsDrafter] Generating highlights")
     
     llm = get_model()
+    language = _state_language(state)
     stats = state.get("data_statistics", {})
     trend = state.get("trend_analysis", {})
     exchange_data = state.get("exchange_rate_data", {}) or {}
+    currency_code = _state_currency_code(state)
  
     validation_warnings: List[str] = []
     if exchange_data and exchange_data.get("trend") == "stable":
         drivers = (trend or {}).get("key_market_drivers") or []
         if _has_currency_depreciation_driver(drivers):
             validation_warnings.append(
-                "Exchange rate classification is 'stable' but trend_analysis.key_market_drivers references currency depreciation. Avoid asserting current depreciation; if mentioned, frame as context/discrepancy."
+                t(language, "warning.exchange_stable_driver")
             )
      
     # Format statistics with arrows
@@ -1985,59 +2118,45 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     if stats.get("food_basket"):
         fb = stats["food_basket"]
         formatted_stats["food_basket"] = {
-            "current_price": fb.get("current_price"),
-            "mom_change": format_pct(fb.get("mom_change_pct")),
-            "yoy_change": format_pct(fb.get("yoy_change_pct"))
+            "current_price": format_currency_value(fb.get("current_price"), currency_code, language),
+            "mom_change": format_pct(fb.get("mom_change_pct"), language),
+            "yoy_change": format_pct(fb.get("yoy_change_pct"), language),
         }
     
     for name, data in stats.get("commodities", {}).items():
         formatted_stats[name] = {
-            "current_price": data.get("current_price"),
-            "mom_change": format_pct(data.get("mom_change_pct")),
-            "yoy_change": format_pct(data.get("yoy_change_pct"))
+            "current_price": format_currency_value(data.get("current_price"), currency_code, language),
+            "mom_change": format_pct(data.get("mom_change_pct"), language),
+            "yoy_change": format_pct(data.get("yoy_change_pct"), language),
         }
     
-    prompt = f"""Draft the HIGHLIGHTS section for {state['country']} Market Monitor ({state['time_period']}).
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-
-DATA (with formatted MoM/YoY):
-{json.dumps(formatted_stats, indent=2)}
-
-EXCHANGE RATE (quantitative ground truth, if available):
-{json.dumps(exchange_data, indent=2) if exchange_data else "None"}
-
-TREND ANALYSIS:
-{json.dumps(trend, indent=2)}
-
-TERMINOLOGY THRESHOLDS (enforce in wording):
-{json.dumps(TERMINOLOGY_THRESHOLDS, indent=2)}
-
-VALIDATION WARNINGS (must obey):
-{json.dumps(validation_warnings, indent=2)}
-
-Include:
-1. Overview (1-2 sentences)
-2. Food Basket Cost with MoM% and YoY%
-3. Top 3 Commodities with changes
-4. Key Drivers (bullet list)
-
-RULES:
-- Key Drivers must be supported by the quantitative DATA above.
-- Do not treat contextual drivers (from TREND ANALYSIS) as current facts if they conflict with exchange-rate ground truth.
-- If exchange rate is stable, do not claim current currency depreciation as a key driver.
-
-Return JSON: {{"HIGHLIGHTS": "The complete formatted text block"}}"""
+    prompt = render_prompt(
+        "highlights",
+        language,
+        {
+            **prompt_base_context(language),
+            "country": state["country"],
+            "time_period": state["time_period"],
+            "report_month_localized": _report_month_for_prompt(state),
+            "formatted_stats_json": _json_for_prompt(formatted_stats),
+            "exchange_data_json": _json_for_prompt(exchange_data) if exchange_data else "None",
+            "trend_json": _json_for_prompt(trend),
+            "terminology_thresholds_json": _json_for_prompt(TERMINOLOGY_THRESHOLDS),
+            "validation_warnings_json": _json_for_prompt(validation_warnings),
+        },
+    )
     
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
         highlights = result.get("HIGHLIGHTS", "") if result else ""
+        highlights, normalization_warnings = _normalize_output_text(highlights, state)
+        validation_warnings.extend(normalization_warnings)
         llm_calls = 1
     except Exception as e:
         logger.error(f"Highlights generation failed: {e}")
-        highlights = f"Market Monitor - {state['country']} - {state['time_period']}"
+        title_period = state["time_period"] if language == "en" else _report_month_for_prompt(state)
+        highlights = f"{t(language, 'report.title')} - {state['country']} - {title_period}"
         llm_calls = 0
     
     sections = state.get("report_draft_sections", {})
@@ -2067,30 +2186,24 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
     logger.info("[NarrativeDrafter] Generating narrative sections")
     
     llm = get_model()
+    language = _state_language(state)
     trend = state.get("trend_analysis", {})
     events = state.get("events", [])
     module_sections = state.get("module_sections", {})
     
-    prompt = f"""Draft narrative sections for {state['country']} Market Monitor ({state['time_period']}).
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-
-TREND ANALYSIS:
-{json.dumps(trend, indent=2)}
-
-EVENTS:
-{json.dumps(events, indent=2)}
-
-MODULE SECTIONS TO REFERENCE:
-{json.dumps(module_sections, indent=2) if module_sections else "None"}
-
-SECTIONS TO GENERATE:
-1. MARKET_OVERVIEW (200-250 words): Overall market conditions, price trajectory, key drivers.
-2. COMMODITY_ANALYSIS (200-300 words): Analysis of each commodity.
-3. REGIONAL_HIGHLIGHTS (150-200 words): Regional variations. Use [INSERT GRAPH: regional_comparison] placeholder.
-
-Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"""
+    prompt = render_prompt(
+        "narrative",
+        language,
+        {
+            **prompt_base_context(language),
+            "country": state["country"],
+            "time_period": state["time_period"],
+            "report_month_localized": _report_month_for_prompt(state),
+            "trend_json": _json_for_prompt(trend),
+            "events_json": _json_for_prompt(events),
+            "module_sections_json": _json_for_prompt(module_sections) if module_sections else "None",
+        },
+    )
     
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -2104,7 +2217,16 @@ Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"
     sections = state.get("report_draft_sections", {})
     
     if result:
-        sections.update(result)
+        normalization_warnings: List[str] = []
+        for key, value in result.items():
+            if isinstance(value, str):
+                normalized, warnings = _normalize_output_text(value, state)
+                sections[key] = normalized
+                normalization_warnings.extend(warnings)
+            else:
+                sections[key] = value
+    else:
+        normalization_warnings = []
     
     # Add module sections
     for module_id, section_text in module_sections.items():
@@ -2126,12 +2248,15 @@ Return JSON with keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS"
             lines.append("")
         sections["REFERENCES"] = "\n".join(lines).strip()
     
-    return {
+    updates = {
         "report_draft_sections": sections,
         "skeptic_flags": [],
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "current_node": "narrative_drafter"
     }
+    if normalization_warnings:
+        updates["warnings"] = normalization_warnings
+    return updates
 
 # NODE: RED TEAM (QA)
 # ============================================================================
@@ -2141,6 +2266,7 @@ def node_red_team(state: MarketReportState) -> dict:
     logger.info("[RedTeam] Fact-checking draft")
     
     llm = get_model()
+    language = _state_language(state)
     sections = state.get("report_draft_sections", {})
     stats = state.get("data_statistics", {})
     trend = state.get("trend_analysis", {}) or {}
@@ -2151,46 +2277,21 @@ def node_red_team(state: MarketReportState) -> dict:
      
     draft_text = "\n\n".join([f"== {k} ==\n{v}" for k, v in sections.items()])
      
-    prompt = f"""Fact-check this Market Monitor draft.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-
-QUANTITATIVE GROUND TRUTH:
-- Price Statistics: {json.dumps(stats, indent=2)}
-- Exchange Rate: MoM={exchange_data.get('monthly_change_pct')}%, YoY={exchange_data.get('yearly_change_pct')}%, Classification={exchange_data.get('trend')}
-  Full Object: {json.dumps(exchange_data, indent=2) if exchange_data else "None"}
-
-TREND ANALYSIS (for cross-validation of drivers; treat as hypotheses unless supported by data):
-{json.dumps(trend, indent=2)}
-
-TERMINOLOGY THRESHOLDS (must be enforced):
-{json.dumps(TERMINOLOGY_THRESHOLDS, indent=2)}
-
-DRAFT:
-{draft_text}
-
-CROSS-VALIDATION RULES:
-1. If exchange rate classification is "stable", the report must NOT claim "severe currency depreciation" (or similar) as a current driver.
-2. Cross-check trend_analysis.key_market_drivers against exchange-rate classification and quantitative thresholds (do not allow drivers that contradict the ground truth).
-3. If the draft uses terms like "severe depreciation" or "rapid depreciation", they must satisfy TERMINOLOGY_THRESHOLDS.severe_depreciation using exchange-rate MoM/YoY.
-4. "Hyperinflation" requires monthly inflation > 50%. If no inflation metric exists in the ground truth data, any use of "hyperinflation" is a terminology misuse.
-5. Key drivers in HIGHLIGHTS must not contradict data in specialized sections (e.g., EXCHANGE_RATE_ANALYSIS).
-6. Distinguish between historical context and current data claims.
-7. Flag internal contradictions between sections (e.g., one section says stable while another says rapid depreciation).
-
-Check for:
-1. Numerical accuracy (prices, MoM%, YoY%)
-2. Formatting (arrows ↑/↓)
-3. Unsupported claims
-4. Context-data conflicts and terminology misuse
-
- 
-Return JSON: {{"flags": [
-    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
-]}}
- 
-If no errors, return {{"flags": []}}"""
+    prompt = render_prompt(
+        "red_team",
+        language,
+        {
+            **prompt_base_context(language),
+            "stats_json": _json_for_prompt(stats),
+            "exchange_mom": exchange_data.get("monthly_change_pct"),
+            "exchange_yoy": exchange_data.get("yearly_change_pct"),
+            "exchange_trend": exchange_data.get("trend"),
+            "exchange_data_json": _json_for_prompt(exchange_data) if exchange_data else "None",
+            "trend_json": _json_for_prompt(trend),
+            "terminology_thresholds_json": _json_for_prompt(TERMINOLOGY_THRESHOLDS),
+            "draft_text": draft_text,
+        },
+    )
 
      
     try:
@@ -2302,6 +2403,7 @@ def run_report_generation(
     news_end_date: Optional[str] = None,
     previous_report_text: str = "",
     use_mock_data: bool = False,
+    language: str = "auto",
     on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
@@ -2312,6 +2414,7 @@ def run_report_generation(
     """
     if enabled_modules is None:
         enabled_modules = ["exchange_rate"]
+    language_info = resolve_report_language(country, language)
     
     initial_state = create_initial_state(
         country=country,
@@ -2324,11 +2427,17 @@ def run_report_generation(
         news_start_date=news_start_date,
         news_end_date=news_end_date,
         previous_report_text=previous_report_text,
-        use_mock_data=use_mock_data
+        use_mock_data=use_mock_data,
+        language=language_info["language"],
+        locale=language_info["locale"],
+        language_source=language_info["language_source"],
     )
     
     agent = build_graph(on_step=on_step)
     result = agent.invoke(initial_state)
     for key in ("databridges_rows", "seerist_documents", "reliefweb_documents"):
         result.pop(key, None)
+    result["language"] = language_info["language"]
+    result["locale"] = language_info["locale"]
+    result["language_source"] = language_info["language_source"]
     return result

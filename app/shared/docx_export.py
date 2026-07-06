@@ -12,6 +12,8 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 from docx.shared import Inches, Pt, RGBColor
 
+from app.services.market_monitor.i18n import t
+
 from .report_blocks import ReportBlock
 
 
@@ -175,6 +177,7 @@ def build_docx_bytes_from_report_blocks(
     visualizations: Optional[Dict[str, str]] = None,
     include_sources: bool = True,
     include_visualizations: bool = True,
+    language: str = "en",
 ) -> bytes:
     doc = Document()
     visualizations = visualizations or {}
@@ -226,7 +229,7 @@ def build_docx_bytes_from_report_blocks(
             if not refs:
                 continue
 
-            doc.add_heading("References", level=2)
+            doc.add_heading(t(language, "section.REFERENCES"), level=2)
             for ref in refs:
                 if not isinstance(ref, dict):
                     continue

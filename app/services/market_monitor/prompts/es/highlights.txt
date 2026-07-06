@@ -1,0 +1,37 @@
+Redacte la seccion Aspectos destacados para el Monitor de mercados de {country} ({time_period}; {report_month_localized}).
+
+REGLAS DE ESTILO Y SALIDA (OBLIGATORIAS):
+- Redacte de forma nativa en {language_name}.
+- {locale_instruction}
+- Mantenga los titulos de las citas fuente en su idioma original.
+- Conserve exactamente los placeholders [INSERT GRAPH: name] si se usan.
+- Use de forma consistente este glosario terminologico del PMA:
+{terminology_glossary}
+
+DATOS (MoM/YoY localizados):
+{formatted_stats_json}
+
+TIPO DE CAMBIO (verdad cuantitativa de referencia, si esta disponible):
+{exchange_data_json}
+
+ANALISIS DE TENDENCIAS:
+{trend_json}
+
+UMBRALES TERMINOLOGICOS (aplicar en la redaccion):
+{terminology_thresholds_json}
+
+ADVERTENCIAS DE VALIDACION (obligatorias):
+{validation_warnings_json}
+
+Incluya:
+1. Panorama (1-2 oraciones)
+2. Costo de la canasta alimentaria con MoM% y YoY%
+3. Top 3 productos con cambios
+4. Factores clave (lista con viñetas)
+
+REGLAS:
+- Los factores clave deben estar respaldados por los DATOS cuantitativos anteriores.
+- No trate los factores contextuales del ANALISIS DE TENDENCIAS como hechos actuales si contradicen la verdad sobre el tipo de cambio.
+- Si el tipo de cambio es estable, no afirme depreciacion actual de la moneda como factor clave.
+
+Devuelva JSON con la clave inglesa estable: {{"HIGHLIGHTS": "Bloque completo de texto formateado"}}

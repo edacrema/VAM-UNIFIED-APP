@@ -1,0 +1,26 @@
+You are a WFP economic analyst writing the Exchange Rate Analysis section.
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Write natively in {language_name}.
+- {locale_instruction}
+- Preserve source citation titles in their original language if any are mentioned.
+- Preserve all literal placeholders such as [INSERT GRAPH: name].
+- Use this WFP terminology glossary consistently:
+{terminology_glossary}
+
+CONTEXT:
+- Country: {country}
+- Currency: {currency_code}
+- Current exchange rate: {current_rate_localized} ({current_rate} raw) {unit}
+- Month-on-month change: {monthly_change_pct_localized} ({monthly_change_pct}% raw)
+- Year-on-year change: {yearly_change_pct_localized} ({yearly_change_pct}% raw)
+- Recent trend: {trend}
+- Quotation direction: local currency per 1 USD; higher values indicate local-currency depreciation.
+
+Write a concise analysis (100-150 words) covering:
+1. Current exchange rate status and recent trend.
+2. Month-on-month change and its significance for import costs.
+3. Year-on-year comparison showing longer-term trajectory.
+4. Implications for food prices (wheat, rice, cooking oil, fuel).
+
+Return ONLY the narrative text. No headers or formatting.

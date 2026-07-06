@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
+from app.services.market_monitor.i18n import format_month_label, t
+
 
 class ReportBlock(BaseModel):
     type: Literal["heading", "paragraph", "figure", "references", "table", "definition_box"]
@@ -127,32 +129,36 @@ def _blocks_from_text_with_figures(text: str) -> List[ReportBlock]:
     return blocks
 
 
-def _module_section_title(module_id: Any) -> str:
+def _module_section_title(module_id: Any, language: str = "en") -> str:
     module_key = str(module_id or "").strip()
     known_titles = {
-        "exchange_rate": "Exchange Rate Analysis",
-        "fuel_energy": "Fuel & Energy",
-        "livestock_animal_products": "Livestock & Animal Products",
-        "labour_market": "Labour Market",
+        "exchange_rate": "module.exchange_rate",
+        "fuel_energy": "module.fuel_energy",
+        "livestock_animal_products": "module.livestock_animal_products",
+        "labour_market": "module.labour_market",
     }
     if module_key in known_titles:
-        return known_titles[module_key]
+        return t(language, known_titles[module_key])
     words = [word for word in re.split(r"[_\-\s]+", module_key) if word]
     base = " ".join(word.capitalize() for word in words) if words else "Module"
     if base.lower().endswith(" analysis"):
         return base
-    return f"{base} Analysis"
+    if language == "en":
+        return f"{base} Analysis"
+    return base
 
 
 def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     country = (result.get("country") or "").strip()
     time_period = (result.get("time_period") or "").strip()
+    language = str(result.get("language") or "en").strip().lower() or "en"
+    display_period = time_period if language == "en" else format_month_label(time_period, language)
 
-    title = "Market Monitor"
-    if country and time_period:
-        title = f"Market Monitor - {country} - {time_period}"
+    title = t(language, "report.title")
+    if country and display_period:
+        title = f"{title} - {country} - {display_period}"
     elif country:
-        title = f"Market Monitor - {country}"
+        title = f"{title} - {country}"
 
     sections = result.get("report_draft_sections") or result.get("report_sections") or {}
     module_sections = result.get("module_sections") or {}
@@ -163,24 +169,24 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
 
     highlights = sections.get("HIGHLIGHTS")
     if isinstance(highlights, str) and highlights.strip():
-        blocks.append(ReportBlock(type="heading", text="Highlights", level=2))
+        blocks.append(ReportBlock(type="heading", text=t(language, "section.HIGHLIGHTS"), level=2))
         blocks.extend(_text_to_paragraph_blocks(highlights))
         blocks.append(
             ReportBlock(
                 type="figure",
                 figure_id="food_basket_trend",
-                caption="Food basket cost trend",
+                caption=t(language, "figure.food_basket_trend"),
             )
         )
 
     overview = sections.get("MARKET_OVERVIEW")
     if isinstance(overview, str) and overview.strip():
-        blocks.append(ReportBlock(type="heading", text="Market Overview", level=2))
+        blocks.append(ReportBlock(type="heading", text=t(language, "section.MARKET_OVERVIEW"), level=2))
         blocks.extend(_text_to_paragraph_blocks(overview))
 
     commodity = sections.get("COMMODITY_ANALYSIS")
     if isinstance(commodity, str) and commodity.strip():
-        blocks.append(ReportBlock(type="heading", text="Commodity Analysis", level=2))
+        blocks.append(ReportBlock(type="heading", text=t(language, "section.COMMODITY_ANALYSIS"), level=2))
         blocks.extend(_blocks_from_text_with_figures(commodity))
 
         has_inline_commodity_figs = False
@@ -229,21 +235,21 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
 
     regional = sections.get("REGIONAL_HIGHLIGHTS")
     if isinstance(regional, str) and regional.strip():
-        blocks.append(ReportBlock(type="heading", text="Regional Highlights", level=2))
+        blocks.append(ReportBlock(type="heading", text=t(language, "section.REGIONAL_HIGHLIGHTS"), level=2))
         blocks.extend(_blocks_from_text_with_figures(regional))
 
     if isinstance(module_sections, dict):
         for module_id, section_text in module_sections.items():
             if not isinstance(section_text, str) or not section_text.strip():
                 continue
-            blocks.append(ReportBlock(type="heading", text=_module_section_title(module_id), level=2))
+            blocks.append(ReportBlock(type="heading", text=_module_section_title(module_id, language), level=2))
             blocks.extend(_text_to_paragraph_blocks(section_text))
             if module_id == "fuel_energy" and isinstance(visualizations, dict) and visualizations.get("fuel_prices"):
                 blocks.append(
                     ReportBlock(
                         type="figure",
                         figure_id="fuel_prices",
-                        caption="Fuel retail price trend",
+                        caption=t(language, "figure.fuel_prices"),
                     )
                 )
             if (
@@ -255,7 +261,7 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
                     ReportBlock(
                         type="figure",
                         figure_id="livestock_animal_products",
-                        caption="Livestock and animal product price trend",
+                        caption=t(language, "figure.livestock_animal_products"),
                     )
                 )
             if module_id == "labour_market" and isinstance(visualizations, dict) and visualizations.get("labour_market"):
@@ -263,7 +269,7 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
                     ReportBlock(
                         type="figure",
                         figure_id="labour_market",
-                        caption="Labour market trend",
+                        caption=t(language, "figure.labour_market"),
                     )
                 )
 

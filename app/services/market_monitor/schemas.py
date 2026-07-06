@@ -104,6 +104,10 @@ class GenerateReportInput(BaseModel):
     """Input for generating a report."""
     country: str = Field(..., description="Country name (e.g., 'Sudan', 'Yemen')")
     time_period: str = Field(..., description="Period in YYYY-MM format (e.g., '2025-01')")
+    language: Literal["auto", "en", "fr", "es"] = Field(
+        default="auto",
+        description="Report language: auto country default, English, French, or Spanish."
+    )
 
     news_start_date: Optional[str] = Field(
         default=None,
@@ -154,6 +158,9 @@ class GenerateReportOutput(BaseModel):
     run_id: str
     country: str
     time_period: str
+    language: str = "en"
+    locale: str = "en_US"
+    language_source: str = "default"
     report_sections: Dict[str, str]
     report_blocks: List[ReportBlock] = []
     visualizations: Dict[str, str]  # Base64 encoded images

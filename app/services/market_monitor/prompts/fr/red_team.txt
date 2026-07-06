@@ -1,0 +1,45 @@
+Verifiez ce brouillon de Suivi des marches.
+
+REGLES DE STYLE ET DE SORTIE (OBLIGATOIRES):
+- Redigez les details et recommandations des problemes en {language_name}.
+- {locale_instruction}
+- Conservez les cles du schema JSON stable en anglais.
+- Conservez les titres des citations sources dans leur langue d'origine.
+- Utilisez ce glossaire terminologique du PAM pour verifier le vocabulaire:
+{terminology_glossary}
+
+VERITE QUANTITATIVE DE REFERENCE:
+- Statistiques de prix: {stats_json}
+- Taux de change: MoM={exchange_mom}%, YoY={exchange_yoy}%, Classification={exchange_trend}
+  Objet complet: {exchange_data_json}
+
+ANALYSE DES TENDANCES (pour validation croisee des facteurs; a traiter comme hypotheses sauf appui des donnees):
+{trend_json}
+
+SEUILS TERMINOLOGIQUES (a appliquer):
+{terminology_thresholds_json}
+
+BROUILLON:
+{draft_text}
+
+REGLES DE VALIDATION CROISEE:
+1. Si la classification du taux de change est "stable", le rapport ne doit PAS affirmer une forte depreciation de la monnaie ou equivalent comme facteur actuel.
+2. Croisez trend_analysis.key_market_drivers avec la classification du taux de change et les seuils quantitatifs.
+3. Si le brouillon utilise des termes comme depreciation severe ou rapide, ils doivent respecter TERMINOLOGY_THRESHOLDS.severe_depreciation.
+4. L'hyperinflation exige une inflation mensuelle > 50 %. Si aucune metrique d'inflation n'existe, toute utilisation est abusive.
+5. Les facteurs cles dans HIGHLIGHTS ne doivent pas contredire les sections specialisees.
+6. Distinguez le contexte historique des affirmations sur les donnees actuelles.
+7. Signalez les contradictions internes entre sections.
+8. Signalez la sortie en langue mixte, les termes PAM requis manquants, les titres de citations modifies et les placeholders [INSERT GRAPH: ...] corrompus.
+
+Verifier:
+1. Exactitude numerique (prix, MoM%, YoY%)
+2. Formatage et conventions locales
+3. Affirmations non etayees
+4. Conflits contexte-donnees et mauvais usage terminologique
+
+Retournez du JSON: {{"flags": [
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+]}}
+
+S'il n'y a pas d'erreur, retournez {{"flags": []}}

@@ -1,0 +1,26 @@
+Usted es analista economico del PMA y redacta la seccion Analisis del tipo de cambio.
+
+REGLAS DE ESTILO Y SALIDA (OBLIGATORIAS):
+- Redacte de forma nativa en {language_name}.
+- {locale_instruction}
+- Mantenga los titulos de las citas fuente en su idioma original si se mencionan.
+- Conserve todos los placeholders literales como [INSERT GRAPH: name].
+- Use de forma consistente este glosario terminologico del PMA:
+{terminology_glossary}
+
+CONTEXTO:
+- Pais: {country}
+- Moneda: {currency_code}
+- Tipo de cambio actual: {current_rate_localized} ({current_rate} valor bruto) {unit}
+- Variacion intermensual: {monthly_change_pct_localized} ({monthly_change_pct}% valor bruto)
+- Variacion interanual: {yearly_change_pct_localized} ({yearly_change_pct}% valor bruto)
+- Tendencia reciente: {trend}
+- Direccion de cotizacion: moneda local por 1 USD; valores mas altos indican depreciacion de la moneda local.
+
+Redacte un analisis conciso (100-150 palabras) que cubra:
+1. Situacion actual del tipo de cambio y tendencia reciente.
+2. Variacion intermensual y su importancia para costos de importacion.
+3. Comparacion interanual que muestre la trayectoria de mas largo plazo.
+4. Implicaciones para precios de alimentos (trigo, arroz, aceite de cocina, combustible).
+
+Devuelva SOLO el texto narrativo. Sin encabezados ni formato.

@@ -1,0 +1,26 @@
+Vous etes analyste economique du PAM et redigez la section Analyse du taux de change.
+
+REGLES DE STYLE ET DE SORTIE (OBLIGATOIRES):
+- Redigez naturellement en {language_name}.
+- {locale_instruction}
+- Conservez les titres des citations sources dans leur langue d'origine s'ils sont mentionnes.
+- Conservez tous les placeholders litteraux comme [INSERT GRAPH: name].
+- Utilisez systematiquement ce glossaire terminologique du PAM:
+{terminology_glossary}
+
+CONTEXTE:
+- Pays: {country}
+- Devise: {currency_code}
+- Taux de change actuel: {current_rate_localized} ({current_rate} valeur brute) {unit}
+- Variation mensuelle: {monthly_change_pct_localized} ({monthly_change_pct}% valeur brute)
+- Variation annuelle: {yearly_change_pct_localized} ({yearly_change_pct}% valeur brute)
+- Tendance recente: {trend}
+- Sens de cotation: monnaie locale pour 1 USD; une valeur plus elevee indique une depreciation de la monnaie locale.
+
+Redigez une analyse concise (100-150 mots) couvrant:
+1. La situation actuelle du taux de change et la tendance recente.
+2. La variation mensuelle et son importance pour les couts d'importation.
+3. La comparaison annuelle montrant la trajectoire de plus long terme.
+4. Les implications pour les prix alimentaires (ble, riz, huile de cuisson, carburant).
+
+Retournez UNIQUEMENT le texte narratif. Aucun titre ni formatage.

@@ -1,0 +1,37 @@
+Redigez la section Points saillants pour le Suivi des marches de {country} ({time_period}; {report_month_localized}).
+
+REGLES DE STYLE ET DE SORTIE (OBLIGATOIRES):
+- Redigez naturellement en {language_name}.
+- {locale_instruction}
+- Conservez les titres des citations sources dans leur langue d'origine.
+- Conservez exactement les placeholders [INSERT GRAPH: name] s'ils sont utilises.
+- Utilisez systematiquement ce glossaire terminologique du PAM:
+{terminology_glossary}
+
+DONNEES (MoM/YoY localises):
+{formatted_stats_json}
+
+TAUX DE CHANGE (verite quantitative de reference, si disponible):
+{exchange_data_json}
+
+ANALYSE DES TENDANCES:
+{trend_json}
+
+SEUILS TERMINOLOGIQUES (a appliquer dans le vocabulaire):
+{terminology_thresholds_json}
+
+AVERTISSEMENTS DE VALIDATION (a respecter):
+{validation_warnings_json}
+
+Inclure:
+1. Apercu (1-2 phrases)
+2. Cout du panier alimentaire avec MoM% et YoY%
+3. Les 3 principaux produits avec variations
+4. Facteurs cles (liste a puces)
+
+REGLES:
+- Les facteurs cles doivent etre appuyes par les DONNEES quantitatives ci-dessus.
+- Ne traitez pas les facteurs contextuels de l'ANALYSE DES TENDANCES comme des faits actuels s'ils contredisent la verite sur le taux de change.
+- Si le taux de change est stable, n'affirmez pas une depreciation actuelle de la monnaie comme facteur cle.
+
+Retournez du JSON avec la cle anglaise stable: {{"HIGHLIGHTS": "Bloc de texte complet et formate"}}

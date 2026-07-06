@@ -2,6 +2,7 @@ from datetime import date
 
 import streamlit as st
 
+from app.services.market_monitor.i18n import LANGUAGE_NAMES, t
 from streamlit_shared import (
     apply_wfp_theme,
     render_bug_report_header_link,
@@ -486,6 +487,21 @@ with st.form("market_monitor_form"):
         key=time_period_key,
     )
 
+    language_options = ["auto", "en", "fr", "es"]
+    language_labels = {
+        code: t("en", f"ui.language.{code}")
+        for code in language_options
+    }
+    selected_language_label = st.selectbox(
+        t("en", "ui.language"),
+        options=[language_labels[code] for code in language_options],
+        index=0,
+        key=f"mm_language_{country}" if isinstance(country, str) and country else "mm_language",
+    )
+    language = next(
+        code for code, label in language_labels.items() if label == selected_language_label
+    )
+
     use_news_dates = st.checkbox("Use News Dates", value=False, key="mm_use_news_dates")
     news_start_date_date = st.date_input(
         "News Start Date",
@@ -546,6 +562,7 @@ if submitted:
         payload = {
             "country": country,
             "time_period": time_period,
+            "language": language,
             "commodity_list": commodity_list,
             "admin1_list": admin1_list,
             "currency_code": currency_code,
@@ -578,40 +595,48 @@ run_id = st.session_state.get("mm_last_run_id")
 if isinstance(result, dict):
 
     display_run_id = str(run_id or result.get("run_id") or "")
+    result_language = str(result.get("language") or "en")
 
     def _summary() -> None:
         cols = st.columns(4)
-        cols[0].metric("Run ID", display_run_id)
-        cols[1].metric("Country", str(result.get("country") or ""))
-        cols[2].metric("Time Period", str(result.get("time_period") or ""))
-        cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
+        cols[0].metric(t(result_language, "ui.run_id"), display_run_id)
+        cols[1].metric(t(result_language, "ui.country"), str(result.get("country") or ""))
+        cols[2].metric(t(result_language, "ui.time_period"), str(result.get("time_period") or ""))
+        cols[3].metric(t(result_language, "ui.llm_calls"), str(result.get("llm_calls") or 0))
+        st.caption(
+            t(
+                result_language,
+                "ui.resolved_language",
+                language=LANGUAGE_NAMES.get(result_language, result_language),
+            )
+        )
 
         result_warnings = result.get("warnings") or []
         if result_warnings:
-            with st.expander("Warnings", expanded=False):
+            with st.expander(t(result_language, "ui.warnings"), expanded=False):
                 for warning in result_warnings:
                     st.warning(str(warning))
 
         cache_metadata = result.get("cache_metadata")
         if isinstance(cache_metadata, dict) and cache_metadata:
-            with st.expander("Cache metadata", expanded=False):
+            with st.expander(t(result_language, "ui.cache_metadata"), expanded=False):
                 st.json(cache_metadata)
 
         render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
 
     def _visuals() -> None:
-        with st.expander("Report Sections", expanded=False):
+        with st.expander(t(result_language, "ui.report_sections"), expanded=False):
             render_report_sections(result.get("report_sections"))
 
-        st.subheader("Visualizations")
+        st.subheader(t(result_language, "ui.visualizations"))
         render_visualizations(result.get("visualizations"))
 
-        with st.expander("Data Statistics", expanded=False):
+        with st.expander(t(result_language, "ui.data_statistics"), expanded=False):
             st.json(result.get("data_statistics"))
 
     def _export() -> None:
         if not run_id:
-            st.info("Export is available for asynchronous runs only.")
+            st.info(t(result_language, "ui.export_unavailable"))
             return
 
         docx_bytes = None
@@ -619,7 +644,7 @@ if isinstance(result, dict):
             docx_bytes = st.session_state.get("mm_docx_bytes")
 
         if docx_bytes is None:
-            with st.spinner("Preparing DOCX..."):
+            with st.spinner(t(result_language, "ui.preparing_docx")):
                 try:
                     docx_bytes = request_bytes(
                         "POST",
@@ -636,7 +661,7 @@ if isinstance(result, dict):
 
         if docx_bytes:
             st.download_button(
-                "Generate & Download DOCX",
+                t(result_language, "ui.download_docx"),
                 data=docx_bytes,
                 file_name=f"market-monitor-{run_id}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

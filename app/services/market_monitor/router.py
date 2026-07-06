@@ -48,6 +48,7 @@ from app.shared.live_outputs import (
 
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import build_market_monitor_report_blocks
+from .i18n import resolve_report_language, t
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,8 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             news_start_date=input_data.news_start_date,
             news_end_date=input_data.news_end_date,
             previous_report_text=input_data.previous_report_text,
-            use_mock_data=input_data.use_mock_data
+            use_mock_data=input_data.use_mock_data,
+            language=input_data.language,
         )
 
         # Build output
@@ -185,6 +187,9 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             run_id=result.get("run_id", "unknown"),
             country=input_data.country,
             time_period=input_data.time_period,
+            language=result.get("language", "en"),
+            locale=result.get("locale", "en_US"),
+            language_source=result.get("language_source", "default"),
             report_sections=result.get("report_draft_sections", {}),
             report_blocks=build_market_monitor_report_blocks(
                 {**(result or {}), "country": input_data.country, "time_period": input_data.time_period}
@@ -242,9 +247,12 @@ async def generate_market_monitor_async(
         except BasketValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    language_info = resolve_report_language(input_data.country, input_data.language)
+    language = language_info["language"]
     run_id = f"run_{uuid.uuid4().hex[:8]}"
 
     create_run(run_id)
+    update_run(run_id, metadata=language_info)
 
     progress_map = {
         "data_agent": 10,
@@ -301,18 +309,23 @@ async def generate_market_monitor_async(
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Data",
+                            title=t(language, "live.price_data.title"),
                             summary=(
-                                f"{len(rows)} price row(s) retrieved for {input_data.country} "
-                                f"({input_data.time_period}) from cache plus any targeted backfill."
+                                t(
+                                    language,
+                                    "live.price_data.summary",
+                                    rows=len(rows),
+                                    country=input_data.country,
+                                    period=input_data.time_period,
+                                )
                             ),
                             rows=rows,
                             download_artifacts=artifacts,
                         )
                     elif input_data.use_mock_data:
                         section_updates["databridges"] = build_databridges_live_output(
-                            title="Price Data",
-                            summary="Mock data is enabled for this run, so no price rows were read.",
+                            title=t(language, "live.price_data.title"),
+                            summary=t(language, "live.price_data.mock"),
                             rows=[],
                             download_artifacts=[],
                             status="skipped",
@@ -330,11 +343,11 @@ async def generate_market_monitor_async(
                             documents=seerist_docs,
                         )
                         section_updates["seerist"] = build_document_live_output(
-                            title="Seerist Documents",
+                            title=t(language, "live.seerist.title"),
                             summary=(
-                                f"Seerist retrieval unavailable: {seerist_error}"
+                                t(language, "live.docs.unavailable", source="Seerist", error=seerist_error)
                                 if seerist_error
-                                else f"{len(seerist_docs)} Seerist documents retrieved."
+                                else t(language, "live.docs.summary", count=len(seerist_docs), source="Seerist")
                             ),
                             documents=seerist_previews,
                             status="failed" if seerist_error else "completed",
@@ -348,11 +361,11 @@ async def generate_market_monitor_async(
                             documents=reliefweb_docs,
                         )
                         section_updates["reliefweb"] = build_document_live_output(
-                            title="ReliefWeb Documents",
+                            title=t(language, "live.reliefweb.title"),
                             summary=(
-                                f"ReliefWeb retrieval unavailable: {reliefweb_error}"
+                                t(language, "live.docs.unavailable", source="ReliefWeb", error=reliefweb_error)
                                 if reliefweb_error
-                                else f"{len(reliefweb_docs)} ReliefWeb documents retrieved."
+                                else t(language, "live.docs.summary", count=len(reliefweb_docs), source="ReliefWeb")
                             ),
                             documents=reliefweb_previews,
                             status="failed" if reliefweb_error else "completed",
@@ -376,6 +389,7 @@ async def generate_market_monitor_async(
                 news_end_date=input_data.news_end_date,
                 previous_report_text=input_data.previous_report_text,
                 use_mock_data=input_data.use_mock_data,
+                language=input_data.language,
                 on_step=on_step
             )
 
@@ -499,6 +513,9 @@ async def get_report_result(run_id: str):
         run_id=run_id,
         country=result.get("country", "Unknown"),
         time_period=result.get("time_period", "Unknown"),
+        language=result.get("language", "en"),
+        locale=result.get("locale", "en_US"),
+        language_source=result.get("language_source", "default"),
         report_sections=result.get("report_draft_sections", {}),
         report_blocks=build_market_monitor_report_blocks(result),
         visualizations=result.get("visualizations", {}),
@@ -553,6 +570,7 @@ async def export_market_monitor_docx(
             visualizations=result.get("visualizations", {}),
             include_sources=options.include_sources,
             include_visualizations=options.include_visualizations,
+            language=result.get("language", "en"),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DOCX generation failed: {str(e)}")
@@ -592,6 +610,15 @@ def get_service_info():
                 "required": True,
                 "label": "Time Period",
                 "description": "Period in YYYY-MM format (e.g., '2025-01')"
+            },
+            {
+                "name": "language",
+                "type": "string",
+                "required": False,
+                "label": "Language",
+                "description": "Report language: auto country default, English, French, or Spanish",
+                "default": "auto",
+                "options": ["auto", "en", "fr", "es"]
             },
             {
                 "name": "commodity_list",

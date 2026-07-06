@@ -1,0 +1,45 @@
+Verifique este borrador del Monitor de mercados.
+
+REGLAS DE ESTILO Y SALIDA (OBLIGATORIAS):
+- Redacte detalles y recomendaciones de problemas en {language_name}.
+- {locale_instruction}
+- Conserve las claves del esquema JSON estable en ingles.
+- Mantenga los titulos de las citas fuente en su idioma original.
+- Use este glosario terminologico del PMA al revisar la redaccion:
+{terminology_glossary}
+
+VERDAD CUANTITATIVA DE REFERENCIA:
+- Estadisticas de precios: {stats_json}
+- Tipo de cambio: MoM={exchange_mom}%, YoY={exchange_yoy}%, Classification={exchange_trend}
+  Objeto completo: {exchange_data_json}
+
+ANALISIS DE TENDENCIAS (para validacion cruzada de impulsores; tratar como hipotesis salvo respaldo de datos):
+{trend_json}
+
+UMBRALES TERMINOLOGICOS (obligatorios):
+{terminology_thresholds_json}
+
+BORRADOR:
+{draft_text}
+
+REGLAS DE VALIDACION CRUZADA:
+1. Si la clasificacion del tipo de cambio es "stable", el informe NO debe afirmar depreciacion severa de la moneda o similar como impulsor actual.
+2. Cruce trend_analysis.key_market_drivers con clasificacion del tipo de cambio y umbrales cuantitativos.
+3. Si el borrador usa terminos como depreciacion severa o rapida, deben cumplir TERMINOLOGY_THRESHOLDS.severe_depreciation.
+4. La hiperinflacion requiere inflacion mensual > 50 %. Si no hay metrica de inflacion, cualquier uso es indebido.
+5. Los factores clave en HIGHLIGHTS no deben contradecir secciones especializadas.
+6. Distinga contexto historico de afirmaciones sobre datos actuales.
+7. Marque contradicciones internas entre secciones.
+8. Marque salida en idioma mixto, terminologia PMA requerida faltante, titulos de citas modificados y placeholders [INSERT GRAPH: ...] corruptos.
+
+Verifique:
+1. Exactitud numerica (precios, MoM%, YoY%)
+2. Formato y convenciones locales
+3. Afirmaciones sin respaldo
+4. Conflictos contexto-datos y mal uso terminologico
+
+Devuelva JSON: {{"flags": [
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+]}}
+
+Si no hay errores, devuelva {{"flags": []}}

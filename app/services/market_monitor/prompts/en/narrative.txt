@@ -1,0 +1,25 @@
+Draft narrative sections for {country} Market Monitor ({time_period}; {report_month_localized}).
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Write natively in {language_name}.
+- {locale_instruction}
+- Preserve source citation titles in their original language.
+- Preserve [INSERT GRAPH: regional_comparison] exactly in REGIONAL_HIGHLIGHTS.
+- Use this WFP terminology glossary consistently:
+{terminology_glossary}
+
+TREND ANALYSIS:
+{trend_json}
+
+EVENTS:
+{events_json}
+
+MODULE SECTIONS TO REFERENCE:
+{module_sections_json}
+
+SECTIONS TO GENERATE:
+1. MARKET_OVERVIEW (200-250 words): Overall market conditions, price trajectory, key drivers.
+2. COMMODITY_ANALYSIS (200-300 words): Analysis of each commodity.
+3. REGIONAL_HIGHLIGHTS (150-200 words): Regional variations. Use [INSERT GRAPH: regional_comparison] placeholder.
+
+Return JSON with stable English keys: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS

@@ -1,0 +1,25 @@
+Redigez les sections narratives pour le Suivi des marches de {country} ({time_period}; {report_month_localized}).
+
+REGLES DE STYLE ET DE SORTIE (OBLIGATOIRES):
+- Redigez naturellement en {language_name}.
+- {locale_instruction}
+- Conservez les titres des citations sources dans leur langue d'origine.
+- Conservez exactement [INSERT GRAPH: regional_comparison] dans REGIONAL_HIGHLIGHTS.
+- Utilisez systematiquement ce glossaire terminologique du PAM:
+{terminology_glossary}
+
+ANALYSE DES TENDANCES:
+{trend_json}
+
+EVENEMENTS:
+{events_json}
+
+SECTIONS DE MODULES A UTILISER:
+{module_sections_json}
+
+SECTIONS A GENERER:
+1. MARKET_OVERVIEW (200-250 mots): conditions generales du marche, trajectoire des prix, facteurs cles.
+2. COMMODITY_ANALYSIS (200-300 mots): analyse de chaque produit.
+3. REGIONAL_HIGHLIGHTS (150-200 mots): variations regionales. Utilisez le placeholder [INSERT GRAPH: regional_comparison].
+
+Retournez du JSON avec les cles anglaises stables: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS

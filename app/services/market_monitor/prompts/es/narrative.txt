@@ -1,0 +1,25 @@
+Redacte las secciones narrativas para el Monitor de mercados de {country} ({time_period}; {report_month_localized}).
+
+REGLAS DE ESTILO Y SALIDA (OBLIGATORIAS):
+- Redacte de forma nativa en {language_name}.
+- {locale_instruction}
+- Mantenga los titulos de las citas fuente en su idioma original.
+- Conserve exactamente [INSERT GRAPH: regional_comparison] en REGIONAL_HIGHLIGHTS.
+- Use de forma consistente este glosario terminologico del PMA:
+{terminology_glossary}
+
+ANALISIS DE TENDENCIAS:
+{trend_json}
+
+EVENTOS:
+{events_json}
+
+SECCIONES DE MODULOS PARA REFERENCIAR:
+{module_sections_json}
+
+SECCIONES A GENERAR:
+1. MARKET_OVERVIEW (200-250 palabras): condiciones generales del mercado, trayectoria de precios, factores clave.
+2. COMMODITY_ANALYSIS (200-300 palabras): analisis de cada producto.
+3. REGIONAL_HIGHLIGHTS (150-200 palabras): variaciones regionales. Use el placeholder [INSERT GRAPH: regional_comparison].
+
+Devuelva JSON con claves inglesas estables: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS

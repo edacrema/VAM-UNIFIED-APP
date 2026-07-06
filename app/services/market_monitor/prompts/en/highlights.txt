@@ -1,0 +1,37 @@
+Draft the HIGHLIGHTS section for {country} Market Monitor ({time_period}; {report_month_localized}).
+
+STYLE AND OUTPUT RULES (MANDATORY):
+- Write natively in {language_name}.
+- {locale_instruction}
+- Preserve source citation titles in their original language.
+- Preserve [INSERT GRAPH: name] placeholders exactly if used.
+- Use this WFP terminology glossary consistently:
+{terminology_glossary}
+
+DATA (with localized MoM/YoY):
+{formatted_stats_json}
+
+EXCHANGE RATE (quantitative ground truth, if available):
+{exchange_data_json}
+
+TREND ANALYSIS:
+{trend_json}
+
+TERMINOLOGY THRESHOLDS (enforce in wording):
+{terminology_thresholds_json}
+
+VALIDATION WARNINGS (must obey):
+{validation_warnings_json}
+
+Include:
+1. Overview (1-2 sentences)
+2. Food Basket Cost with MoM% and YoY%
+3. Top 3 Commodities with changes
+4. Key Drivers (bullet list)
+
+RULES:
+- Key Drivers must be supported by the quantitative DATA above.
+- Do not treat contextual drivers from TREND ANALYSIS as current facts if they conflict with exchange-rate ground truth.
+- If exchange rate is stable, do not claim current currency depreciation as a key driver.
+
+Return JSON with the stable English key: {{"HIGHLIGHTS": "The complete formatted text block"}}
