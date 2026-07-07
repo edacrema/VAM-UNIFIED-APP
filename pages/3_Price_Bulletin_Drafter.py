@@ -607,7 +607,7 @@ if isinstance(result, dict):
             t(
                 result_language,
                 "ui.resolved_language",
-                language=LANGUAGE_NAMES.get(result_language, result_language),
+                language_name=LANGUAGE_NAMES.get(result_language, result_language),
             )
         )
 

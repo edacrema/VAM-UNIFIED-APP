@@ -4,6 +4,7 @@ from app.services.market_monitor.i18n import (
     format_percent_value,
     normalize_generated_text,
     resolve_report_language,
+    t,
 )
 from app.services.market_monitor.prompt_registry import assert_prompt_manifest_valid
 from app.services.market_monitor import graph as market_graph
@@ -33,6 +34,12 @@ def test_babel_formatting_helpers_for_supported_languages():
     assert format_percent_value(1.5, "en") == "1.5%"
     assert format_month_label("2026-05", "fr") == "mai 2026"
     assert format_month_label("2026-05", "es") == "mayo 2026"
+
+
+def test_resolved_language_caption_uses_non_conflicting_placeholder():
+    assert t("en", "ui.resolved_language", language_name="English") == "Report language: English"
+    assert t("fr", "ui.resolved_language", language_name="French") == "Langue du rapport : French"
+    assert t("es", "ui.resolved_language", language_name="Spanish") == "Idioma del informe: Spanish"
 
 
 def test_generated_text_normalizer_preserves_protected_tokens():
