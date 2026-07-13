@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
-from app.services.market_monitor.i18n import format_month_label, t
+from app.services.market_monitor.i18n import format_decimal_value, format_month_label, t
 
 
 class ReportBlock(BaseModel):
@@ -108,7 +108,12 @@ def _text_to_paragraph_blocks(text: str) -> List[ReportBlock]:
     return blocks
 
 
-def _blocks_from_text_with_figures(text: str) -> List[ReportBlock]:
+def _blocks_from_text_with_figures(
+    text: str,
+    *,
+    visualizations: Optional[Dict[str, Any]] = None,
+    figure_aliases: Optional[Dict[str, str]] = None,
+) -> List[ReportBlock]:
     cleaned = _sanitize_text(text)
     if not cleaned:
         return []
@@ -120,13 +125,175 @@ def _blocks_from_text_with_figures(text: str) -> List[ReportBlock]:
         blocks.extend(_text_to_paragraph_blocks(before))
 
         fig_id = m.group(1).strip()
-        if fig_id:
+        if figure_aliases and fig_id in figure_aliases:
+            fig_id = figure_aliases[fig_id]
+        if fig_id and (visualizations is None or visualizations.get(fig_id)):
             blocks.append(ReportBlock(type="figure", figure_id=fig_id))
 
         last = m.end()
 
     blocks.extend(_text_to_paragraph_blocks(cleaned[last:]))
     return blocks
+
+
+def _basket_snapshots_for_report(result: Dict[str, Any]) -> List[tuple[str, Dict[str, Any]]]:
+    baskets = result.get("food_baskets") or {}
+    primary = baskets.get("primary") if isinstance(baskets, dict) else None
+    if not isinstance(primary, dict) or not primary:
+        legacy = result.get("food_basket")
+        primary = legacy if isinstance(legacy, dict) and legacy else None
+    selected: List[tuple[str, Dict[str, Any]]] = []
+    if isinstance(primary, dict) and primary:
+        selected.append(("primary", dict(primary)))
+    secondary = baskets.get("secondary") if isinstance(baskets, dict) else None
+    if bool(result.get("secondary_basket_included")) and isinstance(secondary, dict) and secondary:
+        selected.append(("secondary", dict(secondary)))
+    return selected
+
+
+def _basket_component_payload(item: Dict[str, Any], index: int) -> Dict[str, Any]:
+    name = str(
+        item.get("commodity_name_snapshot")
+        or item.get("commodity_name")
+        or item.get("name")
+        or ""
+    ).strip()
+    quantity = item.get("weight_quantity")
+    try:
+        quantity_value = float(quantity)
+    except (TypeError, ValueError):
+        quantity_value = None
+    return {
+        "commodity_id": item.get("commodity_id"),
+        "commodity_name": name,
+        "unit_id": item.get("databridges_unit_id") or item.get("unit_id"),
+        "unit": str(item.get("databridges_unit") or item.get("unit") or "").strip(),
+        "quantity": quantity_value,
+        "note": item.get("item_note") or item.get("note"),
+        "sort_order": item.get("sort_order") or index,
+    }
+
+
+def _basket_component_label(component: Dict[str, Any], language: str) -> str:
+    quantity = component.get("quantity")
+    if quantity is None:
+        quantity_label = ""
+    elif language == "en":
+        quantity_label = f"{float(quantity):g}"
+    else:
+        quantity_label = format_decimal_value(quantity, language, decimals=2).rstrip("0").rstrip(",.")
+    parts = [quantity_label, str(component.get("unit") or "").strip(), str(component.get("commodity_name") or "").strip()]
+    return " ".join(part for part in parts if part)
+
+
+def _basket_definition_table_meta(result: Dict[str, Any], language: str) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for role, snapshot in _basket_snapshots_for_report(result):
+        raw_items = [item for item in snapshot.get("items") or [] if isinstance(item, dict)]
+        components = [_basket_component_payload(item, index) for index, item in enumerate(raw_items, start=1)]
+        components.sort(key=lambda item: (int(item.get("sort_order") or 0), int(item.get("commodity_id") or 0)))
+        regions = [str(region).strip() for region in snapshot.get("regions") or [] if str(region).strip()]
+        scope_type = str(snapshot.get("scope_type") or "national").strip().lower() or "national"
+        if scope_type == "national":
+            scope_label = t(language, "basket.scope.national")
+        elif regions:
+            scope_label = t(language, "basket.scope.selected_regions_named", regions=", ".join(regions))
+        else:
+            scope_label = t(language, "basket.scope.selected_regions")
+        name = str(snapshot.get("basket_name") or ("MEB" if role == "primary" else "")).strip()
+        role_label = t(language, f"basket.role.{role}")
+        rows.append(
+            {
+                "basket_role": role,
+                "role_label": role_label,
+                "basket_name": name,
+                "short_description": str(snapshot.get("short_description") or "").strip(),
+                "scope_type": scope_type,
+                "scope_label": scope_label,
+                "regions": regions,
+                "components": components,
+                "basket_version_id": snapshot.get("basket_version_id"),
+                "version_number": snapshot.get("version_number"),
+                "display": {
+                    "basket": f"{name} ({role_label})",
+                    "description": str(snapshot.get("short_description") or "").strip(),
+                    "scope": scope_label,
+                    "composition": "; ".join(
+                        label for label in (_basket_component_label(item, language) for item in components) if label
+                    ),
+                },
+            }
+        )
+    return {
+        "table_kind": "basket_definitions",
+        "language": language,
+        "columns": ["basket", "description", "scope", "composition"],
+        "headers": {
+            "basket": t(language, "basket.table.header.basket"),
+            "description": t(language, "basket.table.header.description"),
+            "scope": t(language, "basket.table.header.scope"),
+            "composition": t(language, "basket.table.header.composition"),
+        },
+        "rows": rows,
+    }
+
+
+def basket_definition_table_display(meta: Dict[str, Any]) -> tuple[List[str], List[List[str]]]:
+    columns = [str(item) for item in meta.get("columns") or []]
+    headers_by_key = meta.get("headers") or {}
+    headers = [str(headers_by_key.get(key) or key) for key in columns]
+    display_rows: List[List[str]] = []
+    for row in meta.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        display = row.get("display") or {}
+        display_rows.append([str(display.get(key) or "") for key in columns])
+    return headers, display_rows
+
+
+def _basket_row(meta: Dict[str, Any], role: str) -> Optional[Dict[str, Any]]:
+    return next(
+        (
+            row
+            for row in meta.get("rows") or []
+            if isinstance(row, dict) and row.get("basket_role") == role
+        ),
+        None,
+    )
+
+
+def _basket_figure_caption(
+    meta: Dict[str, Any],
+    role: str,
+    kind: str,
+    *,
+    language: str,
+    time_period: str,
+) -> str:
+    row = _basket_row(meta, role)
+    if row is None and role == "primary" and kind == "trend":
+        return t(language, "figure.food_basket_trend")
+    if row is None:
+        return ""
+    key = "figure.basket_trend_role" if kind == "trend" else "figure.basket_regional_role"
+    kwargs = {
+        "basket": row.get("basket_name") or ("MEB" if role == "primary" else ""),
+        "scope": row.get("scope_label") or "",
+        "period": format_month_label(time_period, language),
+    }
+    return t(language, key, **kwargs)
+
+
+def _available_basket_figure(
+    visualizations: Dict[str, Any],
+    canonical_id: str,
+    legacy_id: Optional[str] = None,
+) -> Optional[str]:
+    if visualizations.get(canonical_id):
+        return canonical_id
+    if legacy_id and visualizations.get(legacy_id):
+        return legacy_id
+    return None
 
 
 def _module_section_title(module_id: Any, language: str = "en") -> str:
@@ -164,6 +331,8 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     module_sections = result.get("module_sections") or {}
     document_references = result.get("document_references") or []
     visualizations = result.get("visualizations") or {}
+    visualizations = visualizations if isinstance(visualizations, dict) else {}
+    basket_meta = _basket_definition_table_meta(result, language)
 
     blocks: List[ReportBlock] = [ReportBlock(type="heading", text=title, level=1)]
 
@@ -171,11 +340,52 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     if isinstance(highlights, str) and highlights.strip():
         blocks.append(ReportBlock(type="heading", text=t(language, "section.HIGHLIGHTS"), level=2))
         blocks.extend(_text_to_paragraph_blocks(highlights))
+
+    if basket_meta.get("rows"):
+        blocks.append(
+            ReportBlock(
+                type="heading",
+                text=t(language, "section.BASKET_DEFINITIONS"),
+                level=2,
+            )
+        )
+        blocks.append(ReportBlock(type="table", meta=basket_meta))
+
+    primary_trend = _available_basket_figure(
+        visualizations,
+        "food_basket_trend_primary",
+        "food_basket_trend",
+    )
+    if primary_trend:
         blocks.append(
             ReportBlock(
                 type="figure",
-                figure_id="food_basket_trend",
-                caption=t(language, "figure.food_basket_trend"),
+                figure_id=primary_trend,
+                caption=_basket_figure_caption(
+                    basket_meta,
+                    "primary",
+                    "trend",
+                    language=language,
+                    time_period=time_period,
+                ),
+            )
+        )
+    secondary_trend = _available_basket_figure(
+        visualizations,
+        "food_basket_trend_secondary",
+    )
+    if secondary_trend and bool(result.get("secondary_basket_included")):
+        blocks.append(
+            ReportBlock(
+                type="figure",
+                figure_id=secondary_trend,
+                caption=_basket_figure_caption(
+                    basket_meta,
+                    "secondary",
+                    "trend",
+                    language=language,
+                    time_period=time_period,
+                ),
             )
         )
 
@@ -187,7 +397,7 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     commodity = sections.get("COMMODITY_ANALYSIS")
     if isinstance(commodity, str) and commodity.strip():
         blocks.append(ReportBlock(type="heading", text=t(language, "section.COMMODITY_ANALYSIS"), level=2))
-        blocks.extend(_blocks_from_text_with_figures(commodity))
+        blocks.extend(_blocks_from_text_with_figures(commodity, visualizations=visualizations))
 
         has_inline_commodity_figs = False
         for m in _INSERT_FIGURE_RE.finditer(_sanitize_text(commodity)):
@@ -234,9 +444,67 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
                     blocks.append(ReportBlock(type="figure", figure_id=fig_id))
 
     regional = sections.get("REGIONAL_HIGHLIGHTS")
-    if isinstance(regional, str) and regional.strip():
+    primary_regional = _available_basket_figure(
+        visualizations,
+        "regional_comparison_primary",
+        "regional_comparison",
+    )
+    secondary_regional = _available_basket_figure(
+        visualizations,
+        "regional_comparison_secondary",
+    )
+    has_regional_text = isinstance(regional, str) and bool(regional.strip())
+    if has_regional_text or primary_regional or (secondary_regional and bool(result.get("secondary_basket_included"))):
         blocks.append(ReportBlock(type="heading", text=t(language, "section.REGIONAL_HIGHLIGHTS"), level=2))
-        blocks.extend(_blocks_from_text_with_figures(regional))
+        regional_blocks = (
+            _blocks_from_text_with_figures(
+                regional,
+                visualizations=visualizations,
+                figure_aliases={
+                    "regional_comparison": primary_regional or "regional_comparison",
+                },
+            )
+            if has_regional_text
+            else []
+        )
+        blocks.extend(regional_blocks)
+        inserted_ids = {
+            block.figure_id
+            for block in regional_blocks
+            if block.type == "figure" and block.figure_id
+        }
+        if primary_regional and primary_regional not in inserted_ids:
+            blocks.append(
+                ReportBlock(
+                    type="figure",
+                    figure_id=primary_regional,
+                    caption=_basket_figure_caption(
+                        basket_meta,
+                        "primary",
+                        "regional",
+                        language=language,
+                        time_period=time_period,
+                    ),
+                )
+            )
+        if (
+            secondary_regional
+            and bool(result.get("secondary_basket_included"))
+            and secondary_regional not in inserted_ids
+        ):
+            blocks.append(
+                ReportBlock(
+                    type="figure",
+                    figure_id=secondary_regional,
+                    caption=_basket_figure_caption(
+                        basket_meta,
+                        "secondary",
+                        "regional",
+                        language=language,
+                        time_period=time_period,
+                    ),
+                )
+            )
 
     if isinstance(module_sections, dict):
         for module_id, section_text in module_sections.items():

@@ -20,10 +20,18 @@ DONNEES_TRAVAIL:
 SIGNAUX CONTEXTUELS DU MARCHE:
 {trend_analysis_json}
 
+LIEN DE POUVOIR D'ACHAT AVEC LE PANIER PRIMAIRE:
+{basket_relevance_json}
+
+SIGNALEMENTS QA A CORRIGER (vides lors du premier brouillon):
+{correction_flags_json}
+
 Redigez le paragraphe dans cet ordre exact:
 1. Commencez par le salaire journalier occasionnel/non qualifie lorsqu'il est disponible, sinon le salaire journalier principal, avec variation mensuelle et annuelle si disponible; incluez le salaire qualifie uniquement s'il est present.
 2. Mentionnez la disponibilite de la main-d'oeuvre uniquement si LABOUR_DATA.availability est present.
 3. Si purchasing_power est present, exprimez les kg de l'aliment de base nomme obtenus avec une journee de salaire et indiquez si cela s'est ameliore ou degrade.
 4. Attribuez le mouvement a la demande saisonniere probable de main-d'oeuvre, au cycle de recolte ou aux conditions economiques generales.
+
+Le pouvoir d'achat est lie uniquement a l'aliment de base explicitement associe au panier primaire. Ne deduisez, ne calculez et ne mentionnez jamais le pouvoir d'achat du panier secondaire.
 
 Retournez UNIQUEMENT le texte narratif.

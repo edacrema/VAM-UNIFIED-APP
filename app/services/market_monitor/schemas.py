@@ -5,7 +5,7 @@ Classi e modelli per la generazione di Market Monitor Reports.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, field, asdict
 
@@ -100,6 +100,62 @@ class DataStatistics:
 # PYDANTIC MODELS (API)
 # ============================================================================
 
+class BasketConfigurationOutput(BaseModel):
+    country: str
+    iso3: str
+    primary: Optional[Dict[str, Any]] = None
+    secondary: Optional[Dict[str, Any]] = None
+    needs_primary_setup: bool
+    has_secondary: bool
+    second_basket_enabled: bool = True
+
+
+class BasketArchiveOutput(BasketConfigurationOutput):
+    archived_secondary: Optional[Dict[str, Any]] = None
+
+
+class BasketHistoryOutput(BaseModel):
+    country: str
+    iso3: str
+    basket_role: Literal["primary", "secondary"]
+    versions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReportableMonthsInput(BaseModel):
+    """Immutable basket and region selection used for reportability and refresh."""
+
+    basket_version_id: Optional[str] = Field(
+        default=None,
+        description="Deprecated primary basket version alias.",
+    )
+    primary_basket_version_id: Optional[str] = None
+    include_secondary_basket: bool = Field(
+        default=False,
+        description="Reportability remains primary-only unless secondary inclusion is explicit.",
+    )
+    secondary_basket_version_id: Optional[str] = None
+    admin1_list: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_basket_version_aliases(self) -> "ReportableMonthsInput":
+        legacy = _optional_identifier(self.basket_version_id)
+        primary = _optional_identifier(self.primary_basket_version_id)
+        secondary = _optional_identifier(self.secondary_basket_version_id)
+        if legacy and primary and legacy != primary:
+            raise ValueError(
+                "basket_version_id and primary_basket_version_id must reference the same primary basket version."
+            )
+        self.basket_version_id = legacy
+        self.primary_basket_version_id = primary
+        self.secondary_basket_version_id = secondary
+        self.admin1_list = [str(item).strip() for item in self.admin1_list if str(item).strip()]
+        return self
+
+    @property
+    def effective_primary_basket_version_id(self) -> Optional[str]:
+        return self.primary_basket_version_id or self.basket_version_id
+
+
 class GenerateReportInput(BaseModel):
     """Input for generating a report."""
     country: str = Field(..., description="Country name (e.g., 'Sudan', 'Yemen')")
@@ -124,7 +180,19 @@ class GenerateReportInput(BaseModel):
     )
     basket_version_id: Optional[str] = Field(
         default=None,
-        description="Active country food basket version selected by the UI. Stale versions are rejected."
+        description="Deprecated alias for primary_basket_version_id. Stale versions are rejected."
+    )
+    primary_basket_version_id: Optional[str] = Field(
+        default=None,
+        description="Active primary basket version selected by the UI. Stale versions are rejected."
+    )
+    include_secondary_basket: bool = Field(
+        default=True,
+        description="Include the active secondary basket in this report when one exists."
+    )
+    secondary_basket_version_id: Optional[str] = Field(
+        default=None,
+        description="Active secondary basket version selected by the UI. Ignored when inclusion is false."
     )
     admin1_list: List[str] = Field(
         default=[],
@@ -152,6 +220,24 @@ class GenerateReportInput(BaseModel):
         description="If True, use mock numeric datasets instead of real APIs (Seerist/ReliefWeb news retrieval is always real)"
     )
 
+    @model_validator(mode="after")
+    def validate_basket_version_aliases(self) -> "GenerateReportInput":
+        legacy = _optional_identifier(self.basket_version_id)
+        primary = _optional_identifier(self.primary_basket_version_id)
+        secondary = _optional_identifier(self.secondary_basket_version_id)
+        if legacy and primary and legacy != primary:
+            raise ValueError(
+                "basket_version_id and primary_basket_version_id must reference the same primary basket version."
+            )
+        self.basket_version_id = legacy
+        self.primary_basket_version_id = primary
+        self.secondary_basket_version_id = secondary
+        return self
+
+    @property
+    def effective_primary_basket_version_id(self) -> Optional[str]:
+        return self.primary_basket_version_id or self.basket_version_id
+
 
 class GenerateReportOutput(BaseModel):
     """Output of the report generation."""
@@ -172,12 +258,31 @@ class GenerateReportOutput(BaseModel):
     news_counts: Dict[str, int] = {}
     cache_metadata: Dict[str, Any] = {}
     food_basket: Dict[str, Any] = {}
+    food_baskets: Dict[str, Any] = Field(
+        default_factory=lambda: {"primary": None, "secondary": None}
+    )
+    basket_statistics: Dict[str, Any] = Field(
+        default_factory=lambda: {"primary": None, "secondary": None}
+    )
+    basket_series_national: List[Dict[str, Any]] = Field(default_factory=list)
+    basket_series_regional: List[Dict[str, Any]] = Field(default_factory=list)
+    secondary_basket_included: bool = False
+    qa_review: Dict[str, Any] = Field(
+        default_factory=lambda: {"status": "not_recorded", "correction_attempts": 0, "flags": []}
+    )
     fuel_energy_data: Optional[Dict[str, Any]] = None
     livestock_animal_products_data: Optional[Dict[str, Any]] = None
     labour_market_data: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
     llm_calls: int = 0
     success: bool = True
+
+
+def _optional_identifier(value: Optional[str]) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 class ReportStatusOutput(BaseModel):

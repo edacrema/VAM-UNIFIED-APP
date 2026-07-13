@@ -82,6 +82,7 @@ class ReportPriceGapReport:
     warnings: list[str] = field(default_factory=list)
     backfill_attempted: bool = False
     backfill_rows_fetched: int = 0
+    basket_coverage_gaps: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class ReportPriceGapReport:
             "backfill_attempted": self.backfill_attempted,
             "backfill_rows_fetched": self.backfill_rows_fetched,
             "hard_missing": [item.to_dict() for item in self.hard_missing_statuses()],
+            "basket_coverage_gaps": list(self.basket_coverage_gaps),
         }
 
     def hard_missing_statuses(self) -> list[CommodityGapStatus]:
@@ -144,6 +146,13 @@ class ReportPriceDataResult:
     livestock_animal_products_data: Optional[dict[str, Any]] = None
     labour_market_data: Optional[dict[str, Any]] = None
     df_history_national: pd.DataFrame = field(default_factory=pd.DataFrame)
+    basket_series_national: pd.DataFrame = field(default_factory=pd.DataFrame)
+    basket_series_regional: pd.DataFrame = field(default_factory=pd.DataFrame)
+    basket_statistics: dict[str, Any] = field(
+        default_factory=lambda: {"primary": None, "secondary": None}
+    )
+    basket_calculation_specs: list[dict[str, Any]] = field(default_factory=list)
+    basket_applicable_regions: dict[str, list[str]] = field(default_factory=dict)
 
 
 class PriceDataGateError(RuntimeError):
@@ -156,6 +165,36 @@ class PriceDataGateError(RuntimeError):
         super().__init__(self._build_message())
 
     def _build_message(self) -> str:
+        coverage_gaps = list(self.gap_report.basket_coverage_gaps or [])
+        if coverage_gaps:
+            parts = []
+            has_secondary = False
+            for gap in coverage_gaps:
+                role = str(gap.get("basket_role") or "basket")
+                name = str(gap.get("basket_name") or role)
+                region = gap.get("region")
+                scope = f" in {region}" if region else ""
+                missing = ", ".join(gap.get("missing_component_names") or []) or "unknown components"
+                parts.append(f"{role} basket {name!r}{scope}: {missing}")
+                has_secondary = has_secondary or role == "secondary"
+            suggestion = " Uncheck the secondary basket to run the primary basket only." if has_secondary else ""
+            source_error = any(item.source_status == "source_error" for item in self.gap_report.commodity_statuses)
+            if source_error:
+                reason = "targeted DataBridges backfill could not verify or obtain missing reference-month basket prices"
+            else:
+                reason = "the reference-month food basket is incomplete after targeted DataBridges backfill"
+            hard_statuses = self.gap_report.hard_missing_statuses()
+            source_details = ""
+            if hard_statuses:
+                source_details = " Source details: " + "; ".join(
+                    item.hard_stop_reason(self.gap_report.iso3, self.gap_report.reference_month)
+                    for item in hard_statuses
+                ) + "."
+            return (
+                f"Cannot generate Price Bulletin for {self.gap_report.country} ({self.gap_report.iso3}) "
+                f"{self.gap_report.reference_month} because {reason}. Required basket coverage: "
+                f"{'; '.join(parts)}.{source_details}{suggestion} No report was generated."
+            )
         hard_missing = self.gap_report.hard_missing_statuses()
         if hard_missing:
             reasons = "; ".join(

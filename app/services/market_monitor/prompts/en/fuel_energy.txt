@@ -20,10 +20,18 @@ FUEL DATA:
 CONTEXTUAL MARKET SIGNALS:
 {trend_analysis_json}
 
+BASKET RELEVANCE POLICY:
+{basket_relevance_json}
+
+QA CORRECTION FLAGS (revise these issues; empty on the first draft):
+{correction_flags_json}
+
 Write the paragraph in this exact order:
 1. Lead with diesel current national retail price, unit, month-on-month change, and year-on-year change if available; add petrol/gasoline in the same sentence if available.
 2. Attribute the movement to the most likely driver: international oil/energy prices, regional supply/logistics constraints, or domestic policy/regulated/administered pricing.
 3. Explain implications for food prices and households: fuel affects transport/distribution costs, staples, food baskets, and purchasing power.
 4. If regional_disparities are present, add one short clause on the notable disparity; otherwise omit this.
+
+Discuss transport and distribution transmission generally. Do not name, compare, or attribute movement to a basket.
 
 Return ONLY the narrative text.

@@ -16,6 +16,12 @@ QUANTITATIVE GROUND TRUTH:
 TREND ANALYSIS (for cross-validation of drivers; treat as hypotheses unless supported by data):
 {trend_json}
 
+IMMUTABLE BASKET GROUND TRUTH:
+{basket_context_json}
+
+OPTIONAL-MODULE BASKET RELEVANCE:
+{module_basket_relevance_json}
+
 TERMINOLOGY THRESHOLDS (must be enforced):
 {terminology_thresholds_json}
 
@@ -31,6 +37,15 @@ CROSS-VALIDATION RULES:
 6. Distinguish historical context from current data claims.
 7. Flag internal contradictions between sections.
 8. Flag mixed-language report output, missing required WFP terminology, changed citation titles, and corrupted [INSERT GRAPH: ...] placeholders.
+9. Preserve primary/secondary identity and order; flag swapped names, costs, percentages, descriptions, or scopes.
+10. HIGHLIGHTS and MARKET_OVERVIEW must include every included basket and must not mention an excluded secondary.
+11. Flag national wording for selected-regions baskets, invented purpose beyond the CO description, or ambiguous singular basket wording in two-basket prose.
+12. Direct absolute-cost comparisons are always forbidden, including cheaper/more expensive, higher/lower cost, differences, ratios, sums, or averages.
+13. Flag percentages stated when the corresponding completeness flag is false and joint/faster wording that violates comparison_policy.
+14. Component contributions are cost composition only; flag unsupported claims that they caused a movement.
+15. Optional modules may name baskets only when MODULE BASKET RELEVANCE permits it. Labour must never infer secondary-basket purchasing power.
+
+Use one of these stable section identifiers: HIGHLIGHTS, MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS, EXCHANGE_RATE_ANALYSIS, FUEL_ENERGY_ANALYSIS, LIVESTOCK_ANIMAL_PRODUCTS_ANALYSIS, LABOUR_MARKET_ANALYSIS, GLOBAL. Use GLOBAL for cross-section issues.
 
 Check for:
 1. Numerical accuracy (prices, MoM%, YoY%)
@@ -39,7 +54,7 @@ Check for:
 4. Context-data conflicts and terminology misuse
 
 Return JSON: {{"flags": [
-    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error|basket_identity_error|basket_scope_error|basket_comparison_error|basket_coverage_error|basket_purpose_invention|unsupported_basket_link", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
 ]}}
 
 If no errors, return {{"flags": []}}

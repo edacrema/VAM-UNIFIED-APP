@@ -16,6 +16,12 @@ VERITE QUANTITATIVE DE REFERENCE:
 ANALYSE DES TENDANCES (pour validation croisee des facteurs; a traiter comme hypotheses sauf appui des donnees):
 {trend_json}
 
+VERITE IMMUABLE SUR LES PANIERS:
+{basket_context_json}
+
+PERTINENCE DES PANIERS POUR LES MODULES OPTIONNELS:
+{module_basket_relevance_json}
+
 SEUILS TERMINOLOGIQUES (a appliquer):
 {terminology_thresholds_json}
 
@@ -31,6 +37,15 @@ REGLES DE VALIDATION CROISEE:
 6. Distinguez le contexte historique des affirmations sur les donnees actuelles.
 7. Signalez les contradictions internes entre sections.
 8. Signalez la sortie en langue mixte, les termes PAM requis manquants, les titres de citations modifies et les placeholders [INSERT GRAPH: ...] corrompus.
+9. Conservez l'identite et l'ordre primaire/secondaire; signalez tout echange de noms, couts, pourcentages, descriptions ou portees.
+10. HIGHLIGHTS et MARKET_OVERVIEW doivent inclure chaque panier inclus et ne jamais mentionner un secondaire exclu.
+11. Signalez le vocabulaire national pour un panier selected_regions, un objectif invente au-dela de la description ou un singulier ambigu avec deux paniers.
+12. Toute comparaison directe des couts absolus est interdite: moins/plus cher, cout superieur/inferieur, ecart, ratio, somme ou moyenne.
+13. Signalez les pourcentages dont le drapeau de completude est faux et les comparaisons de direction/vitesse contraires a comparison_policy.
+14. Les contributions de composantes decrivent uniquement la composition; signalez toute causalite non etayee.
+15. Un module optionnel ne peut nommer un panier que si MODULE BASKET RELEVANCE l'autorise. Le travail ne doit jamais deduire le pouvoir d'achat du secondaire.
+
+Utilisez un identifiant de section stable parmi: HIGHLIGHTS, MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS, EXCHANGE_RATE_ANALYSIS, FUEL_ENERGY_ANALYSIS, LIVESTOCK_ANIMAL_PRODUCTS_ANALYSIS, LABOUR_MARKET_ANALYSIS, GLOBAL. Utilisez GLOBAL pour les problemes transversaux.
 
 Verifier:
 1. Exactitude numerique (prix, MoM%, YoY%)
@@ -39,7 +54,7 @@ Verifier:
 4. Conflits contexte-donnees et mauvais usage terminologique
 
 Retournez du JSON: {{"flags": [
-    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error|basket_identity_error|basket_scope_error|basket_comparison_error|basket_coverage_error|basket_purpose_invention|unsupported_basket_link", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
 ]}}
 
 S'il n'y a pas d'erreur, retournez {{"flags": []}}

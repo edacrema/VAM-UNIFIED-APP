@@ -20,10 +20,18 @@ DONNEES CARBURANTS:
 SIGNAUX CONTEXTUELS DU MARCHE:
 {trend_analysis_json}
 
+POLITIQUE DE PERTINENCE DES PANIERS:
+{basket_relevance_json}
+
+SIGNALEMENTS QA A CORRIGER (vides lors du premier brouillon):
+{correction_flags_json}
+
 Redigez le paragraphe dans cet ordre exact:
 1. Commencez par le prix national de detail actuel du diesel, l'unite, la variation mensuelle et la variation annuelle si disponible; ajoutez l'essence dans la meme phrase si disponible.
 2. Attribuez le mouvement au facteur le plus probable: prix internationaux du petrole/de l'energie, contraintes regionales d'approvisionnement/logistique, ou politique/prix reglementes/administres.
 3. Expliquez les implications pour les prix alimentaires et les menages: le carburant affecte les couts de transport/distribution, les denrees de base, les paniers alimentaires et le pouvoir d'achat.
 4. Si regional_disparities est present, ajoutez une courte proposition sur l'ecart notable; sinon omettez-la.
+
+Discutez de la transmission par le transport et la distribution de facon generale. Ne nommez, ne comparez et n'attribuez aucun mouvement a un panier.
 
 Retournez UNIQUEMENT le texte narratif.

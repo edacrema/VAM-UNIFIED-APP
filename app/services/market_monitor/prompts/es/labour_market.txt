@@ -20,10 +20,18 @@ DATOS_LABORALES:
 SENALES CONTEXTUALES DEL MERCADO:
 {trend_analysis_json}
 
+VINCULO DE PODER ADQUISITIVO CON LA CANASTA PRIMARIA:
+{basket_relevance_json}
+
+ALERTAS DE QA A CORREGIR (vacias en el primer borrador):
+{correction_flags_json}
+
 Redacte el parrafo en este orden exacto:
 1. Comience con el jornal casual/no calificado cuando este disponible; de lo contrario, use el jornal principal, incluyendo variacion intermensual e interanual cuando exista; incluya salario calificado solo si esta presente.
 2. Mencione disponibilidad laboral solo si LABOUR_DATA.availability esta presente.
 3. Si purchasing_power esta presente, exprese los kg del alimento basico indicado que se pueden obtener con un dia de salario y si mejoro o se erosiono.
 4. Atribuya el movimiento a demanda laboral estacional probable, ciclo de cosecha o condiciones economicas mas amplias.
+
+El poder adquisitivo esta ligado solo al alimento basico explicitamente asociado con la canasta primaria. Nunca infiera, calcule ni mencione poder adquisitivo de la canasta secundaria.
 
 Devuelva SOLO el texto narrativo.

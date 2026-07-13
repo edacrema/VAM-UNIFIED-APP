@@ -1,9 +1,12 @@
+import os
+import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy import inspect
+from sqlalchemy import create_engine as create_sqlalchemy_engine
+from sqlalchemy import inspect, text
 
+from app.services.market_monitor.food_basket import BasketRole, SqlCountryFoodBasketRepository
 from app.services.price_cache.config import load_price_cache_config
 from app.services.price_cache.fixtures import seed_cache_snapshot
 from app.services.price_cache.migrations import (
@@ -76,6 +79,261 @@ def test_migrations_create_sqlite_schema(tmp_path):
     assert "country_food_basket_current" in tables
     assert "country_food_basket_versions" in tables
     assert "country_food_basket_items" in tables
+    assert "country_food_basket_regions" in tables
+
+
+def test_migration_005_upgrades_populated_food_basket_schema_without_id_loss(tmp_path):
+    config = load_price_cache_config(
+        {
+            "PRICE_CACHE_BACKEND": "sqlite",
+            "PRICE_CACHE_SQLITE_PATH": str(tmp_path / "legacy_baskets.sqlite3"),
+        }
+    )
+    engine = create_price_cache_engine(config)
+
+    with engine.begin() as conn:
+        _ensure_migration_table(conn, "sqlite")
+        for path in sorted((MIGRATIONS_ROOT / "sqlite").glob("*.sql")):
+            if path.name.split("_", 1)[0] > "004":
+                continue
+            for statement in _split_sql(path.read_text(encoding="utf-8")):
+                conn.execute(text(statement))
+            conn.execute(
+                text("INSERT INTO price_cache_schema_migrations(version) VALUES (:version)"),
+                {"version": path.stem},
+            )
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO country_food_basket_versions (
+                    basket_version_id,
+                    country_iso3,
+                    version_number,
+                    status,
+                    created_at,
+                    created_by_user_id,
+                    cache_version_id_at_creation,
+                    change_note
+                ) VALUES (
+                    'legacy-basket-version',
+                    'SSD',
+                    7,
+                    'active',
+                    '2026-01-01T00:00:00+00:00',
+                    'legacy-user',
+                    'legacy-cache-version',
+                    'legacy basket'
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO country_food_basket_items (
+                    basket_item_id,
+                    basket_version_id,
+                    commodity_id,
+                    commodity_name_snapshot,
+                    databridges_unit_id,
+                    databridges_unit,
+                    weight_quantity,
+                    sort_order,
+                    item_note
+                ) VALUES (
+                    'legacy-basket-item',
+                    'legacy-basket-version',
+                    1,
+                    'Maize',
+                    100,
+                    'kg',
+                    2,
+                    1,
+                    'legacy item'
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO country_food_basket_current (
+                    country_iso3,
+                    active_basket_version_id,
+                    updated_at,
+                    updated_by_user_id
+                ) VALUES (
+                    'SSD',
+                    'legacy-basket-version',
+                    '2026-01-01T00:00:00+00:00',
+                    'legacy-user'
+                )
+                """
+            )
+        )
+
+    applied = apply_migrations(engine, config.backend)
+    applied_again = apply_migrations(engine, config.backend)
+
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        version = conn.execute(
+            text("SELECT * FROM country_food_basket_versions WHERE basket_version_id = 'legacy-basket-version'")
+        ).mappings().one()
+        item = conn.execute(
+            text("SELECT * FROM country_food_basket_items WHERE basket_item_id = 'legacy-basket-item'")
+        ).mappings().one()
+        current = conn.execute(
+            text("SELECT * FROM country_food_basket_current WHERE country_iso3 = 'SSD'")
+        ).mappings().one()
+        foreign_keys = conn.exec_driver_sql(
+            "PRAGMA foreign_key_list('country_food_basket_current')"
+        ).mappings().all()
+
+    assert applied == ["005_second_food_basket"]
+    assert applied_again == []
+    assert version["basket_version_id"] == "legacy-basket-version"
+    assert version["basket_role"] == "primary"
+    assert version["basket_name"] == "MEB"
+    assert version["short_description"] == "Primary MEB reference basket configured by the Country Office."
+    assert version["scope_type"] == "national"
+    assert item["basket_item_id"] == "legacy-basket-item"
+    assert item["basket_version_id"] == "legacy-basket-version"
+    assert current["active_basket_version_id"] == "legacy-basket-version"
+    assert current["basket_role"] == "primary"
+    assert inspector.get_pk_constraint("country_food_basket_current")["constrained_columns"] == [
+        "country_iso3",
+        "basket_role",
+    ]
+    assert "country_food_basket_regions" in inspector.get_table_names()
+    role_fk = sorted(
+        (int(row["seq"]), str(row["from"]), str(row["to"]))
+        for row in foreign_keys
+    )
+    assert role_fk == [
+        (0, "country_iso3", "country_iso3"),
+        (1, "basket_role", "basket_role"),
+        (2, "active_basket_version_id", "basket_version_id"),
+    ]
+
+
+def test_postgres_migration_005_upgrade_and_role_aware_repository_contract():
+    database_url = os.getenv("TEST_POSTGRES_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_POSTGRES_DATABASE_URL is not configured")
+
+    schema = f"basket_phase1_{uuid.uuid4().hex}"
+    admin_engine = create_sqlalchemy_engine(database_url, future=True)
+    with admin_engine.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+
+    engine = create_sqlalchemy_engine(
+        database_url,
+        future=True,
+        connect_args={"options": f"-csearch_path={schema}"},
+    )
+    try:
+        with engine.begin() as conn:
+            _ensure_migration_table(conn, "postgres")
+            for path in sorted((MIGRATIONS_ROOT / "postgres").glob("*.sql")):
+                if path.name.split("_", 1)[0] > "004":
+                    continue
+                for statement in _split_sql(path.read_text(encoding="utf-8")):
+                    conn.execute(text(statement))
+                conn.execute(
+                    text("INSERT INTO price_cache_schema_migrations(version) VALUES (:version)"),
+                    {"version": path.stem},
+                )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO country_food_basket_versions (
+                        basket_version_id,
+                        country_iso3,
+                        version_number,
+                        status,
+                        created_at,
+                        created_by_user_id
+                    ) VALUES (
+                        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                        'SSD',
+                        1,
+                        'active',
+                        '2026-01-01T00:00:00+00:00',
+                        'legacy-user'
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO country_food_basket_items (
+                        basket_item_id,
+                        basket_version_id,
+                        commodity_id,
+                        commodity_name_snapshot,
+                        databridges_unit_id,
+                        databridges_unit,
+                        weight_quantity,
+                        sort_order
+                    ) VALUES (
+                        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+                        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                        1,
+                        'Maize',
+                        100,
+                        'kg',
+                        2,
+                        1
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO country_food_basket_current (
+                        country_iso3,
+                        active_basket_version_id,
+                        updated_at,
+                        updated_by_user_id
+                    ) VALUES (
+                        'SSD',
+                        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                        '2026-01-01T00:00:00+00:00',
+                        'legacy-user'
+                    )
+                    """
+                )
+            )
+
+        assert apply_migrations(engine, "postgres") == ["005_second_food_basket"]
+        repo = SqlPriceCacheRepository(engine)
+        seed_cache_snapshot(repo)
+        basket_repo = SqlCountryFoodBasketRepository(engine)
+        primary = basket_repo.get_active_basket("SSD", BasketRole.PRIMARY)
+        secondary = basket_repo.save_basket(
+            "SSD",
+            role=BasketRole.SECONDARY,
+            basket_name="Pastoral Basket",
+            short_description="Pastoral household affordability proxy.",
+            items=[{"commodity_id": 2, "weight_quantity": 3}],
+        )
+
+        assert primary is not None
+        assert primary.basket_version_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        assert primary.basket_name == "MEB"
+        assert primary.version_number == 1
+        assert secondary.version_number == 2
+        assert basket_repo.get_active_baskets("SSD")["primary"].basket_version_id == primary.basket_version_id
+        assert basket_repo.get_active_baskets("SSD")["secondary"].basket_version_id == secondary.basket_version_id
+    finally:
+        engine.dispose()
+        with admin_engine.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin_engine.dispose()
 
 
 def test_migration_003_backfills_admin_metadata_on_legacy_databases(tmp_path):

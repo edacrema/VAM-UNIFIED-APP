@@ -20,10 +20,18 @@ LABOUR_DATA:
 CONTEXTUAL MARKET SIGNALS:
 {trend_analysis_json}
 
+PRIMARY-BASKET PURCHASING-POWER LINK:
+{basket_relevance_json}
+
+QA CORRECTION FLAGS (revise these issues; empty on the first draft):
+{correction_flags_json}
+
 Write the paragraph in this exact order:
 1. Lead with the casual/unskilled daily wage where available, otherwise the primary daily wage, including MoM and YoY where available; include skilled wage only if present.
 2. Mention labour availability only if LABOUR_DATA.availability is present.
 3. If purchasing_power is present, express kg of the named staple obtainable from one day's wage and whether it improved or eroded.
 4. Attribute the movement to likely seasonal labour demand, harvest cycle, or broader economic conditions.
+
+Purchasing power is tied only to the explicitly linked primary-basket staple. Never infer, calculate, or state secondary-basket purchasing power.
 
 Return ONLY the narrative text.

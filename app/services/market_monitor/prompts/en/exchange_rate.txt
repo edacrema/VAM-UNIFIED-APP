@@ -17,10 +17,18 @@ CONTEXT:
 - Recent trend: {trend}
 - Quotation direction: local currency per 1 USD; higher values indicate local-currency depreciation.
 
+BASKET RELEVANCE POLICY:
+{basket_relevance_json}
+
+QA CORRECTION FLAGS (revise these issues; empty on the first draft):
+{correction_flags_json}
+
 Write a concise analysis (100-150 words) covering:
 1. Current exchange rate status and recent trend.
 2. Month-on-month change and its significance for import costs.
 3. Year-on-year comparison showing longer-term trajectory.
 4. Implications for food prices (wheat, rice, cooking oil, fuel).
+
+Discuss transmission to food prices and households generally. Do not name, compare, or attribute movement to a basket.
 
 Return ONLY the narrative text. No headers or formatting.

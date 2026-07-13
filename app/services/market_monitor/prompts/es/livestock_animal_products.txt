@@ -20,10 +20,18 @@ DATOS_GANADO_Y_ANIMALES:
 SENALES CONTEXTUALES DEL MERCADO:
 {trend_analysis_json}
 
+VINCULOS CON CANASTAS RESPALDADOS POR EVIDENCIA:
+{basket_relevance_json}
+
+ALERTAS DE QA A CORREGIR (vacias en el primer borrador):
+{correction_flags_json}
+
 Redacte el parrafo en este orden exacto:
 1. Comience con niveles de precios disponibles de productos animales y cambios intermensuales/interanuales en unidades nativas; incluya la serie de animales vivos solo si esta presente.
 2. Atribuya el movimiento a demanda estacional/festiva probable, condiciones de alimento/pastura/agua, oferta/produccion o dependencia de importaciones.
 3. Explique implicaciones para la asequibilidad de proteina animal y diversidad alimentaria. Si hay datos live_animal, mencione tambien ingresos pastoriles o terminos de intercambio ganado/cereales.
 4. Si regional_disparities esta presente, agregue una clausula breve sobre la disparidad notable; de lo contrario omitela.
+
+Nombre una canasta solo si los VINCULOS CON CANASTAS muestran una coincidencia exacta de ID de producto. Refierase solo al componente coincidente y no presente la pertenencia como causa del movimiento.
 
 Devuelva SOLO el texto narrativo.

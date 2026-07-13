@@ -17,10 +17,18 @@ CONTEXTO:
 - Tendencia reciente: {trend}
 - Direccion de cotizacion: moneda local por 1 USD; valores mas altos indican depreciacion de la moneda local.
 
+POLITICA DE RELEVANCIA DE CANASTAS:
+{basket_relevance_json}
+
+ALERTAS DE QA A CORREGIR (vacias en el primer borrador):
+{correction_flags_json}
+
 Redacte un analisis conciso (100-150 palabras) que cubra:
 1. Situacion actual del tipo de cambio y tendencia reciente.
 2. Variacion intermensual y su importancia para costos de importacion.
 3. Comparacion interanual que muestre la trayectoria de mas largo plazo.
 4. Implicaciones para precios de alimentos (trigo, arroz, aceite de cocina, combustible).
+
+Analice la transmision a precios alimentarios y hogares de forma general. No nombre, compare ni atribuya movimientos a una canasta.
 
 Devuelva SOLO el texto narrativo. Sin encabezados ni formato.

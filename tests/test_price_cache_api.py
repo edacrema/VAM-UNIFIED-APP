@@ -4,6 +4,7 @@ from importlib import import_module
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.shared import async_runs
 from app.services.market_monitor import data_loader
 from app.services.price_cache.schemas import (
     CacheRefreshSummary,
@@ -20,6 +21,41 @@ from app.services.price_cache.schemas import (
 
 
 market_router = import_module("app.services.market_monitor.router")
+
+
+class FakeBasketSelection:
+    def __init__(self, *, include_secondary=True):
+        self.primary_basket_version_id = "primary-v1"
+        self.secondary_basket_version_id = "secondary-v1" if include_secondary else None
+        self.secondary_basket_included = include_secondary
+
+    def food_baskets_dict(self):
+        return {
+            "primary": {
+                "basket_version_id": self.primary_basket_version_id,
+                "basket_role": "primary",
+                "basket_name": "MEB",
+                "items": [],
+            },
+            "secondary": (
+                {
+                    "basket_version_id": self.secondary_basket_version_id,
+                    "basket_role": "secondary",
+                    "basket_name": "Pastoral Basket",
+                    "items": [],
+                }
+                if self.secondary_basket_included
+                else None
+            ),
+        }
+
+    def to_metadata(self):
+        return {
+            "primary_basket_version_id": self.primary_basket_version_id,
+            "secondary_basket_version_id": self.secondary_basket_version_id,
+            "secondary_basket_included": self.secondary_basket_included,
+            "food_baskets": self.food_baskets_dict(),
+        }
 
 
 class FakeRepo:
@@ -167,6 +203,20 @@ def test_info_endpoint_lists_fuel_energy_module(monkeypatch):
     assert {"exchange_rate", "fuel_energy"}.issubset(module_ids)
     enabled_modules = next(item for item in payload["inputs"] if item["name"] == "enabled_modules")
     assert "fuel_energy" in enabled_modules["options"]
+    assert payload["basket_visualizations"] == {
+        "canonical": [
+            "food_basket_trend_primary",
+            "food_basket_trend_secondary",
+            "regional_comparison_primary",
+            "regional_comparison_secondary",
+        ],
+        "primary_aliases": {
+            "food_basket_trend": "food_basket_trend_primary",
+            "regional_comparison": "regional_comparison_primary",
+        },
+        "combined_chart": False,
+    }
+    assert "qa_review" in payload["outputs"]
 
 
 def test_cache_refresh_history_endpoints(monkeypatch):
@@ -268,6 +318,59 @@ def test_country_reportable_months_endpoint(monkeypatch):
     assert response.json()["missing_by_month"] == {"2025-03": ["Beans"]}
 
 
+def test_country_reportable_months_forwards_two_basket_region_selection(monkeypatch):
+    captured = {}
+
+    def fake_reportable(country, **kwargs):
+        captured.update({"country": country, **kwargs})
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "reportable_months": ["2025-01"],
+            "latest_reportable_month": "2025-01",
+            "primary_reportable_months": ["2025-01", "2025-02"],
+            "secondary_reportable_months": ["2025-01"],
+            "joint_reportable_months": ["2025-01"],
+        }
+
+    monkeypatch.setattr(data_loader, "get_reportable_months", fake_reportable)
+    client = _client(monkeypatch)
+
+    response = client.get(
+        "/countries/South%20Sudan/reportable-months",
+        params=[
+            ("primary_basket_version_id", "primary-v1"),
+            ("include_secondary_basket", "true"),
+            ("secondary_basket_version_id", "secondary-v1"),
+            ("admin1_list", "Juba"),
+            ("admin1_list", "Wau"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "country": "South Sudan",
+        "basket_version_id": None,
+        "primary_basket_version_id": "primary-v1",
+        "include_secondary_basket": True,
+        "secondary_basket_version_id": "secondary-v1",
+        "admin1_list": ["Juba", "Wau"],
+    }
+    assert response.json()["joint_reportable_months"] == ["2025-01"]
+
+
+def test_country_reportable_months_rejects_conflicting_primary_aliases(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.get(
+        "/countries/South%20Sudan/reportable-months",
+        params={"basket_version_id": "old", "primary_basket_version_id": "new"},
+    )
+
+    assert response.status_code == 422
+    assert "must reference the same" in str(response.json()["detail"])
+
+
 def test_country_reportable_months_refresh_endpoint(monkeypatch):
     captured = {}
 
@@ -308,6 +411,37 @@ def test_country_reportable_months_refresh_endpoint(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "updated"
     assert captured == {"country": "South Sudan", "basket_version_id": "basket-v1"}
+
+
+def test_country_reportable_months_refresh_forwards_role_and_region_selection(monkeypatch):
+    captured = {}
+
+    def fake_refresh(country, **kwargs):
+        captured.update({"country": country, **kwargs})
+        return {"country": country, "iso3": "SSD", "status": "no_update", "warnings": []}
+
+    monkeypatch.setattr(data_loader, "refresh_reportable_months_from_databridges", fake_refresh)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/countries/South%20Sudan/reportable-months/refresh",
+        json={
+            "primary_basket_version_id": "primary-v1",
+            "include_secondary_basket": True,
+            "secondary_basket_version_id": "secondary-v1",
+            "admin1_list": ["Juba"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "country": "South Sudan",
+        "basket_version_id": None,
+        "primary_basket_version_id": "primary-v1",
+        "include_secondary_basket": True,
+        "secondary_basket_version_id": "secondary-v1",
+        "admin1_list": ["Juba"],
+    }
 
 
 def test_country_reportable_months_refresh_endpoint_returns_stale_basket_conflict(monkeypatch):
@@ -406,11 +540,118 @@ def test_country_basket_history_endpoint_returns_newest_first(monkeypatch):
     assert [item["version_number"] for item in response.json()["versions"]] == [2, 1]
 
 
+def test_plural_basket_configuration_endpoint_returns_both_roles(monkeypatch):
+    monkeypatch.setattr(
+        market_router,
+        "get_country_baskets_response",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1", "basket_role": "primary"},
+            "secondary": {"basket_version_id": "secondary-v1", "basket_role": "secondary"},
+            "needs_primary_setup": False,
+            "has_secondary": True,
+        },
+    )
+    client = _client(monkeypatch)
+
+    response = client.get("/countries/South%20Sudan/baskets")
+
+    assert response.status_code == 200
+    assert response.json()["primary"]["basket_version_id"] == "primary-v1"
+    assert response.json()["secondary"]["basket_version_id"] == "secondary-v1"
+    assert response.json()["has_secondary"] is True
+
+
+def test_plural_basket_mutation_history_and_archive_endpoints(monkeypatch):
+    captured = []
+
+    def fake_save(country, role, input_data):
+        captured.append(("save", country, role.value, input_data.basket_name))
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1"},
+            "secondary": {"basket_version_id": "secondary-v1"},
+            "needs_primary_setup": False,
+            "has_secondary": True,
+        }
+
+    def fake_history(country, role, limit=20):
+        captured.append(("history", country, role, limit))
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "basket_role": role,
+            "versions": [{"basket_version_id": "secondary-v1", "version_number": 2}],
+        }
+
+    monkeypatch.setattr(market_router, "save_country_basket_role", fake_save)
+    monkeypatch.setattr(market_router, "list_country_basket_role_history", fake_history)
+    monkeypatch.setattr(
+        market_router,
+        "archive_country_secondary_basket",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1"},
+            "secondary": None,
+            "needs_primary_setup": False,
+            "has_secondary": False,
+            "archived_secondary": {"basket_version_id": "secondary-v1", "status": "archived"},
+        },
+    )
+    client = _client(monkeypatch)
+
+    save_response = client.post(
+        "/countries/South%20Sudan/baskets/secondary",
+        json={
+            "basket_name": "Pastoral Basket",
+            "short_description": "Pastoral household affordability proxy.",
+            "items": [{"commodity_id": 2, "weight_quantity": 3}],
+        },
+    )
+    history_response = client.get(
+        "/countries/South%20Sudan/baskets/secondary/history?limit=5"
+    )
+    archive_response = client.delete("/countries/South%20Sudan/baskets/secondary")
+
+    assert save_response.status_code == 200
+    assert history_response.status_code == 200
+    assert archive_response.status_code == 200
+    assert archive_response.json()["archived_secondary"]["status"] == "archived"
+    assert captured == [
+        ("save", "South Sudan", "secondary", "Pastoral Basket"),
+        ("history", "South Sudan", "secondary", 5),
+    ]
+
+
+def test_plural_basket_endpoint_rejects_explicit_role_mismatch(monkeypatch):
+    def reject_mismatch(_country, _role, _input_data):
+        raise market_router.BasketValidationError("does not match the secondary endpoint")
+
+    monkeypatch.setattr(market_router, "save_country_basket_role", reject_mismatch)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/countries/South%20Sudan/baskets/secondary",
+        json={
+            "basket_role": "primary",
+            "basket_name": "Pastoral Basket",
+            "short_description": "Pastoral household affordability proxy.",
+            "items": [{"commodity_id": 2, "weight_quantity": 3}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "does not match" in response.json()["detail"]
+
+
 def test_generate_async_returns_conflict_for_stale_basket_version(monkeypatch):
-    def stale_basket(_country, _basket_version_id=None):
+    def stale_basket(_country, **_kwargs):
         raise market_router.BasketVersionConflict("refresh basket")
 
-    monkeypatch.setattr(market_router, "get_active_basket_for_report", stale_basket)
+    monkeypatch.setattr(market_router, "resolve_baskets_for_report", stale_basket)
     client = _client(monkeypatch)
 
     response = client.post(
@@ -428,3 +669,234 @@ def test_generate_async_returns_conflict_for_stale_basket_version(monkeypatch):
 
     assert response.status_code == 409
     assert "refresh basket" in response.json()["detail"]
+
+
+def test_generate_rejects_conflicting_primary_version_aliases(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/generate",
+        json={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "basket_version_id": "primary-v1",
+            "primary_basket_version_id": "primary-v2",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "must reference the same primary basket version" in response.text
+
+
+def test_generate_resolves_selection_and_returns_two_basket_contract(monkeypatch):
+    captured = {}
+    selection = FakeBasketSelection(include_secondary=True)
+
+    def fake_resolve(country, **kwargs):
+        captured["resolve"] = {"country": country, **kwargs}
+        return selection
+
+    def fake_generate(**kwargs):
+        captured["graph"] = kwargs
+        return {
+            "run_id": "run-sync",
+            "country": kwargs["country"],
+            "time_period": kwargs["time_period"],
+            "report_draft_sections": {
+                "HIGHLIGHTS": "Highlights.",
+                "REGIONAL_HIGHLIGHTS": "Regional. [INSERT GRAPH: regional_comparison]",
+            },
+            "visualizations": {
+                "food_basket_trend": "primary-trend",
+                "food_basket_trend_primary": "primary-trend",
+                "food_basket_trend_secondary": "secondary-trend",
+                "regional_comparison": "primary-regional",
+                "regional_comparison_primary": "primary-regional",
+                "regional_comparison_secondary": "secondary-regional",
+            },
+            "data_statistics": {"food_basket": {"current_price": 42, "current_cost": 42}},
+            "basket_statistics": {
+                "primary": {"current_price": 42, "current_cost": 42},
+                "secondary": {"current_price": 21, "current_cost": 21},
+            },
+            "basket_series_national": [
+                {"Date": "2025-02-01", "BasketRole": "primary", "Cost": 42, "Complete": True},
+                {"Date": "2025-02-01", "BasketRole": "secondary", "Cost": 21, "Complete": True},
+            ],
+            "basket_series_regional": [],
+            "qa_review": {"status": "passed", "correction_attempts": 1, "flags": []},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(market_router, "resolve_baskets_for_report", fake_resolve)
+    monkeypatch.setattr(market_router, "run_report_generation", fake_generate)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/generate",
+        json={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "basket_version_id": "primary-v1",
+            "secondary_basket_version_id": "secondary-v1",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert captured["resolve"] == {
+        "country": "South Sudan",
+        "primary_basket_version_id": "primary-v1",
+        "include_secondary_basket": True,
+        "secondary_basket_version_id": "secondary-v1",
+    }
+    assert captured["graph"]["basket_version_id"] == "primary-v1"
+    assert captured["graph"]["basket_selection"] is selection
+    assert payload["food_basket"]["basket_version_id"] == "primary-v1"
+    assert payload["food_baskets"]["secondary"]["basket_version_id"] == "secondary-v1"
+    assert payload["basket_statistics"] == {
+        "primary": {"current_price": 42, "current_cost": 42},
+        "secondary": {"current_price": 21, "current_cost": 21},
+    }
+    assert [row["BasketRole"] for row in payload["basket_series_national"]] == ["primary", "secondary"]
+    assert payload["secondary_basket_included"] is True
+    assert payload["qa_review"] == {"status": "passed", "correction_attempts": 1, "flags": []}
+    assert payload["visualizations"]["food_basket_trend"] == payload["visualizations"]["food_basket_trend_primary"]
+    assert [
+        block["figure_id"]
+        for block in payload["report_blocks"]
+        if block["type"] == "figure"
+    ] == [
+        "food_basket_trend_primary",
+        "food_basket_trend_secondary",
+        "regional_comparison_primary",
+        "regional_comparison_secondary",
+    ]
+    assert next(block for block in payload["report_blocks"] if block["type"] == "table")["meta"]["table_kind"] == (
+        "basket_definitions"
+    )
+
+
+def test_generate_mock_data_returns_empty_basket_selection(monkeypatch):
+    monkeypatch.setattr(
+        market_router,
+        "resolve_baskets_for_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("resolver should not run")),
+    )
+    monkeypatch.setattr(
+        market_router,
+        "run_report_generation",
+        lambda **kwargs: {
+            "run_id": "run-mock",
+            "country": kwargs["country"],
+            "time_period": kwargs["time_period"],
+            "report_draft_sections": {},
+            "visualizations": {},
+            "data_statistics": {},
+            "warnings": [],
+        },
+    )
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/generate",
+        json={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "use_mock_data": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["food_baskets"] == {"primary": None, "secondary": None}
+    assert response.json()["secondary_basket_included"] is False
+    assert response.json()["qa_review"]["status"] == "not_recorded"
+
+
+def test_generate_async_persists_and_returns_revalidated_basket_selection(monkeypatch):
+    monkeypatch.setattr(async_runs, "_BACKEND", "memory")
+    async_runs._RUNS.clear()
+    async_runs._RUN_ARTIFACTS.clear()
+    selection = FakeBasketSelection(include_secondary=True)
+    revalidated_selection = FakeBasketSelection(include_secondary=True)
+    resolve_calls = []
+    graph_calls = []
+
+    def fake_resolve(country, **kwargs):
+        resolve_calls.append({"country": country, **kwargs})
+        return selection if len(resolve_calls) == 1 else revalidated_selection
+
+    def fake_generate(**kwargs):
+        graph_calls.append(kwargs)
+        return {
+            "run_id": "graph-run",
+            "country": kwargs["country"],
+            "time_period": kwargs["time_period"],
+            "report_draft_sections": {},
+            "visualizations": {},
+            "data_statistics": {"food_basket": {"current_price": 42}},
+            "basket_statistics": {
+                "primary": {"current_cost": 42},
+                "secondary": {"current_cost": 21},
+            },
+            "basket_series_national": [
+                {"Date": "2025-02-01", "BasketRole": "primary", "Cost": 42},
+            ],
+            "basket_series_regional": [],
+            "cache_metadata": {
+                "cache_version_id": "cache-v1",
+                "basket_calculation_specs": [{"basket_role": "primary"}],
+                "basket_applicable_regions": {"primary": []},
+                "basket_coverage": {"primary": {"current_complete": True}},
+            },
+            "qa_review": {
+                "status": "completed_with_warnings",
+                "correction_attempts": 3,
+                "flags": [
+                    {
+                        "section": "GLOBAL",
+                        "claim": "Unresolved basket claim",
+                        "issue_type": "basket_identity_error",
+                        "severity": "high",
+                        "details": "Values remain swapped.",
+                        "recommendation": "Review before publication.",
+                    }
+                ],
+            },
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(market_router, "resolve_baskets_for_report", fake_resolve)
+    monkeypatch.setattr(market_router, "run_report_generation", fake_generate)
+    client = _client(monkeypatch)
+
+    start_response = client.post(
+        "/generate-async",
+        json={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "primary_basket_version_id": "primary-v1",
+            "secondary_basket_version_id": "secondary-v1",
+        },
+    )
+    run_id = start_response.json()["run_id"]
+    run = async_runs.get_run(run_id)
+    result_response = client.get(f"/result/{run_id}")
+
+    assert start_response.status_code == 200
+    assert run is not None
+    assert run.status == "completed"
+    assert len(resolve_calls) == 2
+    assert resolve_calls[1]["primary_basket_version_id"] == "primary-v1"
+    assert resolve_calls[1]["secondary_basket_version_id"] == "secondary-v1"
+    assert graph_calls[0]["basket_selection"] is selection
+    assert run.metadata["basket_selection"]["secondary_basket_included"] is True
+    assert run.metadata["basket_calculation"]["cache_version_id"] == "cache-v1"
+    assert run.metadata["basket_calculation"]["series_national"][0]["Cost"] == 42
+    assert run.metadata["basket_calculation"]["statistics"]["secondary"]["current_cost"] == 21
+    assert run.metadata["qa_review"]["status"] == "completed_with_warnings"
+    assert run.result["food_baskets"]["secondary"]["basket_version_id"] == "secondary-v1"
+    assert result_response.status_code == 200
+    assert result_response.json()["secondary_basket_included"] is True
+    assert result_response.json()["basket_statistics"]["secondary"]["current_cost"] == 21
+    assert result_response.json()["qa_review"]["correction_attempts"] == 3

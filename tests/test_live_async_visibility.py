@@ -25,6 +25,41 @@ class ImmediateThread:
             self._target()
 
 
+class FakeBasketSelection:
+    def __init__(self, *, include_secondary=False):
+        self.primary_basket_version_id = "active-basket"
+        self.secondary_basket_version_id = "secondary-v1" if include_secondary else None
+        self.secondary_basket_included = include_secondary
+
+    def food_baskets_dict(self):
+        return {
+            "primary": {
+                "basket_version_id": self.primary_basket_version_id,
+                "basket_role": "primary",
+                "basket_name": "MEB",
+                "items": [],
+            },
+            "secondary": (
+                {
+                    "basket_version_id": self.secondary_basket_version_id,
+                    "basket_role": "secondary",
+                    "basket_name": "Pastoral Basket",
+                    "items": [],
+                }
+                if self.secondary_basket_included
+                else None
+            ),
+        }
+
+    def to_metadata(self):
+        return {
+            "primary_basket_version_id": self.primary_basket_version_id,
+            "secondary_basket_version_id": self.secondary_basket_version_id,
+            "secondary_basket_included": self.secondary_basket_included,
+            "food_baskets": self.food_baskets_dict(),
+        }
+
+
 def _reset_run_store(monkeypatch):
     monkeypatch.setattr(async_runs, "_BACKEND", "memory")
     async_runs._RUNS.clear()
@@ -34,24 +69,18 @@ def _reset_run_store(monkeypatch):
 def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypatch):
     _reset_run_store(monkeypatch)
     monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
-    monkeypatch.setattr(
-        dispatcher,
-        "get_active_basket_for_report",
-        lambda country, basket_version_id=None: {
-            "basket_version_id": basket_version_id or "active-basket",
-            "version_number": 1,
-            "items": [
-                {
-                    "commodity_id": 1,
-                    "commodity_name_snapshot": "Maize",
-                    "databridges_unit": "kg",
-                    "weight_quantity": 1,
-                }
-            ],
-        },
-    )
+    selections = []
+    graph_calls = []
+
+    def fake_resolve(_country, **_kwargs):
+        selection = FakeBasketSelection(include_secondary=True)
+        selections.append(selection)
+        return selection
+
+    monkeypatch.setattr(dispatcher, "resolve_baskets_for_report", fake_resolve)
 
     def fake_run_report_generation(*, country, time_period, on_step=None, **kwargs):
+        graph_calls.append(kwargs)
         if on_step is not None:
             on_step(
                 "data_agent",
@@ -103,6 +132,20 @@ def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypa
             "report_draft_sections": {},
             "visualizations": {},
             "data_statistics": {},
+            "basket_statistics": {
+                "primary": {"current_cost": 42},
+                "secondary": {"current_cost": 21},
+            },
+            "basket_series_national": [
+                {"Date": "2025-01-01", "BasketRole": "primary", "Cost": 42},
+            ],
+            "basket_series_regional": [],
+            "cache_metadata": {
+                "cache_version_id": "cache-v1",
+                "basket_calculation_specs": [{"basket_role": "primary"}],
+                "basket_applicable_regions": {"primary": []},
+                "basket_coverage": {"primary": {"current_complete": True}},
+            },
             "document_references": [],
             "news_counts": {"Seerist": 1, "ReliefWeb": 1, "total": 2},
             "warnings": [],
@@ -126,6 +169,14 @@ def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypa
     run = async_runs.get_run(run_id)
     assert run is not None
     assert run.status == "completed"
+    assert len(selections) == 2
+    assert graph_calls[0]["basket_selection"] is selections[0]
+    assert run.metadata["basket_selection"]["primary_basket_version_id"] == "active-basket"
+    assert run.metadata["basket_selection"]["secondary_basket_included"] is True
+    assert run.metadata["basket_calculation"]["cache_version_id"] == "cache-v1"
+    assert run.metadata["basket_calculation"]["statistics"]["secondary"]["current_cost"] == 21
+    assert run.result["food_baskets"]["secondary"]["basket_version_id"] == "secondary-v1"
+    assert run.result["basket_statistics"]["secondary"]["current_cost"] == 21
     live_outputs = run.metadata["live_outputs"]
     assert live_outputs["databridges"]["rows_preview"][0]["Commodity"] == "Maize"
     assert live_outputs["seerist"]["documents"][0]["title"] == "Seerist title"
@@ -136,25 +187,22 @@ def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypa
     assert artifact_response.status_code == 200
     assert artifact_response.headers["Content-Type"] == "application/json"
 
+    result_response = dispatcher.dispatch_request(
+        "GET",
+        f"/market-monitor/result/{run_id}",
+    )
+    assert result_response.status_code == 200
+    assert result_response.json()["secondary_basket_included"] is True
+    assert result_response.json()["food_basket"]["basket_version_id"] == "active-basket"
+
 
 def test_market_monitor_async_failure_stores_price_gap_report(monkeypatch):
     _reset_run_store(monkeypatch)
     monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(
         dispatcher,
-        "get_active_basket_for_report",
-        lambda country, basket_version_id=None: {
-            "basket_version_id": basket_version_id or "active-basket",
-            "version_number": 1,
-            "items": [
-                {
-                    "commodity_id": 52,
-                    "commodity_name_snapshot": "Rice",
-                    "databridges_unit": "kg",
-                    "weight_quantity": 1,
-                }
-            ],
-        },
+        "resolve_baskets_for_report",
+        lambda _country, **_kwargs: FakeBasketSelection(),
     )
     gap_report = ReportPriceGapReport(
         country="Burkina Faso",
@@ -239,6 +287,48 @@ def test_market_monitor_dispatcher_routes_reportable_months(monkeypatch):
     assert response.json()["missing_by_month"] == {"2025-03": ["Beans"]}
 
 
+def test_market_monitor_dispatcher_forwards_two_basket_reportability_selection(monkeypatch):
+    captured = {}
+
+    def fake_reportable(country, **kwargs):
+        captured.update({"country": country, **kwargs})
+        return {"country": country, "iso3": "SSD", "joint_reportable_months": ["2025-01"]}
+
+    monkeypatch.setattr(dispatcher, "get_reportable_months", fake_reportable)
+
+    response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/reportable-months",
+        params={
+            "primary_basket_version_id": "primary-v1",
+            "include_secondary_basket": "true",
+            "secondary_basket_version_id": "secondary-v1",
+            "admin1_list": ["Juba", "Wau"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "country": "South Sudan",
+        "basket_version_id": None,
+        "primary_basket_version_id": "primary-v1",
+        "include_secondary_basket": True,
+        "secondary_basket_version_id": "secondary-v1",
+        "admin1_list": ["Juba", "Wau"],
+    }
+
+
+def test_market_monitor_dispatcher_reportability_alias_conflict_is_422():
+    response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/reportable-months",
+        params={"basket_version_id": "old", "primary_basket_version_id": "new"},
+    )
+
+    assert response.status_code == 422
+    assert "must reference the same" in str(response.json()["detail"])
+
+
 def test_market_monitor_dispatcher_routes_reportable_months_refresh(monkeypatch):
     captured = {}
 
@@ -281,6 +371,37 @@ def test_market_monitor_dispatcher_routes_reportable_months_refresh(monkeypatch)
     assert captured == {"country": "South Sudan", "basket_version_id": "basket-v1"}
 
 
+def test_market_monitor_dispatcher_refresh_forwards_two_basket_selection(monkeypatch):
+    captured = {}
+
+    def fake_refresh(country, **kwargs):
+        captured.update({"country": country, **kwargs})
+        return {"country": country, "iso3": "SSD", "status": "no_update", "warnings": []}
+
+    monkeypatch.setattr(dispatcher, "refresh_reportable_months_from_databridges", fake_refresh)
+
+    response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/countries/South%20Sudan/reportable-months/refresh",
+        json_body={
+            "primary_basket_version_id": "primary-v1",
+            "include_secondary_basket": True,
+            "secondary_basket_version_id": "secondary-v1",
+            "admin1_list": ["Juba"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "country": "South Sudan",
+        "basket_version_id": None,
+        "primary_basket_version_id": "primary-v1",
+        "include_secondary_basket": True,
+        "secondary_basket_version_id": "secondary-v1",
+        "admin1_list": ["Juba"],
+    }
+
+
 def test_market_monitor_dispatcher_reportable_months_unavailable_returns_503(monkeypatch):
     def fake_reportable_months(_country):
         raise dispatcher.PriceCacheUnavailableError("cache unavailable")
@@ -310,6 +431,146 @@ def test_market_monitor_dispatcher_reportable_months_refresh_conflict_returns_40
 
     assert response.status_code == 409
     assert "refresh basket" in response.json()["detail"]
+
+
+def test_market_monitor_dispatcher_routes_plural_basket_contract(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        dispatcher,
+        "get_country_baskets_response",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1"},
+            "secondary": {"basket_version_id": "secondary-v1"},
+            "needs_primary_setup": False,
+            "has_secondary": True,
+        },
+    )
+
+    def fake_save(country, role, input_data):
+        captured.append(("save", country, str(role), input_data.basket_name))
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1"},
+            "secondary": {"basket_version_id": "secondary-v1"},
+            "needs_primary_setup": False,
+            "has_secondary": True,
+        }
+
+    def fake_history(country, role, limit=20):
+        captured.append(("history", country, str(role), limit))
+        return {
+            "country": country,
+            "iso3": "SSD",
+            "basket_role": str(role),
+            "versions": [{"basket_version_id": "secondary-v1", "version_number": 2}],
+        }
+
+    monkeypatch.setattr(dispatcher, "save_country_basket_role", fake_save)
+    monkeypatch.setattr(dispatcher, "list_country_basket_role_history", fake_history)
+    monkeypatch.setattr(
+        dispatcher,
+        "archive_country_secondary_basket",
+        lambda country: {
+            "country": country,
+            "iso3": "SSD",
+            "primary": {"basket_version_id": "primary-v1"},
+            "secondary": None,
+            "needs_primary_setup": False,
+            "has_secondary": False,
+            "archived_secondary": {"basket_version_id": "secondary-v1", "status": "archived"},
+        },
+    )
+
+    get_response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/baskets",
+    )
+    save_response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/countries/South%20Sudan/baskets/secondary",
+        json_body={
+            "basket_name": "Pastoral Basket",
+            "short_description": "Pastoral household affordability proxy.",
+            "items": [{"commodity_id": 2, "weight_quantity": 3}],
+        },
+    )
+    history_response = dispatcher.dispatch_request(
+        "GET",
+        "/market-monitor/countries/South%20Sudan/baskets/secondary/history?limit=5",
+    )
+    archive_response = dispatcher.dispatch_request(
+        "DELETE",
+        "/market-monitor/countries/South%20Sudan/baskets/secondary",
+    )
+
+    assert get_response.status_code == 200
+    assert save_response.status_code == 200
+    assert history_response.status_code == 200
+    assert archive_response.status_code == 200
+    assert archive_response.json()["archived_secondary"]["status"] == "archived"
+    assert captured == [
+        ("save", "South Sudan", "secondary", "Pastoral Basket"),
+        ("history", "South Sudan", "secondary", 5),
+    ]
+
+
+def test_market_monitor_dispatcher_generation_validation_matches_api(monkeypatch):
+    response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/generate",
+        json_body={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "basket_version_id": "primary-v1",
+            "primary_basket_version_id": "primary-v2",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "must reference the same primary basket version" in response.text
+
+
+def test_market_monitor_dispatcher_ignores_stale_secondary_when_excluded(monkeypatch):
+    captured = {}
+
+    def fake_resolve(country, **kwargs):
+        captured["resolve"] = {"country": country, **kwargs}
+        return FakeBasketSelection(include_secondary=False)
+
+    monkeypatch.setattr(dispatcher, "resolve_baskets_for_report", fake_resolve)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_report_generation",
+        lambda **kwargs: {
+            "run_id": "dispatcher-sync",
+            "country": kwargs["country"],
+            "time_period": kwargs["time_period"],
+            "report_draft_sections": {},
+            "visualizations": {},
+            "data_statistics": {"food_basket": {"current_price": 42}},
+            "warnings": [],
+        },
+    )
+
+    response = dispatcher.dispatch_request(
+        "POST",
+        "/market-monitor/generate",
+        json_body={
+            "country": "South Sudan",
+            "time_period": "2025-02",
+            "include_secondary_basket": False,
+            "secondary_basket_version_id": "stale-secondary",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["resolve"]["include_secondary_basket"] is False
+    assert captured["resolve"]["secondary_basket_version_id"] == "stale-secondary"
+    assert response.json()["food_baskets"]["secondary"] is None
+    assert response.json()["secondary_basket_included"] is False
 
 
 def test_mfi_dispatcher_routes_csv_endpoints(monkeypatch):

@@ -1287,10 +1287,10 @@ def test_weighted_food_basket_uses_saved_component_quantities(monkeypatch, tmp_p
     assert national.loc["2025-02-01", "Beans"] == 6
     assert national.loc["2025-02-01", "FoodBasket"] == 42
     latest_regions = regional[regional["Date"] == pd.Timestamp("2025-02-01")]
-    assert dict(zip(latest_regions["Region"], latest_regions["FoodBasket"])) == {
-        "Central Equatoria": 24,
-        "Western Bahr el Ghazal": 18,
-    }
+    # Each fixture region contains only one of the two basket components.
+    # Regional basket aliases must therefore remain null rather than exposing
+    # the old partial sums, even though the country-wide basket is complete.
+    assert latest_regions["FoodBasket"].isna().all()
     assert stats["food_basket"]["current_price"] == 42
     assert stats["food_basket"]["selected_component_names"] == ["Maize", "Beans"]
     assert stats["food_basket"]["available_component_names"] == ["Maize", "Beans"]
@@ -1998,8 +1998,8 @@ def test_weighted_food_basket_reports_missing_latest_components(monkeypatch, tmp
         food_basket_components=_basket_items(),
     )
 
-    assert national.loc["2025-02-01", "FoodBasket"] == 24
-    assert stats["food_basket"]["current_price"] == 24
+    assert pd.isna(national.loc["2025-02-01", "FoodBasket"])
+    assert stats["food_basket"]["current_price"] is None
     assert stats["food_basket"]["selected_component_count"] == 2
     assert stats["food_basket"]["available_component_names"] == ["Maize"]
     assert stats["food_basket"]["missing_component_names"] == ["Beans"]
@@ -2029,9 +2029,9 @@ def test_resolve_report_price_data_backfills_missing_reference_basket_component(
     assert result.df_national.loc["2025-02-01", "Beans"] == 6
     assert result.df_national.loc["2025-02-01", "FoodBasket"] == 42
     latest_regions = result.df_regional[result.df_regional["Date"] == pd.Timestamp("2025-02-01")]
-    assert dict(zip(latest_regions["Region"], latest_regions["FoodBasket"])) == {
-        "Central Equatoria": 24,
-        "Western Bahr el Ghazal": 18,
+    assert latest_regions.set_index("Region")["FoodBasket"].isna().to_dict() == {
+        "Central Equatoria": True,
+        "Western Bahr el Ghazal": True,
     }
     assert result.cache_metadata["targeted_backfill"]["attempted"] is True
     assert result.cache_metadata["targeted_backfill"]["rows_fetched"] == 1
@@ -2121,4 +2121,4 @@ def test_resolve_report_price_data_backfill_does_not_pollute_global_price_cache(
     )
 
     assert result.df_national.loc["2025-02-01", "FoodBasket"] == 42
-    assert cache_only.loc["2025-02-01", "FoodBasket"] == 24
+    assert pd.isna(cache_only.loc["2025-02-01", "FoodBasket"])

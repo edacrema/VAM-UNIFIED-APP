@@ -17,10 +17,18 @@ CONTEXTE:
 - Tendance recente: {trend}
 - Sens de cotation: monnaie locale pour 1 USD; une valeur plus elevee indique une depreciation de la monnaie locale.
 
+POLITIQUE DE PERTINENCE DES PANIERS:
+{basket_relevance_json}
+
+SIGNALEMENTS QA A CORRIGER (vides lors du premier brouillon):
+{correction_flags_json}
+
 Redigez une analyse concise (100-150 mots) couvrant:
 1. La situation actuelle du taux de change et la tendance recente.
 2. La variation mensuelle et son importance pour les couts d'importation.
 3. La comparaison annuelle montrant la trajectoire de plus long terme.
 4. Les implications pour les prix alimentaires (ble, riz, huile de cuisson, carburant).
+
+Discutez de la transmission aux prix alimentaires et aux menages de facon generale. Ne nommez, ne comparez et n'attribuez aucun mouvement a un panier.
 
 Retournez UNIQUEMENT le texte narratif. Aucun titre ni formatage.

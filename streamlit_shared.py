@@ -8,6 +8,7 @@ from urllib.parse import quote
 import pandas as pd
 import streamlit as st
 
+from app.shared.report_blocks import basket_definition_table_display
 from app.streamlit_backend.dispatcher import dispatch_request
 
 WFP_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5f/WFP_Logo.svg/512px-WFP_Logo.svg.png"
@@ -762,6 +763,12 @@ def render_visualizations(visualizations: Any) -> None:
         return
 
     ids = [k for k in visualizations.keys() if isinstance(k, str)]
+    for legacy_id, canonical_id in (
+        ("food_basket_trend", "food_basket_trend_primary"),
+        ("regional_comparison", "regional_comparison_primary"),
+    ):
+        if canonical_id in ids and legacy_id in ids:
+            ids.remove(legacy_id)
     ids.sort()
 
     for fig_id in ids:
@@ -830,10 +837,6 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
                 img_bytes = decode_base64_data(viz.get(fig_id))
                 if img_bytes is not None:
                     st.image(img_bytes, caption=caption, width="stretch")
-                else:
-                    st.write({"figure_id": fig_id})
-            else:
-                st.write({"figure_id": fig_id})
             continue
 
         if btype == "references":
@@ -865,6 +868,15 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
 
         if btype == "table":
             meta = block.get("meta")
+            if isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
+                headers, rows = basket_definition_table_display(meta)
+                if headers and rows:
+                    st.dataframe(
+                        pd.DataFrame(rows, columns=headers),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                continue
             if isinstance(meta, dict) and meta.get("table_kind") == "mfi_overview":
                 dims = meta.get("dimensions") or []
                 rows = meta.get("rows") or []

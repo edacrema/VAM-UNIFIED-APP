@@ -10,7 +10,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,18 @@ from app.services.price_cache.row_hygiene import (
 )
 from app.services.price_cache.schemas import CacheStatus, CountryMetadata, MonthlyPriceRecord
 from app.services.price_cache.sql_repository import SqlPriceCacheRepository, create_price_cache_engine
+from app.services.market_monitor.basket_calculation import (
+    BasketCalculationSpec,
+    BasketScopeValidationError,
+    apply_primary_food_basket_aliases,
+    calculate_basket_series,
+    calculate_basket_statistics,
+    canonicalize_run_regions,
+    legacy_primary_spec,
+    missing_required_commodity_ids,
+    resolve_spec_regions,
+    target_coverage_gaps,
+)
 from app.services.market_monitor.price_backfill import (
     BasketReferenceMonthMissing,
     CommodityGapStatus,
@@ -36,6 +48,7 @@ from app.services.market_monitor.price_backfill import (
     ReportPriceDataResult,
     ReportPriceGapReport,
 )
+from app.services.market_monitor.features import normalize_secondary_request
 from app.shared.countries import (
     COUNTRY_CURRENCIES,
     normalize_country_name as _normalize_country_name,
@@ -477,7 +490,21 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     return dict(metadata)
 
 
-def get_reportable_months(country: str) -> Dict[str, Any]:
+def get_reportable_months(
+    country: str,
+    *,
+    basket_version_id: Optional[str] = None,
+    primary_basket_version_id: Optional[str] = None,
+    include_secondary_basket: bool = False,
+    secondary_basket_version_id: Optional[str] = None,
+    admin1_list: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    include_secondary_basket, secondary_basket_version_id = normalize_secondary_request(
+        {
+            "include_secondary_basket": include_secondary_basket,
+            "secondary_basket_version_id": secondary_basket_version_id,
+        }
+    )
     canonical, iso3 = resolve_country(country)
     repo = _get_price_cache_repository()
     status = repo.get_cache_status()
@@ -487,19 +514,45 @@ def get_reportable_months(country: str) -> Dict[str, Any]:
 
     availability = repo.get_country_availability(iso3)
     cache_version_id = getattr(availability, "cache_version_id", None) if availability else None
-    basket = _get_active_food_basket(iso3)
-    basket_version_id = getattr(basket, "basket_version_id", None) if basket else None
-    cache_key = (iso3, cache_version_id or "", basket_version_id or "")
+    requested_primary = str(primary_basket_version_id or basket_version_id or "").strip() or None
+    explicit_selection = bool(
+        requested_primary
+        or include_secondary_basket
+        or str(secondary_basket_version_id or "").strip()
+        or list(admin1_list or [])
+    )
+    specs, normalized_inclusion = _resolve_reportability_specs(
+        canonical,
+        iso3,
+        explicit_selection=explicit_selection,
+        primary_basket_version_id=requested_primary,
+        include_secondary_basket=include_secondary_basket,
+        secondary_basket_version_id=secondary_basket_version_id,
+    )
+    available_regions = list(getattr(availability, "admin1_names", None) or []) if availability else []
+    normalized_regions = canonicalize_run_regions(admin1_list, available_regions)
+    primary_id = next((spec.basket_version_id for spec in specs if spec.role == "primary"), None)
+    secondary_id = next((spec.basket_version_id for spec in specs if spec.role == "secondary"), None)
+    cache_key = (
+        iso3,
+        cache_version_id or "",
+        primary_id or "",
+        secondary_id or "",
+        bool(normalized_inclusion),
+        tuple(normalized_regions),
+    )
     cached = _cache_get(_REPORTABLE_MONTHS_CACHE, cache_key)
     if cached is not None:
         return dict(cached)
 
-    result = _build_reportable_months_payload(
+    result = _build_role_aware_reportable_months_payload(
         canonical=canonical,
         iso3=iso3,
         repo=repo,
         availability=availability,
-        basket=basket,
+        specs=specs,
+        secondary_included=normalized_inclusion,
+        run_regions=normalized_regions,
     )
     _cache_set(_REPORTABLE_MONTHS_CACHE, cache_key, result)
     return dict(result)
@@ -509,10 +562,35 @@ def refresh_reportable_months_from_databridges(
     country: str,
     *,
     basket_version_id: Optional[str] = None,
+    primary_basket_version_id: Optional[str] = None,
+    include_secondary_basket: bool = False,
+    secondary_basket_version_id: Optional[str] = None,
+    admin1_list: Optional[Sequence[str]] = None,
     adapter: Optional[DataBridgesClientAdapter] = None,
 ) -> Dict[str, Any]:
+    include_secondary_basket, secondary_basket_version_id = normalize_secondary_request(
+        {
+            "include_secondary_basket": include_secondary_basket,
+            "secondary_basket_version_id": secondary_basket_version_id,
+        }
+    )
     canonical, iso3 = resolve_country(country)
-    before = get_reportable_months(country)
+    legacy_request = not any(
+        [
+            str(primary_basket_version_id or "").strip(),
+            include_secondary_basket,
+            str(secondary_basket_version_id or "").strip(),
+            list(admin1_list or []),
+        ]
+    )
+    selection_kwargs = {
+        "basket_version_id": basket_version_id,
+        "primary_basket_version_id": primary_basket_version_id,
+        "include_secondary_basket": include_secondary_basket,
+        "secondary_basket_version_id": secondary_basket_version_id,
+        "admin1_list": list(admin1_list or []),
+    }
+    before = get_reportable_months(country) if legacy_request else get_reportable_months(country, **selection_kwargs)
     warnings: list[str] = []
     if not _manual_refresh_enabled():
         return _manual_refresh_response(
@@ -528,9 +606,26 @@ def refresh_reportable_months_from_databridges(
     if availability is None or not availability.cache_version_id:
         raise PriceCacheUnavailableError(f"No active PriceCache availability is available for {canonical} ({iso3}).")
     source_cache_version_id = availability.cache_version_id
-    requested_basket_version = str(basket_version_id or "").strip()
-    basket = _get_active_food_basket(iso3)
-    if basket is None:
+    if legacy_request:
+        basket = _get_active_food_basket(iso3)
+        specs = [BasketCalculationSpec.from_snapshot(basket)] if basket is not None else []
+        requested_basket_version = str(basket_version_id or "").strip()
+        if basket is not None and requested_basket_version and requested_basket_version != basket.basket_version_id:
+            from app.services.market_monitor.food_basket import BasketVersionConflict
+
+            raise BasketVersionConflict(
+                "The selected primary basket version is no longer active. Refresh the country basket and run the report again."
+            )
+    else:
+        specs, _normalized_inclusion = _resolve_reportability_specs(
+            canonical,
+            iso3,
+            explicit_selection=True,
+            primary_basket_version_id=str(primary_basket_version_id or basket_version_id or "").strip() or None,
+            include_secondary_basket=include_secondary_basket,
+            secondary_basket_version_id=secondary_basket_version_id,
+        )
+    if not specs:
         return _manual_refresh_response(
             canonical=canonical,
             iso3=iso3,
@@ -539,12 +634,7 @@ def refresh_reportable_months_from_databridges(
             source_cache_version_id=source_cache_version_id,
             warnings=[f"No active food basket is configured for {canonical}; refresh skipped."],
         )
-    if requested_basket_version and requested_basket_version != basket.basket_version_id:
-        from app.services.market_monitor.food_basket import BasketVersionConflict
-
-        raise BasketVersionConflict(
-            "The selected food basket version is no longer active. Refresh the country basket and run the report again."
-        )
+    required_ids = sorted({item.commodity_id for spec in specs for item in spec.items})
 
     start_month, end_month = _manual_refresh_window(before)
     months_checked = _month_labels_between(start_month, end_month)
@@ -558,10 +648,11 @@ def refresh_reportable_months_from_databridges(
             checked_start_month=_month_label(start_month),
             checked_end_month=_month_label(end_month),
             months_checked=[],
+            required_commodity_ids=required_ids,
             warnings=["The active cache already has a reportable current month."],
         )
 
-    priced_ids = {int(item) for item in availability.priced_commodity_ids or []}
+    priced_ids = set(required_ids)
     if not priced_ids:
         return _manual_refresh_response(
             canonical=canonical,
@@ -572,6 +663,7 @@ def refresh_reportable_months_from_databridges(
             checked_start_month=_month_label(start_month),
             checked_end_month=_month_label(end_month),
             months_checked=months_checked,
+            required_commodity_ids=required_ids,
             warnings=[f"PriceCache has no priced commodity IDs for {canonical}; refresh skipped."],
         )
 
@@ -592,6 +684,7 @@ def refresh_reportable_months_from_databridges(
             checked_start_month=_month_label(start_month),
             checked_end_month=_month_label(end_month),
             months_checked=months_checked,
+            required_commodity_ids=required_ids,
             rows_fetched=0,
             warnings=[f"DataBridges refresh unavailable: {_safe_adapter_error(exc)}"],
         )
@@ -639,6 +732,7 @@ def refresh_reportable_months_from_databridges(
             checked_start_month=_month_label(start_month),
             checked_end_month=_month_label(end_month),
             months_checked=months_checked,
+            required_commodity_ids=required_ids,
             rows_fetched=len(raw_rows),
             rows_real=len(real_filter.rows),
             rows_saved=0,
@@ -703,7 +797,7 @@ def refresh_reportable_months_from_databridges(
     )
     repo.set_country_active_version(iso3, new_version_id)
     _invalidate_country_price_cache(iso3)
-    after = get_reportable_months(country)
+    after = get_reportable_months(country) if legacy_request else get_reportable_months(country, **selection_kwargs)
     warnings.extend(_manual_refresh_filter_warnings(real_filter, future_filter, deduped))
     return _manual_refresh_response(
         canonical=canonical,
@@ -716,6 +810,7 @@ def refresh_reportable_months_from_databridges(
         checked_start_month=_month_label(start_month),
         checked_end_month=_month_label(end_month),
         months_checked=months_checked,
+        required_commodity_ids=required_ids,
         rows_fetched=len(raw_rows),
         rows_real=len(real_filter.rows),
         rows_saved=rows_saved,
@@ -836,6 +931,7 @@ def resolve_report_price_data(
     admin1_list: List[str],
     *,
     basket_items: Optional[List[Dict[str, Any]]] = None,
+    basket_specs: Optional[Sequence[BasketCalculationSpec | Mapping[str, Any]]] = None,
     currency_code: Optional[str] = None,
     lookback_months: int = 13,
     enable_backfill: bool = True,
@@ -853,18 +949,31 @@ def resolve_report_price_data(
 
     cache_metadata = get_cache_metadata_for_report(canonical)
     valid_names, commodity_ids, missing = _resolve_commodities(canonical, iso3, commodities)
-    basket_components = _normalise_basket_components(basket_items)
+    resolved_basket_specs = [
+        item if isinstance(item, BasketCalculationSpec) else BasketCalculationSpec.from_snapshot(item)
+        for item in (basket_specs or [])
+    ]
+    if not resolved_basket_specs and basket_items:
+        resolved_basket_specs = [legacy_primary_spec(basket_items)]
+    primary_spec = next((item for item in resolved_basket_specs if item.role == "primary"), None)
+    primary_items = [item.to_dict() for item in primary_spec.items] if primary_spec else list(basket_items or [])
+    basket_components = _normalise_basket_components(primary_items)
     name_by_id = _commodity_names_by_id(canonical, iso3)
-    for component in basket_components:
-        name_by_id[component["commodity_id"]] = component["commodity_name"]
-        if component["commodity_name"] not in valid_names:
-            valid_names.append(component["commodity_name"])
-        if component["commodity_id"] not in commodity_ids:
-            commodity_ids.append(component["commodity_id"])
+    for spec in resolved_basket_specs:
+        for item in spec.items:
+            name_by_id[item.commodity_id] = item.commodity_name
+            if item.commodity_name not in valid_names:
+                valid_names.append(item.commodity_name)
+            if item.commodity_id not in commodity_ids:
+                commodity_ids.append(item.commodity_id)
     for commodity_id in commodity_ids:
         name = name_by_id.get(commodity_id)
         if name and name not in valid_names:
             valid_names.append(name)
+    optional_module_names = _primary_driven_optional_module_names(
+        valid_names,
+        resolved_basket_specs,
+    )
 
     warnings: list[str] = []
     if missing:
@@ -880,6 +989,8 @@ def resolve_report_price_data(
     repo = _get_price_cache_repository()
     availability = repo.get_country_availability(iso3)
     cache_version_id = getattr(availability, "cache_version_id", None) or cache_metadata.get("cache_version_id") or ""
+    available_regions = list(getattr(availability, "admin1_names", None) or [])
+    normalized_run_regions = canonicalize_run_regions(admin1_list, available_regions)
     commodity_ids = _dedupe_ints(commodity_ids)
     requirements, commodity_specs = _build_report_price_requirements(
         valid_names=valid_names,
@@ -932,6 +1043,17 @@ def resolve_report_price_data(
         for status in statuses
         if status.missing_reference_month or status.missing_soft_months
     ]
+    if resolved_basket_specs:
+        gapped_ids = _dedupe_ints(
+            gapped_ids
+            + missing_required_commodity_ids(
+                df,
+                resolved_basket_specs,
+                months=list(full_date_index),
+                run_regions=normalized_run_regions,
+                available_regions=available_regions,
+            )
+        )
     backfill_info: dict[int, dict[str, Any]] = {}
     merged_records = list(cache_records)
     if enable_backfill and gapped_ids:
@@ -988,7 +1110,7 @@ def resolve_report_price_data(
 
     _classify_unresolved_gap_sources(gap_report, df, backfill_info=backfill_info)
     hard_missing = gap_report.hard_missing_statuses()
-    if hard_missing:
+    if hard_missing and not resolved_basket_specs:
         if any(status.source_status == "source_error" for status in hard_missing):
             raise ReportPriceBackfillUnavailable(gap_report)
         raise BasketReferenceMonthMissing(gap_report)
@@ -1004,6 +1126,58 @@ def resolve_report_price_data(
         allow_empty=True,
     )
     df_national, df_regional, raw_rows = frames
+    basket_calculation = calculate_basket_series(
+        df,
+        resolved_basket_specs,
+        full_date_index=full_date_index,
+        run_regions=normalized_run_regions,
+        available_regions=available_regions,
+    )
+    if resolved_basket_specs:
+        df_national, df_regional = apply_primary_food_basket_aliases(
+            df_national,
+            df_regional,
+            basket_calculation,
+        )
+        coverage_gaps = target_coverage_gaps(
+            resolved_basket_specs,
+            basket_calculation,
+            target_date=target_date,
+        )
+        gap_report.basket_coverage_gaps = coverage_gaps
+        if coverage_gaps:
+            if any(info.get("error") for info in backfill_info.values()):
+                raise ReportPriceBackfillUnavailable(gap_report)
+            raise BasketReferenceMonthMissing(gap_report)
+    basket_role_statistics = calculate_basket_statistics(
+        df,
+        resolved_basket_specs,
+        basket_calculation,
+        target_date=target_date,
+    )
+    warnings.extend(basket_calculation.warnings)
+    spec_by_role = {spec.role: spec for spec in resolved_basket_specs}
+    for role, payload in basket_role_statistics.items():
+        if not payload:
+            continue
+        spec = spec_by_role.get(role)
+        label = f"{role} basket {spec.name!r}" if spec else f"{role} basket"
+        if not payload.get("mom_reference_complete"):
+            warnings.append(f"{label} has incomplete previous-month coverage; MoM is unavailable.")
+        if not payload.get("yoy_reference_complete"):
+            warnings.append(f"{label} has incomplete year-ago coverage; YoY is unavailable.")
+    if not basket_calculation.regional.empty:
+        target_regional = basket_calculation.regional[
+            pd.to_datetime(basket_calculation.regional["Date"], errors="coerce") == target_date
+        ]
+        for row in target_regional.to_dict(orient="records"):
+            spec = spec_by_role.get(str(row.get("BasketRole") or ""))
+            if spec is None or spec.scope_type != "national" or bool(row.get("Complete")):
+                continue
+            warnings.append(
+                f"{spec.role.title()} basket {spec.name!r} regional breakdown for {row.get('Region')} was omitted "
+                f"because components are incomplete: {', '.join(row.get('MissingComponentNames') or [])}."
+            )
     selected_currency_code = _resolve_selected_currency_code(
         df,
         selected_currency,
@@ -1059,7 +1233,7 @@ def resolve_report_price_data(
         price_frame=df_national,
         history_price_frame=df_history_national,
         basket_components=basket_components,
-        valid_names=valid_names,
+        valid_names=optional_module_names,
     )
     for column, series in labour_result["series"].items():
         df_national[column] = series.reindex(full_date_index)
@@ -1112,6 +1286,11 @@ def resolve_report_price_data(
         livestock_animal_products_data=livestock_result["livestock_animal_products_data"],
         labour_market_data=labour_result["labour_market_data"],
         df_history_national=df_history_national,
+        basket_series_national=basket_calculation.national,
+        basket_series_regional=basket_calculation.regional,
+        basket_statistics=basket_role_statistics,
+        basket_calculation_specs=[spec.to_dict() for spec in resolved_basket_specs],
+        basket_applicable_regions=basket_calculation.applicable_regions,
     )
 
 
@@ -3178,8 +3357,10 @@ def _build_time_series_from_price_df(
             if commodity_id not in basket_by_id.columns:
                 basket_by_id[commodity_id] = np.nan
             weighted_components[commodity_id] = basket_by_id[commodity_id] * component["weight_quantity"]
-        national_pivot["FoodBasket"] = weighted_components.sum(axis=1, skipna=True).round(2)
-        national_pivot.loc[basket_by_id[basket_component_ids].isna().all(axis=1), "FoodBasket"] = np.nan
+        national_pivot["FoodBasket"] = weighted_components.sum(
+            axis=1,
+            min_count=len(basket_components),
+        ).round(2)
     else:
         national_pivot["FoodBasket"] = national_pivot[valid_names].sum(axis=1, skipna=True).round(2)
         national_pivot.loc[national_pivot[valid_names].isna().all(axis=1), "FoodBasket"] = np.nan
@@ -3201,24 +3382,21 @@ def _build_time_series_from_price_df(
     df_regional_data = df[df["Admin 1"].isin(valid_regions)].copy()
     if basket_components:
         weights_by_id = {component["commodity_id"]: component["weight_quantity"] for component in basket_components}
-        regional_components = (
-            df_regional_data[df_regional_data["Commodity ID"].isin(weights_by_id.keys())]
-            .groupby(["Month", "Admin 1", "Commodity ID"], dropna=True)["Price"]
-            .mean()
-            .reset_index()
+        regional_pivot = df_regional_data[
+            df_regional_data["Commodity ID"].isin(weights_by_id.keys())
+        ].pivot_table(
+            index=["Month", "Admin 1"],
+            columns="Commodity ID",
+            values="Price",
+            aggfunc="mean",
         )
-        if not regional_components.empty:
-            regional_components["ComponentValue"] = regional_components.apply(
-                lambda row: float(row["Price"]) * weights_by_id.get(int(row["Commodity ID"]), 0.0),
-                axis=1,
-            )
-            regional_agg = (
-                regional_components.groupby(["Month", "Admin 1"], dropna=True)["ComponentValue"]
-                .sum()
-                .reset_index()
-            )
-        else:
-            regional_agg = pd.DataFrame(columns=["Month", "Admin 1", "ComponentValue"])
+        for commodity_id in weights_by_id:
+            if commodity_id not in regional_pivot.columns:
+                regional_pivot[commodity_id] = np.nan
+        weighted = pd.DataFrame(index=regional_pivot.index)
+        for commodity_id, quantity in weights_by_id.items():
+            weighted[commodity_id] = regional_pivot[commodity_id] * quantity
+        regional_agg = weighted.sum(axis=1, min_count=len(weights_by_id)).rename("FoodBasket").reset_index()
         regional_agg.columns = ["Date", "Region", "FoodBasket"]
     else:
         regional_agg = (
@@ -3253,6 +3431,7 @@ def _build_time_series_from_price_df(
             "Admin 2",
             "Market Name",
             "Market ID",
+            "Unit ID",
             "Unit",
             "Currency",
             "Data Type",
@@ -3726,6 +3905,27 @@ def calculate_statistics_from_csv(
             stats["auxiliary"][column] = item
         elif column in commodities:
             stats["commodities"][column] = item
+
+    if not stats["food_basket"] and "FoodBasket" in df_national.columns:
+        # Preserve the legacy primary alias shape even when strict component
+        # coverage makes the target value unavailable.
+        stats["food_basket"] = {
+            "current_price": None,
+            "mom_change_pct": None,
+            "yoy_change_pct": None,
+            "selected_component_count": len(selected_components),
+            "selected_component_names": selected_components,
+            "configured_component_count": len(configured_components),
+            "configured_component_names": configured_components,
+            "historical_component_count": len(historical_components),
+            "historical_component_names": historical_components,
+            "latest_component_count": len(latest_components),
+            "latest_component_names": latest_components,
+            "available_component_count": len(latest_components),
+            "available_component_names": latest_components,
+            "missing_latest_component_names": missing_latest_components,
+            "missing_component_names": missing_latest_components,
+        }
     return stats
 
 
@@ -3905,6 +4105,7 @@ def _normalise_cached_price_rows(
                 "Admin 2": row.admin2_name or "",
                 "Market Name": row.market_name or "Unknown",
                 "Market ID": row.market_id,
+                "Unit ID": row.commodity_unit_id,
                 "Unit": row.commodity_unit_name or "",
                 "Currency": row.currency_name or row.currency_code or "",
                 "Currency Code": row.currency_code or "",
@@ -3927,6 +4128,7 @@ def _normalise_cached_price_rows(
         "Admin 2",
         "Market Name",
         "Market ID",
+        "Unit ID",
         "Unit",
         "Currency",
         "Currency Code",
@@ -4072,6 +4274,28 @@ def _normalise_basket_components(items: Optional[List[Dict[str, Any]]]) -> list[
     return components
 
 
+def _primary_driven_optional_module_names(
+    valid_names: Sequence[str],
+    basket_specs: Sequence[BasketCalculationSpec],
+) -> list[str]:
+    primary_names = {
+        item.commodity_name.casefold()
+        for spec in basket_specs
+        if spec.role == "primary"
+        for item in spec.items
+    }
+    secondary_only_names = {
+        item.commodity_name.casefold()
+        for spec in basket_specs
+        if spec.role == "secondary"
+        for item in spec.items
+        if item.commodity_name.casefold() not in primary_names
+    }
+    return [
+        name for name in valid_names if str(name).casefold() not in secondary_only_names
+    ]
+
+
 def _resolve_commodities(
     canonical: str,
     iso3: str,
@@ -4156,6 +4380,224 @@ def _get_repository_country_metadata(iso3: str) -> CountryMetadata:
     if metadata is None:
         raise PriceCacheUnavailableError(f"No active PriceCache metadata is available for {iso3}.")
     return metadata
+
+
+def _resolve_reportability_specs(
+    canonical: str,
+    iso3: str,
+    *,
+    explicit_selection: bool,
+    primary_basket_version_id: Optional[str],
+    include_secondary_basket: bool,
+    secondary_basket_version_id: Optional[str],
+) -> tuple[list[BasketCalculationSpec], bool]:
+    if not explicit_selection:
+        basket = _get_active_food_basket(iso3)
+        return ([BasketCalculationSpec.from_snapshot(basket)] if basket is not None else []), False
+
+    from app.services.market_monitor.food_basket import (
+        BasketNotConfigured,
+        BasketVersionConflict,
+        resolve_baskets_for_report,
+    )
+
+    try:
+        selection = resolve_baskets_for_report(
+            canonical,
+            primary_basket_version_id=primary_basket_version_id,
+            include_secondary_basket=include_secondary_basket,
+            secondary_basket_version_id=secondary_basket_version_id,
+        )
+    except BasketNotConfigured:
+        if primary_basket_version_id:
+            raise BasketVersionConflict(
+                "The selected primary basket version is no longer active. Refresh the country baskets and try again."
+            )
+        return [], False
+    specs = [BasketCalculationSpec.from_snapshot(selection.primary)]
+    if selection.secondary_basket_included and selection.secondary is not None:
+        specs.append(BasketCalculationSpec.from_snapshot(selection.secondary))
+    return specs, bool(selection.secondary_basket_included)
+
+
+def _build_role_aware_reportable_months_payload(
+    *,
+    canonical: str,
+    iso3: str,
+    repo: PriceCacheRepository,
+    availability: Any,
+    specs: Sequence[BasketCalculationSpec],
+    secondary_included: bool,
+    run_regions: Sequence[str],
+) -> dict[str, Any]:
+    cache_version_id = getattr(availability, "cache_version_id", None) if availability else None
+    start_d = _date_obj(getattr(availability, "date_start", None)) if availability else None
+    latest_cached = _date_obj(getattr(availability, "date_end", None)) if availability else None
+    current_month = _current_month_start()
+    if latest_cached and latest_cached > current_month:
+        latest_cached = current_month
+    primary = next((spec for spec in specs if spec.role == "primary"), None)
+    secondary = next((spec for spec in specs if spec.role == "secondary"), None)
+    base: dict[str, Any] = {
+        "country": canonical,
+        "iso3": iso3,
+        "cache_version_id": cache_version_id,
+        "basket_version_id": primary.basket_version_id if primary else None,
+        "primary_basket_version_id": primary.basket_version_id if primary else None,
+        "secondary_basket_version_id": secondary.basket_version_id if secondary else None,
+        "secondary_basket_included": bool(secondary_included and secondary is not None),
+        "applicable_regions": {"primary": [], "secondary": []},
+        "primary_reportable_months": [],
+        "secondary_reportable_months": [],
+        "joint_reportable_months": [],
+        "latest_primary_reportable_month": None,
+        "latest_secondary_reportable_month": None,
+        "latest_joint_reportable_month": None,
+        "missing_by_basket_and_month": {"primary": None, "secondary": None},
+        "reportable_months": [],
+        "latest_reportable_month": None,
+        "latest_cached_month": _month_label(latest_cached),
+        "latest_cached_real_month": None,
+        "missing_by_month": {},
+        "warnings": [],
+    }
+    if availability is None:
+        base["warnings"].append(f"No active PriceCache availability is available for {canonical}.")
+        return base
+    if primary is None:
+        base["warnings"].append(f"No active food basket is configured for {canonical}.")
+        return base
+    if start_d is None or latest_cached is None or start_d > latest_cached:
+        base["warnings"].append(f"PriceCache has no monthly price date range for {canonical}.")
+        return base
+
+    required_ids = sorted({item.commodity_id for spec in specs for item in spec.items})
+    if not required_ids:
+        base["warnings"].append(f"The active primary food basket for {canonical} has no commodities.")
+        return base
+    rows = repo.get_price_window(
+        iso3,
+        start_d.isoformat(),
+        _month_end(latest_cached).isoformat(),
+        commodity_ids=required_ids,
+    )
+    frame = _normalise_cached_price_rows(rows, canonical, iso3)
+    if not frame.empty:
+        latest_real = frame["Price Date"].max()
+        if pd.notna(latest_real):
+            base["latest_cached_real_month"] = pd.Timestamp(latest_real).strftime("%Y-%m")
+    months = pd.date_range(start=start_d, end=latest_cached, freq="MS")
+    available_regions = list(getattr(availability, "admin1_names", None) or [])
+    calculation = calculate_basket_series(
+        frame,
+        specs,
+        full_date_index=months,
+        run_regions=run_regions,
+        available_regions=available_regions,
+    )
+    base["applicable_regions"] = {
+        "primary": list(calculation.applicable_regions.get("primary", [])),
+        "secondary": list(calculation.applicable_regions.get("secondary", [])),
+    }
+    base["warnings"].extend(calculation.warnings)
+
+    role_reportable: dict[str, list[str]] = {"primary": [], "secondary": []}
+    for spec in specs:
+        summary = calculation.summaries.get(spec.role, pd.DataFrame())
+        if not summary.empty:
+            role_reportable[spec.role] = [
+                pd.Timestamp(value).strftime("%Y-%m")
+                for value in summary.loc[summary["Complete"].astype(bool), "Date"].tolist()
+            ]
+        base["missing_by_basket_and_month"][spec.role] = _reportability_missing_for_spec(
+            spec,
+            calculation,
+        )
+
+    primary_months = role_reportable["primary"]
+    secondary_months = role_reportable["secondary"] if secondary_included else []
+    joint_months = (
+        [month for month in primary_months if month in set(secondary_months)]
+        if secondary_included and secondary is not None
+        else list(primary_months)
+    )
+    base.update(
+        {
+            "primary_reportable_months": primary_months,
+            "secondary_reportable_months": secondary_months,
+            "joint_reportable_months": joint_months,
+            "latest_primary_reportable_month": primary_months[-1] if primary_months else None,
+            "latest_secondary_reportable_month": secondary_months[-1] if secondary_months else None,
+            "latest_joint_reportable_month": joint_months[-1] if joint_months else None,
+            "reportable_months": joint_months,
+            "latest_reportable_month": joint_months[-1] if joint_months else None,
+        }
+    )
+    base["missing_by_month"] = _flatten_effective_missing(
+        base["missing_by_basket_and_month"],
+        include_secondary=bool(secondary_included and secondary is not None),
+    )
+    if not joint_months:
+        base["warnings"].append(f"No complete actual-price basket month is available for {canonical}.")
+    return base
+
+
+def _reportability_missing_for_spec(
+    spec: BasketCalculationSpec,
+    calculation: Any,
+) -> dict[str, Any]:
+    if spec.scope_type == "national":
+        rows = calculation.national[calculation.national["BasketRole"] == spec.role]
+    else:
+        rows = calculation.regional[calculation.regional["BasketRole"] == spec.role]
+    months: dict[str, list[dict[str, Any]]] = {}
+    if not rows.empty:
+        for row in rows.to_dict(orient="records"):
+            if bool(row.get("Complete")):
+                continue
+            label = pd.Timestamp(row["Date"]).strftime("%Y-%m")
+            months.setdefault(label, []).append(
+                {
+                    "region": row.get("Region"),
+                    "scope_label": row.get("ScopeLabel"),
+                    "missing_component_names": list(row.get("MissingComponentNames") or []),
+                }
+            )
+    return {
+        "basket_version_id": spec.basket_version_id,
+        "basket_name": spec.name,
+        "scope_type": spec.scope_type,
+        "scope_label": "National" if spec.scope_type == "national" else "Average across selected regions",
+        "months": months,
+    }
+
+
+def _flatten_effective_missing(
+    missing_by_role: Mapping[str, Any],
+    *,
+    include_secondary: bool,
+) -> dict[str, list[str]]:
+    roles = ["primary", "secondary"] if include_secondary else ["primary"]
+    output: dict[str, list[str]] = {}
+    for role in roles:
+        role_payload = missing_by_role.get(role)
+        if not isinstance(role_payload, Mapping):
+            continue
+        basket_name = str(role_payload.get("basket_name") or role)
+        for month, entries in (role_payload.get("months") or {}).items():
+            for entry in entries or []:
+                region = entry.get("region") if isinstance(entry, Mapping) else None
+                for name in (entry.get("missing_component_names") if isinstance(entry, Mapping) else []) or []:
+                    if include_secondary:
+                        label = f"{role} basket {basket_name}"
+                        if region:
+                            label += f" / {region}"
+                        label += f": {name}"
+                    else:
+                        label = str(name)
+                    if label not in output.setdefault(str(month), []):
+                        output[str(month)].append(label)
+    return output
 
 
 def _build_reportable_months_payload(
@@ -4282,6 +4724,7 @@ def _manual_refresh_response(
     checked_start_month: Optional[str] = None,
     checked_end_month: Optional[str] = None,
     months_checked: Optional[list[str]] = None,
+    required_commodity_ids: Optional[list[int]] = None,
     rows_fetched: int = 0,
     rows_real: int = 0,
     rows_saved: int = 0,
@@ -4303,6 +4746,7 @@ def _manual_refresh_response(
         "checked_start_month": checked_start_month,
         "checked_end_month": checked_end_month,
         "months_checked": months_checked or [],
+        "required_commodity_ids": list(required_commodity_ids or []),
         "latest_reportable_month_before": before.get("latest_reportable_month"),
         "latest_reportable_month_after": after.get("latest_reportable_month"),
         "new_reportable_months": sorted(after_months - before_months),
@@ -4314,6 +4758,12 @@ def _manual_refresh_response(
         "excluded_future_rows": excluded_future_rows,
         "deduplicated_rows": deduplicated_rows,
         "missing_by_month": after.get("missing_by_month") or {},
+        "missing_by_basket_and_month": after.get("missing_by_basket_and_month") or {
+            "primary": None,
+            "secondary": None,
+        },
+        "reportability_before": before,
+        "reportability_after": after,
         "warnings": _dedupe_preserve_order([str(item) for item in warnings or []]),
     }
 
@@ -4695,6 +5145,7 @@ def _empty_price_df() -> pd.DataFrame:
             "Admin 2",
             "Market Name",
             "Market ID",
+            "Unit ID",
             "Unit",
             "Currency",
             "Currency Code",

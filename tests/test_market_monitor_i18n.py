@@ -92,6 +92,21 @@ def test_market_monitor_blocks_localize_headings_and_captions():
     assert "Evolution du cout du panier alimentaire" in captions
 
 
+def test_phase5_basket_chart_and_table_labels_are_localized():
+    assert t("en", "section.BASKET_DEFINITIONS") == "Basket Definitions"
+    assert t("fr", "basket.scope.selected_regions_named", regions="Nord, Sud") == (
+        "Regions selectionnees : Nord, Sud"
+    )
+    assert t("es", "basket.table.header.composition") == "Composicion"
+    assert t(
+        "es",
+        "chart.title.basket_trend_role",
+        basket="Canasta urbana",
+        scope="Nacional",
+        country="Guatemala",
+    ) == "Tendencia del costo de Canasta urbana - Nacional - Guatemala"
+
+
 def test_fuel_fallback_narrative_localizes_french_numbers_and_terms():
     module = market_graph.FuelEnergyModule()
 

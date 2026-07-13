@@ -3,9 +3,9 @@
   "prompts": {
     "exchange_rate": {
       "hashes": {
-        "en": "f30aa72476bdcd6c736730bd85a587aee0fc724d62d3b912c86ecda4042c62f8",
-        "es": "70c9f2bc0eaca06b1934fe564fd36c49e91f7bd3674869e43d259171326f9215",
-        "fr": "bd285447507643e5bbe37e0ff022e562d26f48ac3bfc07e9b942364b01756dad"
+        "en": "6cd57db8c74b94c354518c5a43eac5477262cc4aac5be1dc3aa06d2e0bbad3e1",
+        "es": "5e662414bc58af8f7e2c45a651ae76a8a174eb305bfdc5ebea74a4cba2ee81fd",
+        "fr": "51e835841dcca23281124bf5404cfb95d61eff8e4d550973353619b34b5112df"
       },
       "languages": [
         "en",
@@ -14,6 +14,8 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_relevance_json",
+        "correction_flags_json",
         "country",
         "currency_code",
         "current_rate",
@@ -29,15 +31,15 @@
         "yearly_change_pct_localized"
       ],
       "translations_of": {
-        "es": "f30aa72476bdcd6c736730bd85a587aee0fc724d62d3b912c86ecda4042c62f8",
-        "fr": "f30aa72476bdcd6c736730bd85a587aee0fc724d62d3b912c86ecda4042c62f8"
+        "es": "6cd57db8c74b94c354518c5a43eac5477262cc4aac5be1dc3aa06d2e0bbad3e1",
+        "fr": "6cd57db8c74b94c354518c5a43eac5477262cc4aac5be1dc3aa06d2e0bbad3e1"
       }
     },
     "fuel_energy": {
       "hashes": {
-        "en": "bddc633f366b637197aa50147c50e5e405544116f05b5dd6eb19977eb4e28879",
-        "es": "e95524d4c023e8e29c4bc6c77370dcf4bca9e5e827350b487d3a8b912ff9ec32",
-        "fr": "58b7a2f722ed806c6f430b13fb413a7c7ad9373674909979fc06de3407c927fc"
+        "en": "d68f79ebc549137a99e3aeea9da9e08e14a5bc1258c6fb06c776d5b00f09f683",
+        "es": "f923a7766af736a1ff6e7d10b501ea77703404dbf1f22011762df72ab44f8e85",
+        "fr": "eb55c19bfa0edf7b79a42757bdc07542544dfdedf3e0e1fdf03e68a0b2ae948e"
       },
       "languages": [
         "en",
@@ -46,6 +48,8 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_relevance_json",
+        "correction_flags_json",
         "country",
         "fuel_data_json",
         "language_name",
@@ -56,15 +60,15 @@
         "trend_analysis_json"
       ],
       "translations_of": {
-        "es": "bddc633f366b637197aa50147c50e5e405544116f05b5dd6eb19977eb4e28879",
-        "fr": "bddc633f366b637197aa50147c50e5e405544116f05b5dd6eb19977eb4e28879"
+        "es": "d68f79ebc549137a99e3aeea9da9e08e14a5bc1258c6fb06c776d5b00f09f683",
+        "fr": "d68f79ebc549137a99e3aeea9da9e08e14a5bc1258c6fb06c776d5b00f09f683"
       }
     },
     "highlights": {
       "hashes": {
-        "en": "fda2c8e40f8aff12c8b4b0cea666e0b9fc1e79a8fa7d444f510787b98494d945",
-        "es": "f70d4df67ae9699d5ad0a9fff74e45455f3e3a8429e10bce69cdfe640e1621b3",
-        "fr": "4b631ea387d4b8c1b401c477fdf08c3ead3f4cac3cf1c6eaf4b334252782c2ad"
+        "en": "45b5c3c689a42c066e595c868074df85efbf82bf391b85c22504696d2adafb13",
+        "es": "b836c72af4581c8b46959910a3249e582f83f8c58bb134f96b4b6ed92427aaab",
+        "fr": "eb0f4ded9baff598a5d74993f32c3dc66a9a633cee7d7d156c3dfd55c2eb5ea2"
       },
       "languages": [
         "en",
@@ -73,6 +77,8 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_context_json",
+        "correction_flags_json",
         "country",
         "exchange_data_json",
         "formatted_stats_json",
@@ -86,15 +92,15 @@
         "validation_warnings_json"
       ],
       "translations_of": {
-        "es": "fda2c8e40f8aff12c8b4b0cea666e0b9fc1e79a8fa7d444f510787b98494d945",
-        "fr": "fda2c8e40f8aff12c8b4b0cea666e0b9fc1e79a8fa7d444f510787b98494d945"
+        "es": "45b5c3c689a42c066e595c868074df85efbf82bf391b85c22504696d2adafb13",
+        "fr": "45b5c3c689a42c066e595c868074df85efbf82bf391b85c22504696d2adafb13"
       }
     },
     "labour_market": {
       "hashes": {
-        "en": "1c643711fc191a2779894f34e169521361df01927ec319ba6805d58f1e5c8b97",
-        "es": "8cedc3e99dcf2a2b741b327fe82394985369abf98b1e5a96a1a0b2cc63a591b7",
-        "fr": "7af4ce8e411275a9bb3dff47edc79e35049d6b703eb0e63635aee4fdb92d6f88"
+        "en": "c2c2466a7d925e098469a5b15572d0fc15a16eef41e4fec60bc99658ec91ddf0",
+        "es": "bc013c17d33da19c9296d4eeaba8a8be71b6d4c72d1eae3331ce928f8c76a8c1",
+        "fr": "f2f52fc9fc394c77fc6c64c4f36226515c63fca14f8ff1a2423fd2367b000518"
       },
       "languages": [
         "en",
@@ -103,6 +109,8 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_relevance_json",
+        "correction_flags_json",
         "country",
         "labour_data_json",
         "language_name",
@@ -113,15 +121,15 @@
         "trend_analysis_json"
       ],
       "translations_of": {
-        "es": "1c643711fc191a2779894f34e169521361df01927ec319ba6805d58f1e5c8b97",
-        "fr": "1c643711fc191a2779894f34e169521361df01927ec319ba6805d58f1e5c8b97"
+        "es": "c2c2466a7d925e098469a5b15572d0fc15a16eef41e4fec60bc99658ec91ddf0",
+        "fr": "c2c2466a7d925e098469a5b15572d0fc15a16eef41e4fec60bc99658ec91ddf0"
       }
     },
     "livestock_animal_products": {
       "hashes": {
-        "en": "847ed6dfe11b154445dca39fdf79072376b346e5e3a3e17d86d337fdb42658d9",
-        "es": "eb67bea2f68d7673c836d01c2cb8eb2f184115d3e6cc8a611176d3075a9580ed",
-        "fr": "614090431a9140790fe9c5e8783b1714c78f3f0c2be6d848d9867e0d3e7074d0"
+        "en": "04acd9ebe162513aeb7948a37be16e0f097c779ad8f5242f1d9905f954b3fcc3",
+        "es": "02bf3afd250d611f0a6cb56f83099f3a0588f2e2c218341d09921045faf7eb0c",
+        "fr": "5f43e2e69efa73ec341987e9a52d03509cef21e64916b917664571bb28d4aee4"
       },
       "languages": [
         "en",
@@ -130,6 +138,8 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_relevance_json",
+        "correction_flags_json",
         "country",
         "language_name",
         "livestock_data_json",
@@ -140,15 +150,15 @@
         "trend_analysis_json"
       ],
       "translations_of": {
-        "es": "847ed6dfe11b154445dca39fdf79072376b346e5e3a3e17d86d337fdb42658d9",
-        "fr": "847ed6dfe11b154445dca39fdf79072376b346e5e3a3e17d86d337fdb42658d9"
+        "es": "04acd9ebe162513aeb7948a37be16e0f097c779ad8f5242f1d9905f954b3fcc3",
+        "fr": "04acd9ebe162513aeb7948a37be16e0f097c779ad8f5242f1d9905f954b3fcc3"
       }
     },
     "narrative": {
       "hashes": {
-        "en": "1f0b79ff22c5ce212e7b5790a3397e252457afc51bc5cc38f9801842640b51c1",
-        "es": "8d07c3da72ab67ea8684395731cb0e6d7af1759fde8570c333cb75d17e882374",
-        "fr": "25463f8a5e6113d22f6aaf9a7c5e47b0c4fc5738e54e4f7408f1ba7ee04c33c7"
+        "en": "cf691be61cff35e376cba71fc592cf35fa847377dfdc55c06f2337a41e3deb0e",
+        "es": "3a9f0b7f523e588d230009dc73cc1318dccf0093f0b0dc840022538ed63d429f",
+        "fr": "0ef79337907d7bd21aa630ef4dab83e50ce26022a163e552c3c778db64d9ffc5"
       },
       "languages": [
         "en",
@@ -157,26 +167,30 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_context_json",
+        "correction_flags_json",
         "country",
         "events_json",
         "language_name",
         "locale_instruction",
         "module_sections_json",
         "report_month_localized",
+        "section_word_ranges_json",
+        "sections_to_generate_json",
         "terminology_glossary",
         "time_period",
         "trend_json"
       ],
       "translations_of": {
-        "es": "1f0b79ff22c5ce212e7b5790a3397e252457afc51bc5cc38f9801842640b51c1",
-        "fr": "1f0b79ff22c5ce212e7b5790a3397e252457afc51bc5cc38f9801842640b51c1"
+        "es": "cf691be61cff35e376cba71fc592cf35fa847377dfdc55c06f2337a41e3deb0e",
+        "fr": "cf691be61cff35e376cba71fc592cf35fa847377dfdc55c06f2337a41e3deb0e"
       }
     },
     "red_team": {
       "hashes": {
-        "en": "9491e50369c5f4052741925f404f925b3c25de4adea660b37a0e409a269d4a6e",
-        "es": "57f5d332d8c009f2b16ab2b58953a87d0d1267616a8394a70fdf4cdf877ffce5",
-        "fr": "2f85a23b7788d927ee9385e7960832786d22b752d23b364d8fb4bbfee6f8f7b5"
+        "en": "8274bcce61ef114b5f514975a8150a7f610af0fad045a0dca354cb4143fb1d5c",
+        "es": "4d980445fc6ed5f8b696328412bcb33e0b8303c98b3582b1a0e68ec595559ef7",
+        "fr": "6db2720311c71d3ab01a7c499bd97c6305ae8ddf113a3a5aa3297d46517662dc"
       },
       "languages": [
         "en",
@@ -185,6 +199,7 @@
       ],
       "output_facing": true,
       "placeholders": [
+        "basket_context_json",
         "draft_text",
         "exchange_data_json",
         "exchange_mom",
@@ -192,14 +207,15 @@
         "exchange_yoy",
         "language_name",
         "locale_instruction",
+        "module_basket_relevance_json",
         "stats_json",
         "terminology_glossary",
         "terminology_thresholds_json",
         "trend_json"
       ],
       "translations_of": {
-        "es": "9491e50369c5f4052741925f404f925b3c25de4adea660b37a0e409a269d4a6e",
-        "fr": "9491e50369c5f4052741925f404f925b3c25de4adea660b37a0e409a269d4a6e"
+        "es": "8274bcce61ef114b5f514975a8150a7f610af0fad045a0dca354cb4143fb1d5c",
+        "fr": "8274bcce61ef114b5f514975a8150a7f610af0fad045a0dca354cb4143fb1d5c"
       }
     }
   }

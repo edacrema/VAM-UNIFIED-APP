@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
+from pydantic import ValidationError
 
 from app.shared.async_runs import (
     create_run,
@@ -43,7 +44,12 @@ from app.services.mfi_drafter.data_loader import (
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
-from app.services.market_monitor.graph import AVAILABLE_MODULES, CURRENCY_SYMBOLS, run_report_generation
+from app.services.market_monitor.graph import (
+    AVAILABLE_MODULES,
+    CURRENCY_SYMBOLS,
+    normalize_qa_review,
+    run_report_generation,
+)
 from app.services.market_monitor.data_loader import (
     PriceCacheUnavailableError,
     check_data_availability,
@@ -57,15 +63,30 @@ from app.services.market_monitor.data_loader import (
     refresh_reportable_months_from_databridges,
 )
 from app.services.market_monitor.price_backfill import PriceDataGateError
+from app.services.market_monitor.basket_calculation import BasketScopeValidationError
 from app.services.market_monitor.food_basket import (
     BasketNotConfigured,
+    BasketRole,
+    BasketSaveInput,
     BasketValidationError,
     BasketVersionConflict,
-    get_active_basket_for_report,
+    archive_country_secondary_basket,
+    attach_basket_selection_to_result,
     get_country_basket_response,
+    get_country_baskets_response,
     list_country_basket_history,
+    list_country_basket_role_history,
+    resolve_baskets_for_report,
     save_country_basket,
+    save_country_basket_role,
 )
+from app.services.market_monitor.features import (
+    SecondBasketFeatureDisabled,
+    market_monitor_second_basket_enabled,
+    normalize_secondary_request,
+    second_basket_feature_metadata,
+)
+from app.services.market_monitor.schemas import GenerateReportInput, ReportableMonthsInput
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +118,41 @@ class LocalHTTPException(Exception):
         super().__init__(str(detail))
         self.status_code = status_code
         self.detail = detail
+
+
+def _validation_detail(exc: ValidationError) -> List[Dict[str, Any]]:
+    return exc.errors(include_url=False, include_context=False)
+
+
+def _validate_market_monitor_generate_input(json_body: Any) -> GenerateReportInput:
+    if not isinstance(json_body, dict):
+        raise LocalHTTPException(400, "Invalid JSON body")
+    try:
+        return GenerateReportInput.model_validate(json_body)
+    except ValidationError as exc:
+        raise LocalHTTPException(422, _validation_detail(exc)) from exc
+
+
+def _validate_reportable_months_input(payload: Any) -> ReportableMonthsInput:
+    if not isinstance(payload, dict):
+        raise LocalHTTPException(400, "Invalid reportability selection")
+    normalized = dict(payload)
+    regions = normalized.get("admin1_list", [])
+    if isinstance(regions, str):
+        normalized["admin1_list"] = [regions] if regions.strip() else []
+    try:
+        return ReportableMonthsInput.model_validate(normalized)
+    except ValidationError as exc:
+        raise LocalHTTPException(422, _validation_detail(exc)) from exc
+
+
+def _validate_basket_save_input(json_body: Any) -> BasketSaveInput:
+    if not isinstance(json_body, dict):
+        raise LocalHTTPException(400, "Invalid JSON body")
+    try:
+        return BasketSaveInput.model_validate(json_body)
+    except ValidationError as exc:
+        raise LocalHTTPException(422, _validation_detail(exc)) from exc
 
 
 @dataclass
@@ -399,10 +455,14 @@ def _build_market_monitor_output(
     country: str,
     time_period: str,
 ) -> Dict[str, Any]:
+    result = attach_basket_selection_to_result(result, None)
     return {
         "run_id": run_id,
         "country": country,
         "time_period": time_period,
+        "language": result.get("language", "en"),
+        "locale": result.get("locale", "en_US"),
+        "language_source": result.get("language_source", "default"),
         "report_sections": result.get("report_draft_sections", {}),
         "report_blocks": build_market_monitor_report_blocks(result),
         "visualizations": result.get("visualizations", {}),
@@ -414,6 +474,12 @@ def _build_market_monitor_output(
         "news_counts": result.get("news_counts", {}),
         "cache_metadata": result.get("cache_metadata", {}),
         "food_basket": result.get("food_basket", {}),
+        "food_baskets": result.get("food_baskets", {}),
+        "basket_statistics": result.get("basket_statistics", {}),
+        "basket_series_national": result.get("basket_series_national", []),
+        "basket_series_regional": result.get("basket_series_regional", []),
+        "secondary_basket_included": bool(result.get("secondary_basket_included", False)),
+        "qa_review": normalize_qa_review(result),
         "fuel_energy_data": result.get("fuel_energy_data"),
         "livestock_animal_products_data": result.get("livestock_animal_products_data"),
         "labour_market_data": result.get("labour_market_data"),
@@ -1578,7 +1644,7 @@ def _dispatch_market_monitor(
         and parts[0] == "countries"
         and parts[2] == "reportable-months"
     ):
-        return _market_monitor_country_reportable_months(parts[1])
+        return _market_monitor_country_reportable_months(parts[1], params=params)
     if (
         method == "POST"
         and len(parts) == 4
@@ -1587,6 +1653,40 @@ def _dispatch_market_monitor(
         and parts[3] == "refresh"
     ):
         return _market_monitor_refresh_country_reportable_months(parts[1], json_body=json_body)
+    if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "baskets":
+        return _market_monitor_country_baskets(parts[1])
+    if (
+        method == "POST"
+        and len(parts) == 4
+        and parts[0] == "countries"
+        and parts[2] == "baskets"
+        and parts[3] in {BasketRole.PRIMARY.value, BasketRole.SECONDARY.value}
+    ):
+        return _market_monitor_save_country_basket_role(
+            parts[1],
+            role=parts[3],
+            json_body=json_body,
+        )
+    if (
+        method == "GET"
+        and len(parts) == 5
+        and parts[0] == "countries"
+        and parts[2] == "baskets"
+        and parts[4] == "history"
+    ):
+        return _market_monitor_country_basket_role_history(
+            parts[1],
+            role=parts[3],
+            params=params,
+        )
+    if (
+        method == "DELETE"
+        and len(parts) == 4
+        and parts[0] == "countries"
+        and parts[2] == "baskets"
+        and parts[3] == BasketRole.SECONDARY.value
+    ):
+        return _market_monitor_archive_country_secondary_basket(parts[1])
     if method == "GET" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
         return _market_monitor_country_basket(parts[1])
     if method == "POST" and len(parts) == 3 and parts[0] == "countries" and parts[2] == "basket":
@@ -1597,24 +1697,32 @@ def _dispatch_market_monitor(
 
 
 def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
-    if not isinstance(json_body, dict):
-        raise LocalHTTPException(400, "Invalid JSON body")
+    input_data = _validate_market_monitor_generate_input(json_body)
 
-    country = json_body.get("country")
-    time_period = json_body.get("time_period")
-    commodity_list = json_body.get("commodity_list") or []
-    admin1_list = json_body.get("admin1_list") or []
-    currency_code = json_body.get("currency_code") or "USD"
-    enabled_modules = json_body.get("enabled_modules") or []
-    news_start_date = json_body.get("news_start_date")
-    news_end_date = json_body.get("news_end_date")
-    previous_report_text = json_body.get("previous_report_text") or ""
-    use_mock_data = bool(json_body.get("use_mock_data", False))
+    country = input_data.country
+    time_period = input_data.time_period
+    commodity_list = input_data.commodity_list
+    admin1_list = input_data.admin1_list
+    currency_code = input_data.currency_code
+    enabled_modules = input_data.enabled_modules
+    news_start_date = input_data.news_start_date
+    news_end_date = input_data.news_end_date
+    previous_report_text = input_data.previous_report_text
+    use_mock_data = input_data.use_mock_data
 
     if not admin1_list and use_mock_data:
         admin1_list = [f"{country} North", f"{country} South", f"{country} Central"]
 
     try:
+        include_secondary_basket, secondary_basket_version_id = normalize_secondary_request(input_data)
+        basket_selection = None
+        if not use_mock_data:
+            basket_selection = resolve_baskets_for_report(
+                country,
+                primary_basket_version_id=input_data.effective_primary_basket_version_id,
+                include_secondary_basket=include_secondary_basket,
+                secondary_basket_version_id=secondary_basket_version_id,
+            )
         result = run_report_generation(
             country=country,
             time_period=time_period,
@@ -1626,13 +1734,22 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
             news_end_date=news_end_date,
             previous_report_text=previous_report_text,
             use_mock_data=use_mock_data,
-            basket_version_id=json_body.get("basket_version_id"),
+            basket_version_id=(
+                basket_selection.primary_basket_version_id
+                if basket_selection is not None
+                else input_data.effective_primary_basket_version_id
+            ),
+            basket_selection=basket_selection,
+            language=input_data.language,
         )
+        result = attach_basket_selection_to_result(result, basket_selection)
     except BasketVersionConflict as exc:
         raise LocalHTTPException(409, str(exc))
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
     except BasketNotConfigured as exc:
         raise LocalHTTPException(409, str(exc))
-    except BasketValidationError as exc:
+    except (BasketValidationError, BasketScopeValidationError) as exc:
         raise LocalHTTPException(400, str(exc))
     except PriceDataGateError as exc:
         raise LocalHTTPException(exc.status_code, exc.to_dict())
@@ -1650,24 +1767,37 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
 
 
 def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
-    if not isinstance(json_body, dict):
-        raise LocalHTTPException(400, "Invalid JSON body")
+    input_data = _validate_market_monitor_generate_input(json_body)
 
-    if not bool(json_body.get("use_mock_data", False)):
-        try:
-            get_active_basket_for_report(
-                json_body.get("country"),
-                basket_version_id=json_body.get("basket_version_id"),
+    submission_feature_flags = second_basket_feature_metadata()
+    basket_selection = None
+    try:
+        include_secondary_basket, secondary_basket_version_id = normalize_secondary_request(
+            input_data,
+            enabled=submission_feature_flags["second_food_basket_enabled"],
+        )
+        if not input_data.use_mock_data:
+            basket_selection = resolve_baskets_for_report(
+                input_data.country,
+                primary_basket_version_id=input_data.effective_primary_basket_version_id,
+                include_secondary_basket=include_secondary_basket,
+                secondary_basket_version_id=secondary_basket_version_id,
             )
-        except BasketVersionConflict as exc:
-            raise LocalHTTPException(409, str(exc))
-        except BasketNotConfigured as exc:
-            raise LocalHTTPException(409, str(exc))
-        except BasketValidationError as exc:
-            raise LocalHTTPException(400, str(exc))
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
+    except BasketVersionConflict as exc:
+        raise LocalHTTPException(409, str(exc))
+    except BasketNotConfigured as exc:
+        raise LocalHTTPException(409, str(exc))
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
 
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
+    initial_metadata: Dict[str, Any] = {"feature_flags": submission_feature_flags}
+    if basket_selection is not None:
+        initial_metadata["basket_selection"] = basket_selection.to_metadata()
+    update_run(run_id, metadata=initial_metadata)
 
     progress_map = {
         "data_agent": 10,
@@ -1685,9 +1815,24 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
         try:
             update_run(run_id, status="running", error=None, traceback=None)
 
-            admin1_list = json_body.get("admin1_list") or []
-            if not admin1_list and json_body.get("use_mock_data"):
-                country = json_body.get("country")
+            run_basket_selection = basket_selection
+            if not input_data.use_mock_data and basket_selection is not None:
+                # Revalidate active IDs, then retain the immutable snapshots
+                # captured when the run was accepted.
+                resolve_baskets_for_report(
+                    input_data.country,
+                    primary_basket_version_id=basket_selection.primary_basket_version_id,
+                    include_secondary_basket=basket_selection.secondary_basket_included,
+                    secondary_basket_version_id=basket_selection.secondary_basket_version_id,
+                )
+                update_run(
+                    run_id,
+                    metadata={"basket_selection": basket_selection.to_metadata()},
+                )
+
+            admin1_list = input_data.admin1_list
+            if not admin1_list and input_data.use_mock_data:
+                country = input_data.country
                 admin1_list = [f"{country} North", f"{country} South"]
 
             def on_step(node_name: str, _state: dict) -> None:
@@ -1718,20 +1863,20 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                             run_id=run_id,
                             service_slug="market-monitor",
                             label_prefix="Price data rows",
-                            file_stem=f"market-monitor-price-data-{json_body.get('country')}-{json_body.get('time_period')}",
+                            file_stem=f"market-monitor-price-data-{input_data.country}-{input_data.time_period}",
                             rows=rows,
                         )
                         section_updates["databridges"] = build_databridges_live_output(
                             title="Price Data",
                             summary=(
                                 f"{len(rows)} price row(s) retrieved for "
-                                f"{json_body.get('country')} ({json_body.get('time_period')}) "
+                                f"{input_data.country} ({input_data.time_period}) "
                                 "from cache plus any targeted backfill."
                             ),
                             rows=rows,
                             download_artifacts=artifacts,
                         )
-                    elif bool(json_body.get("use_mock_data", False)):
+                    elif input_data.use_mock_data:
                         section_updates["databridges"] = build_databridges_live_output(
                             title="Price Data",
                             summary="Mock data is enabled for this run, so no price rows were read.",
@@ -1787,21 +1932,45 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                 )
 
             result = run_report_generation(
-                country=json_body.get("country"),
-                time_period=json_body.get("time_period"),
-                commodity_list=json_body.get("commodity_list") or [],
+                country=input_data.country,
+                time_period=input_data.time_period,
+                commodity_list=input_data.commodity_list,
                 admin1_list=admin1_list,
-                currency_code=json_body.get("currency_code") or "USD",
-                enabled_modules=json_body.get("enabled_modules") or [],
-                news_start_date=json_body.get("news_start_date"),
-                news_end_date=json_body.get("news_end_date"),
-                previous_report_text=json_body.get("previous_report_text") or "",
-                use_mock_data=bool(json_body.get("use_mock_data", False)),
-                basket_version_id=json_body.get("basket_version_id"),
+                currency_code=input_data.currency_code,
+                enabled_modules=input_data.enabled_modules,
+                news_start_date=input_data.news_start_date,
+                news_end_date=input_data.news_end_date,
+                previous_report_text=input_data.previous_report_text,
+                use_mock_data=input_data.use_mock_data,
+                basket_version_id=(
+                    run_basket_selection.primary_basket_version_id
+                    if run_basket_selection is not None
+                    else input_data.effective_primary_basket_version_id
+                ),
+                basket_selection=run_basket_selection,
+                language=input_data.language,
                 on_step=on_step,
             )
 
-            update_run(run_id, warnings=result.get("warnings", []))
+            result = attach_basket_selection_to_result(result, run_basket_selection)
+
+            update_run(
+                run_id,
+                warnings=result.get("warnings", []),
+                metadata={
+                    "basket_calculation": {
+                        "time_period": input_data.time_period,
+                        "cache_version_id": (result.get("cache_metadata") or {}).get("cache_version_id"),
+                        "specs": (result.get("cache_metadata") or {}).get("basket_calculation_specs") or [],
+                        "applicable_regions": (result.get("cache_metadata") or {}).get("basket_applicable_regions") or {},
+                        "coverage": (result.get("cache_metadata") or {}).get("basket_coverage") or {},
+                        "series_national": result.get("basket_series_national") or [],
+                        "series_regional": result.get("basket_series_regional") or [],
+                        "statistics": result.get("basket_statistics") or {"primary": None, "secondary": None},
+                    },
+                    "qa_review": normalize_qa_review(result),
+                },
+            )
             set_run_completed(run_id, result=result)
         except Exception as exc:
             tb_str = traceback.format_exc()
@@ -1911,6 +2080,7 @@ def _market_monitor_export_docx(run_id: str, *, json_body: Any) -> LocalResponse
 
 
 def _market_monitor_info() -> Dict[str, Any]:
+    second_basket_enabled = market_monitor_second_basket_enabled()
     return {
         "id": "market-monitor",
         "name": "Market Monitor Generator",
@@ -1918,6 +2088,17 @@ def _market_monitor_info() -> Dict[str, Any]:
         "market trend analysis, visualizations, and narrative sections. "
         "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
+        "features": {
+            "second_food_basket": {
+                "enabled": second_basket_enabled,
+                "environment_variable": "MARKET_MONITOR_SECOND_BASKET_ENABLED",
+                "default_enabled": True,
+                "disabled_behavior": (
+                    "New secondary configuration and selection are disabled; existing history and completed "
+                    "results remain readable and exportable."
+                ),
+            }
+        },
         "inputs": [
             {
                 "name": "country",
@@ -1940,14 +2121,36 @@ def _market_monitor_info() -> Dict[str, Any]:
                 "label": "Additional commodities",
                 "description": "Optional commodities to analyze in addition to the active country food basket. Basket commodities are always included.",
                 "default": [],
-                "note": "Query /countries/{country}/basket for the active basket and /countries/{country}/metadata for available additional commodities.",
+                "note": "Query /countries/{country}/baskets for active baskets and /countries/{country}/metadata for available additional commodities.",
             },
             {
                 "name": "basket_version_id",
                 "type": "string",
                 "required": False,
                 "label": "Basket Version ID",
-                "description": "Optional active basket version guard. Stale versions return a conflict so clients can refresh.",
+                "description": "Deprecated alias for primary_basket_version_id.",
+            },
+            {
+                "name": "primary_basket_version_id",
+                "type": "string",
+                "required": False,
+                "label": "Primary Basket Version ID",
+                "description": "Optional active primary basket version guard. Stale versions return a conflict.",
+            },
+            {
+                "name": "include_secondary_basket",
+                "type": "boolean",
+                "required": False,
+                "label": "Include Secondary Basket",
+                "description": "Include the active secondary basket when one exists.",
+                "default": True,
+            },
+            {
+                "name": "secondary_basket_version_id",
+                "type": "string",
+                "required": False,
+                "label": "Secondary Basket Version ID",
+                "description": "Optional active secondary basket version guard. Ignored when inclusion is false.",
             },
             {
                 "name": "admin1_list",
@@ -1982,6 +2185,12 @@ def _market_monitor_info() -> Dict[str, Any]:
             "report_sections": "Report sections (HIGHLIGHTS, MARKET_OVERVIEW, etc.)",
             "visualizations": "Charts in Base64 format",
             "data_statistics": "Computed statistics (MoM, YoY)",
+            "food_baskets": "Resolved immutable primary and included secondary basket snapshots",
+            "basket_statistics": "Independent role-keyed basket coverage, cost, MoM, YoY, and contributions",
+            "basket_series_national": "Complete-component national basket series by immutable role/version",
+            "basket_series_regional": "Complete-component regional basket series by immutable role/version",
+            "secondary_basket_included": "Whether a secondary basket was selected for the run",
+            "qa_review": "QA status, correction-attempt count, and final structured unresolved flags",
             "trend_analysis": "Market trend analysis",
             "events": "Events extracted from news",
             "module_sections": "Sections generated by optional modules",
@@ -1993,6 +2202,28 @@ def _market_monitor_info() -> Dict[str, Any]:
             "llm_calls": "Number of LLM calls performed",
             "success": "True if generation completed successfully",
         },
+        "basket_visualizations": {
+            "canonical": [
+                "food_basket_trend_primary",
+                "food_basket_trend_secondary",
+                "regional_comparison_primary",
+                "regional_comparison_secondary",
+            ],
+            "primary_aliases": {
+                "food_basket_trend": "food_basket_trend_primary",
+                "regional_comparison": "regional_comparison_primary",
+            },
+            "combined_chart": False,
+        },
+        "basket_endpoints": [
+            "GET /countries/{country}/baskets",
+            "POST /countries/{country}/baskets/primary",
+            "POST /countries/{country}/baskets/secondary",
+            "GET /countries/{country}/baskets/{role}/history",
+            "DELETE /countries/{country}/baskets/secondary",
+            "GET /countries/{country}/reportable-months?primary_basket_version_id=...&include_secondary_basket=...",
+            "POST /countries/{country}/reportable-months/refresh",
+        ],
         "workflow_nodes": [
             {"id": "data_agent", "name": "Data Agent", "description": "Retrieves and processes price data"},
             {"id": "graph_designer", "name": "Graph Designer", "description": "Generates visualizations"},
@@ -2089,9 +2320,30 @@ def _market_monitor_country_metadata(country: str) -> LocalResponse:
         raise LocalHTTPException(500, str(exc))
 
 
-def _market_monitor_country_reportable_months(country: str) -> LocalResponse:
+def _market_monitor_country_reportable_months(country: str, *, params: Dict[str, Any]) -> LocalResponse:
     try:
-        return _json_response(get_reportable_months(country))
+        if not params:
+            return _json_response(get_reportable_months(country))
+        input_data = _validate_reportable_months_input(params)
+        normalized_include_secondary, normalized_secondary_id = normalize_secondary_request(input_data)
+        return _json_response(
+            get_reportable_months(
+                country,
+                basket_version_id=input_data.basket_version_id,
+                primary_basket_version_id=input_data.primary_basket_version_id,
+                include_secondary_basket=normalized_include_secondary,
+                secondary_basket_version_id=normalized_secondary_id,
+                admin1_list=input_data.admin1_list,
+            )
+        )
+    except LocalHTTPException:
+        raise
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
+    except BasketVersionConflict as exc:
+        raise LocalHTTPException(409, str(exc))
+    except BasketScopeValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
     except PriceCacheUnavailableError as exc:
         raise LocalHTTPException(503, str(exc))
     except ValueError as exc:
@@ -2101,18 +2353,41 @@ def _market_monitor_country_reportable_months(country: str) -> LocalResponse:
 
 
 def _market_monitor_refresh_country_reportable_months(country: str, *, json_body: Any) -> LocalResponse:
-    payload = json_body if isinstance(json_body, dict) else {}
+    input_data = _validate_reportable_months_input(json_body if isinstance(json_body, dict) else {})
     try:
+        normalized_include_secondary, normalized_secondary_id = normalize_secondary_request(input_data)
+        if not any(
+            [
+                input_data.primary_basket_version_id,
+                input_data.include_secondary_basket,
+                input_data.secondary_basket_version_id,
+                input_data.admin1_list,
+            ]
+        ):
+            return _json_response(
+                refresh_reportable_months_from_databridges(
+                    country,
+                    basket_version_id=input_data.basket_version_id,
+                )
+            )
         return _json_response(
             refresh_reportable_months_from_databridges(
                 country,
-                basket_version_id=payload.get("basket_version_id"),
+                basket_version_id=input_data.basket_version_id,
+                primary_basket_version_id=input_data.primary_basket_version_id,
+                include_secondary_basket=normalized_include_secondary,
+                secondary_basket_version_id=normalized_secondary_id,
+                admin1_list=input_data.admin1_list,
             )
         )
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
     except BasketVersionConflict as exc:
         raise LocalHTTPException(409, str(exc))
     except PriceCacheUnavailableError as exc:
         raise LocalHTTPException(503, str(exc))
+    except BasketScopeValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
     except ValueError as exc:
         raise LocalHTTPException(404, str(exc))
     except Exception as exc:
@@ -2122,6 +2397,67 @@ def _market_monitor_refresh_country_reportable_months(country: str, *, json_body
 def _market_monitor_country_basket(country: str) -> LocalResponse:
     try:
         return _json_response(get_country_basket_response(country))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_country_baskets(country: str) -> LocalResponse:
+    try:
+        return _json_response(get_country_baskets_response(country))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_save_country_basket_role(
+    country: str,
+    *,
+    role: BasketRole | str,
+    json_body: Any,
+) -> LocalResponse:
+    input_data = _validate_basket_save_input(json_body)
+    try:
+        return _json_response(save_country_basket_role(country, role, input_data))
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_country_basket_role_history(
+    country: str,
+    *,
+    role: BasketRole | str,
+    params: Dict[str, Any],
+) -> LocalResponse:
+    try:
+        limit = int(_get_form_value(params, "limit", 20))
+    except (TypeError, ValueError) as exc:
+        raise LocalHTTPException(422, "limit must be an integer") from exc
+    try:
+        return _json_response(list_country_basket_role_history(country, role, limit=limit))
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
+    except ValueError as exc:
+        raise LocalHTTPException(404, str(exc))
+    except Exception as exc:
+        raise LocalHTTPException(500, str(exc))
+
+
+def _market_monitor_archive_country_secondary_basket(country: str) -> LocalResponse:
+    try:
+        return _json_response(archive_country_secondary_basket(country))
+    except SecondBasketFeatureDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict())
+    except BasketValidationError as exc:
+        raise LocalHTTPException(400, str(exc))
     except ValueError as exc:
         raise LocalHTTPException(404, str(exc))
     except Exception as exc:

@@ -20,10 +20,18 @@ DATOS DE COMBUSTIBLES:
 SENALES CONTEXTUALES DEL MERCADO:
 {trend_analysis_json}
 
+POLITICA DE RELEVANCIA DE CANASTAS:
+{basket_relevance_json}
+
+ALERTAS DE QA A CORREGIR (vacias en el primer borrador):
+{correction_flags_json}
+
 Redacte el parrafo en este orden exacto:
 1. Comience con el precio minorista nacional actual del diesel, unidad, variacion intermensual e interanual si esta disponible; incluya gasolina en la misma oracion si esta disponible.
 2. Atribuya el movimiento al impulsor mas probable: precios internacionales del petroleo/energia, restricciones regionales de suministro/logistica, o politica/precios regulados/administrados.
 3. Explique implicaciones para precios alimentarios y hogares: el combustible afecta costos de transporte/distribucion, alimentos basicos, canastas alimentarias y poder adquisitivo.
 4. Si regional_disparities esta presente, agregue una clausula breve sobre la disparidad notable; de lo contrario omitela.
+
+Analice la transmision por transporte y distribucion de forma general. No nombre, compare ni atribuya movimientos a una canasta.
 
 Devuelva SOLO el texto narrativo.

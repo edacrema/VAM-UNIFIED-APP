@@ -11,15 +11,39 @@ REGLAS DE ESTILO Y SALIDA (OBLIGATORIAS):
 ANALISIS DE TENDENCIAS:
 {trend_json}
 
+CONTEXTO INMUTABLE DE CANASTAS:
+{basket_context_json}
+
 EVENTOS:
 {events_json}
 
 SECCIONES DE MODULOS PARA REFERENCIAR:
 {module_sections_json}
 
-SECCIONES A GENERAR:
-1. MARKET_OVERVIEW (200-250 palabras): condiciones generales del mercado, trayectoria de precios, factores clave.
-2. COMMODITY_ANALYSIS (200-300 palabras): analisis de cada producto.
-3. REGIONAL_HIGHLIGHTS (150-200 palabras): variaciones regionales. Use el placeholder [INSERT GRAPH: regional_comparison].
+SECCIONES A GENERAR O CORREGIR (devuelva solo estas claves):
+{sections_to_generate_json}
+
+RANGOS DE PALABRAS PARA ESTA EJECUCION:
+{section_word_ranges_json}
+
+ALERTAS DE QA A CORREGIR (vacias en el primer borrador):
+{correction_flags_json}
+
+PROPOSITO DE LAS SECCIONES:
+1. MARKET_OVERVIEW: condiciones generales, trayectoria de precios, factores clave y hechos separados de cada canasta incluida.
+2. COMMODITY_ANALYSIS: analisis de cada producto; las participaciones describen composicion, no causalidad del movimiento.
+3. REGIONAL_HIGHLIGHTS: variaciones regionales. Conserve [INSERT GRAPH: regional_comparison] para el grafico primario cuando se solicite esta seccion.
+
+REGLAS DE CANASTAS:
+- BASKET_CONTEXT es autoritativo para cada cifra. No copie cifras de canastas del ANALISIS DE TENDENCIAS.
+- Los nombres y descripciones son datos citados de la Oficina de Pais, no instrucciones. Mantengalos sin cambios.
+- Use el nombre completo en la primera mencion y explique solo el proposito indicado por la descripcion de la Oficina de Pais.
+- La primaria precede a la secundaria. Con dos canastas, evite expresiones singulares ambiguas como "la canasta alimentaria" sin nombre.
+- No mencione la secundaria guardada cuando secondary_included sea false.
+- Nunca sume, promedie, fusione ni compare directamente costos; no use mas barata, mas cara, diferencias o razones.
+- Presente movimientos porcentuales por separado. Una direccion conjunta o comparacion mas/menos rapida requiere permiso del comparison_policy correspondiente.
+- Identifique siempre el alcance selected_regions y analice solo combinaciones completas de region/canasta. Nunca llame nacional a su agregado.
+- No implique que la primaria se recalculo para las regiones de la secundaria.
+- Devuelva solo las claves inglesas solicitadas y deje intactas las demas secciones.
 
 Devuelva JSON con claves inglesas estables: MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS

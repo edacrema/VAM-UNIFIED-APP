@@ -20,10 +20,18 @@ DONNEES_BETAIL_ET_ANIMAUX:
 SIGNAUX CONTEXTUELS DU MARCHE:
 {trend_analysis_json}
 
+LIENS AVEC LES PANIERS ETAYES PAR LES DONNEES:
+{basket_relevance_json}
+
+SIGNALEMENTS QA A CORRIGER (vides lors du premier brouillon):
+{correction_flags_json}
+
 Redigez le paragraphe dans cet ordre exact:
 1. Commencez par les niveaux de prix disponibles des produits animaux et les variations mensuelles/annuelles dans les unites d'origine; incluez la serie de betail vivant uniquement si elle est presente.
 2. Attribuez le mouvement a la demande saisonniere/festive probable, aux aliments pour animaux/paturages/eau, a l'offre/production ou a la dependance aux importations.
 3. Expliquez les implications pour l'accessibilite economique des proteines animales et la diversite alimentaire. Si des donnees live_animal sont presentes, mentionnez aussi les revenus pastoraux ou les termes de l'echange betail/cereales.
 4. Si regional_disparities est present, ajoutez une courte proposition sur l'ecart notable; sinon omettez-la.
+
+Ne nommez un panier que si les LIENS AVEC LES PANIERS indiquent une correspondance exacte d'identifiant de produit. Limitez-vous a la composante correspondante sans presenter l'appartenance comme cause du mouvement.
 
 Retournez UNIQUEMENT le texte narratif.

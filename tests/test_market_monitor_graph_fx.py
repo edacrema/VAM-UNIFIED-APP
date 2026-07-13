@@ -1,4 +1,7 @@
+import io
+
 import pandas as pd
+from types import SimpleNamespace
 
 from app.shared.report_blocks import build_market_monitor_report_blocks
 from app.services.market_monitor import graph as market_graph
@@ -90,6 +93,270 @@ def test_graph_designer_renders_fx_chart_and_skips_blank_regional_chart():
     assert "commodity_trends" in result["visualizations"]
     assert "exchange_rate_trend" in result["visualizations"]
     assert "regional_comparison" not in result["visualizations"]
+
+
+def _phase5_basket_state(*, secondary_scope="national", included=True):
+    dates = pd.date_range("2026-01-01", periods=2, freq="MS")
+    national = pd.DataFrame({"FoodBasket": [100.0, 110.0]}, index=dates)
+    basket_national = []
+    for date, primary, secondary in zip(dates, (100.0, 110.0), (50.0, 55.0)):
+        basket_national.append(
+            {
+                "Date": date.strftime("%Y-%m-%d"),
+                "BasketRole": "primary",
+                "BasketVersionId": "primary-v1",
+                "BasketName": "MEB",
+                "ScopeType": "national",
+                "ScopeLabel": "National",
+                "Region": None,
+                "Cost": primary,
+                "Complete": True,
+            }
+        )
+        if secondary_scope == "national":
+            basket_national.append(
+                {
+                    "Date": date.strftime("%Y-%m-%d"),
+                    "BasketRole": "secondary",
+                    "BasketVersionId": "secondary-v1",
+                    "BasketName": "Pastoral basket",
+                    "ScopeType": "national",
+                    "ScopeLabel": "National",
+                    "Region": None,
+                    "Cost": secondary,
+                    "Complete": True,
+                }
+            )
+    basket_regional = []
+    for date in dates:
+        for region, primary, secondary in (("Region A", 90.0, 40.0), ("Region B", 120.0, 60.0)):
+            basket_regional.append(
+                {
+                    "Date": date.strftime("%Y-%m-%d"),
+                    "BasketRole": "primary",
+                    "BasketVersionId": "primary-v1",
+                    "BasketName": "MEB",
+                    "ScopeType": "national",
+                    "ScopeLabel": region,
+                    "Region": region,
+                    "Cost": primary,
+                    "Complete": True,
+                }
+            )
+            if included:
+                basket_regional.append(
+                    {
+                        "Date": date.strftime("%Y-%m-%d"),
+                        "BasketRole": "secondary",
+                        "BasketVersionId": "secondary-v1",
+                        "BasketName": "Pastoral basket",
+                        "ScopeType": secondary_scope,
+                        "ScopeLabel": region,
+                        "Region": region,
+                        "Cost": secondary,
+                        "Complete": True,
+                    }
+                )
+    return {
+        **_state_with_frames(national),
+        "language": "en",
+        "include_secondary_basket": included,
+        "food_basket": {},
+        "food_baskets": {
+            "primary": {
+                "basket_role": "primary",
+                "basket_version_id": "primary-v1",
+                "basket_name": "MEB",
+                "scope_type": "national",
+                "regions": [],
+            },
+            "secondary": (
+                {
+                    "basket_role": "secondary",
+                    "basket_version_id": "secondary-v1",
+                    "basket_name": "Pastoral basket",
+                    "scope_type": secondary_scope,
+                    "regions": ["Region B", "Region A"] if secondary_scope == "selected_regions" else [],
+                }
+                if included
+                else None
+            ),
+        },
+        "basket_series_national": basket_national,
+        "basket_series_regional": basket_regional,
+        "basket_statistics": {
+            "primary": {"applicable_regions": ["Region A", "Region B"]},
+            "secondary": {"applicable_regions": ["Region B", "Region A"]} if included else None,
+        },
+    }
+
+
+def test_graph_designer_emits_separate_role_charts_and_exact_primary_aliases(monkeypatch):
+    encoded = []
+
+    def fake_encode(plt):
+        value = f"image-{len(encoded) + 1}"
+        encoded.append(value)
+        plt.close()
+        return value
+
+    monkeypatch.setattr(market_graph, "_encode_matplotlib_figure", fake_encode)
+    result = market_graph.node_graph_designer(_phase5_basket_state())
+    figures = result["visualizations"]
+
+    assert figures["food_basket_trend"] == figures["food_basket_trend_primary"]
+    assert figures["regional_comparison"] == figures["regional_comparison_primary"]
+    assert "food_basket_trend_secondary" in figures
+    assert "regional_comparison_secondary" in figures
+    assert "food_basket_trend_combined" not in figures
+
+
+def test_selected_region_trend_keeps_individual_lines_and_target_region_order():
+    state = _phase5_basket_state(secondary_scope="selected_regions")
+    for row in state["basket_series_regional"]:
+        if row["BasketRole"] == "secondary" and row["Region"] == "Region A" and row["Date"] == "2026-01-01":
+            row["Complete"] = False
+            row["Cost"] = 999.0
+    state["basket_series_regional"].append(
+        {
+            "Date": "2026-03-01",
+            "BasketRole": "secondary",
+            "BasketVersionId": "secondary-v1",
+            "BasketName": "Pastoral basket",
+            "ScopeType": "selected_regions",
+            "ScopeLabel": "Region B",
+            "Region": "Region B",
+            "Cost": 999.0,
+            "Complete": True,
+        }
+    )
+    national = pd.read_json(io.StringIO(state["time_series_data_national"]))
+    national = market_graph._normalise_time_index(national)
+    basket_national = market_graph._basket_series_frame(state["basket_series_national"])
+    basket_regional = market_graph._basket_series_frame(state["basket_series_regional"])
+    trend = market_graph._basket_trend_chart_data(
+        state,
+        "secondary",
+        national,
+        basket_national,
+        basket_regional,
+    )
+    target = market_graph._basket_regional_target_data(state, "secondary", basket_regional)
+
+    assert trend["scope_type"] == "selected_regions"
+    assert [label for label, _series in trend["series"]] == ["Region B", "Region A"]
+    assert pd.isna(dict(trend["series"])["Region A"].loc[pd.Timestamp("2026-01-01")])
+    assert target["regions"] == ["Region B", "Region A"]
+    assert target["costs"] == [60.0, 40.0]
+
+
+def test_excluded_secondary_never_emits_secondary_chart_data():
+    state = _phase5_basket_state(included=False)
+    national = market_graph._normalise_time_index(pd.read_json(io.StringIO(state["time_series_data_national"])))
+
+    assert market_graph._basket_trend_chart_data(
+        state,
+        "secondary",
+        national,
+        market_graph._basket_series_frame(state["basket_series_national"]),
+        market_graph._basket_series_frame(state["basket_series_regional"]),
+    ) == {}
+
+
+def test_data_agent_uses_captured_two_basket_snapshots_and_emits_role_results(monkeypatch):
+    captured = {}
+    dates = pd.date_range("2024-02-01", periods=13, freq="MS")
+    national = pd.DataFrame({"Maize": [10.0] * 13, "Beans": [5.0] * 13, "FoodBasket": [20.0] * 13}, index=dates)
+    regional = pd.DataFrame({"Date": [dates[-1]], "Region": ["Juba"], "FoodBasket": [20.0]})
+    basket_series_national = pd.DataFrame(
+        {
+            "Date": [dates[-1]],
+            "BasketRole": ["primary"],
+            "BasketVersionId": ["primary-v1"],
+            "BasketName": ["MEB"],
+            "ScopeType": ["national"],
+            "ScopeLabel": ["National"],
+            "Region": [None],
+            "Cost": [20.0],
+            "SelectedComponentCount": [1],
+            "AvailableComponentCount": [1],
+            "MissingComponentNames": [[]],
+            "Complete": [True],
+        }
+    )
+    basket_series_regional = basket_series_national.assign(
+        BasketRole="secondary",
+        BasketVersionId="secondary-v1",
+        BasketName="Urban basket",
+        ScopeType="selected_regions",
+        ScopeLabel="Juba",
+        Region="Juba",
+        Cost=5.0,
+    )
+    role_stats = {
+        "primary": {"current_cost": 20.0, "current_price": 20.0, "current_complete": True},
+        "secondary": {"current_cost": 5.0, "current_price": 5.0, "current_complete": True},
+    }
+
+    def fake_resolve(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            df_national=national,
+            df_regional=regional,
+            df_history_national=pd.DataFrame(),
+            raw_rows=pd.DataFrame(),
+            cache_metadata={"cache_version_id": "cache-v1", "currency_code": "SSP"},
+            warnings=[],
+            exchange_rate_data=None,
+            fuel_energy_data=None,
+            livestock_animal_products_data=None,
+            labour_market_data=None,
+            basket_series_national=basket_series_national,
+            basket_series_regional=basket_series_regional,
+            basket_statistics=role_stats,
+            basket_calculation_specs=[{"basket_role": "primary"}, {"basket_role": "secondary"}],
+            basket_applicable_regions={"primary": [], "secondary": ["Juba"]},
+        )
+
+    monkeypatch.setattr(market_graph, "resolve_report_price_data", fake_resolve)
+    state = {
+        "country": "South Sudan",
+        "time_period": "2025-02",
+        "language": "en",
+        "commodity_list": ["Salt"],
+        "admin1_list": ["Juba"],
+        "currency_code": "SSP",
+        "enabled_modules": [],
+        "use_mock_data": False,
+        "include_secondary_basket": True,
+        "food_baskets": {
+            "primary": {
+                "basket_version_id": "primary-v1",
+                "basket_role": "primary",
+                "basket_name": "MEB",
+                "scope_type": "national",
+                "items": [{"commodity_id": 1, "commodity_name": "Maize", "weight_quantity": 2}],
+            },
+            "secondary": {
+                "basket_version_id": "secondary-v1",
+                "basket_role": "secondary",
+                "basket_name": "Urban basket",
+                "scope_type": "selected_regions",
+                "regions": ["Juba"],
+                "items": [{"commodity_id": 2, "commodity_name": "Beans", "weight_quantity": 1}],
+            },
+        },
+        "food_basket": {},
+    }
+
+    result = market_graph.node_data_agent(state)
+
+    assert [spec.role for spec in captured["basket_specs"]] == ["primary", "secondary"]
+    assert captured["commodities"] == ["Maize", "Beans", "Salt"]
+    assert result["basket_statistics"] == role_stats
+    assert result["data_statistics"]["food_basket"] == role_stats["primary"]
+    assert result["basket_series_national"][0]["BasketRole"] == "primary"
+    assert result["basket_series_regional"][0]["BasketRole"] == "secondary"
 
 
 def test_graph_designer_applies_commodity_overlays_only_to_single_commodity_pages(monkeypatch):

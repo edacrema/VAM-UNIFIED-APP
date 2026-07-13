@@ -16,6 +16,12 @@ VERDAD CUANTITATIVA DE REFERENCIA:
 ANALISIS DE TENDENCIAS (para validacion cruzada de impulsores; tratar como hipotesis salvo respaldo de datos):
 {trend_json}
 
+VERDAD INMUTABLE DE CANASTAS:
+{basket_context_json}
+
+RELEVANCIA DE CANASTAS PARA MODULOS OPCIONALES:
+{module_basket_relevance_json}
+
 UMBRALES TERMINOLOGICOS (obligatorios):
 {terminology_thresholds_json}
 
@@ -31,6 +37,15 @@ REGLAS DE VALIDACION CRUZADA:
 6. Distinga contexto historico de afirmaciones sobre datos actuales.
 7. Marque contradicciones internas entre secciones.
 8. Marque salida en idioma mixto, terminologia PMA requerida faltante, titulos de citas modificados y placeholders [INSERT GRAPH: ...] corruptos.
+9. Conserve identidad y orden primaria/secundaria; marque nombres, costos, porcentajes, descripciones o alcances intercambiados.
+10. HIGHLIGHTS y MARKET_OVERVIEW deben incluir toda canasta incluida y no mencionar una secundaria excluida.
+11. Marque lenguaje nacional para selected_regions, propositos inventados mas alla de la descripcion o singular ambiguo con dos canastas.
+12. Toda comparacion directa de costos absolutos esta prohibida: mas barata/cara, costo mayor/menor, diferencia, razon, suma o promedio.
+13. Marque porcentajes cuyo indicador de completitud sea falso y comparaciones de direccion/velocidad contrarias a comparison_policy.
+14. Las contribuciones describen composicion; marque cualquier causalidad del movimiento sin respaldo.
+15. Los modulos opcionales solo pueden nombrar una canasta si MODULE BASKET RELEVANCE lo permite. Trabajo nunca debe inferir poder adquisitivo secundario.
+
+Use un identificador estable: HIGHLIGHTS, MARKET_OVERVIEW, COMMODITY_ANALYSIS, REGIONAL_HIGHLIGHTS, EXCHANGE_RATE_ANALYSIS, FUEL_ENERGY_ANALYSIS, LIVESTOCK_ANIMAL_PRODUCTS_ANALYSIS, LABOUR_MARKET_ANALYSIS, GLOBAL. Use GLOBAL para problemas entre secciones.
 
 Verifique:
 1. Exactitud numerica (precios, MoM%, YoY%)
@@ -39,7 +54,7 @@ Verifique:
 4. Conflictos contexto-datos y mal uso terminologico
 
 Devuelva JSON: {{"flags": [
-    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
+    {{"section": "SECTION_NAME", "claim": "...", "issue_type": "numeracy_error|template_violation|unsupported_speculation|context_data_conflict|terminology_misuse|internal_contradiction|localization_error|basket_identity_error|basket_scope_error|basket_comparison_error|basket_coverage_error|basket_purpose_invention|unsupported_basket_link", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
 ]}}
 
 Si no hay errores, devuelva {{"flags": []}}

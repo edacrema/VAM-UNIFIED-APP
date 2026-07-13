@@ -185,6 +185,8 @@ st.subheader("What it does")
 st.markdown(
     """
 The Price Bulletin Drafter generates a complete Market Price Bulletin report for a given country and month. It analyzes price changes for the selected period by comparing them against the previous 12 months of data, and enriches the analysis with contextual information from recent news and reports.
+
+Each country uses a required **primary food basket** and may also configure an optional **second basket**. The baskets retain separate names, descriptions, quantities, geographic scopes, calculations, charts, and narrative facts.
     """
 )
 
@@ -193,23 +195,15 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-**Required fields:**
-
-1. **Country**: Select the country for which the report should be generated.
-2. **Time Period**: Select the reference month (e.g., January 2026). The system will analyze price trends for that month against the previous 12 months.
-
-Once you select the country and period, the system will **automatically populate**:
-
-- **Commodities**: The commodities available from Databridges for the selected country. You can remove any commodity you want to exclude from the report.
-- **Regions (Admin1)**: The Databridges market regions available for the selected country. You can remove any region you want to exclude.
-- **Currency Code**: Required to download macroeconomic data from TradingEconomics for the optional modules.
-
-**Optional fields:**
-
-- **News Start Date / News End Date**: Define the time interval within which the system will search for contextual news and reports to inform the analysis. If left empty, the system defaults to the **3 months preceding (and including) the reference month**.
-- **Enabled Modules**: The Price Bulletin has a core analysis (generated for all reports) and optional add-on modules that provide additional layers of data and analysis (e.g., exchange rate trends, fuel prices, macroeconomic indicators). *In this ALPHA version, only the Exchange Rate module is available.* You can choose whether to include it or not.
-
-**Click "Run"** to start the agent.
+1. **Select a country.** The active PriceCache supplies available commodities, units, regions, and reportable months.
+2. **Configure the primary basket.** A blank primary name becomes `MEB`. Custom primary names require a description. Choose national or selected-region scope and publish at least one positive commodity quantity.
+3. **Optionally add a second basket.** It requires its own name, description, scope, regions where applicable, and positive quantities. Editing publishes a new immutable version. Removing it archives the active version without deleting report history.
+4. **Choose whether to include the second basket.** Every new report iteration defaults to included. Uncheck it for a primary-only run without changing the saved configuration.
+5. **Select report regions.** Run regions remain independent from basket scope. A selected-region basket must overlap the run regions; an empty region selection means all available regions.
+6. **Select a reportable month.** Eligibility requires complete prices for every included basket component. Including a second basket may move the latest jointly reportable month back. Use **Refresh from DataBridges** to attempt a selection-aware refresh.
+7. **Review locked and additional commodities.** Basket components are locked by commodity ID. You may add other priced commodities; shared components are retrieved once but retain their basket-specific quantities.
+8. **Choose report language and optional inputs.** English, French, and Spanish are supported. Optional news dates and exchange-rate, fuel, livestock, and labour modules can be enabled when relevant data is available.
+9. **Click "Run".** The submitted primary and optional secondary version IDs are recorded immutably for that run.
         """
     )
 with right:
@@ -218,7 +212,7 @@ with right:
 st.subheader("Output")
 st.markdown(
     """
-The agent takes approximately **10 minutes** to complete. Once finished, the generated report will appear in the output window below the form. Click **"Export"** to generate and download the report as a **.docx** file.
+The agent takes approximately **10 minutes** to complete. The result contains basket definitions, separate scope-correct basket charts, statistics, narrative sections, and any QA warnings. Absolute basket costs are reported independently rather than compared directly. Review unresolved QA details in Streamlit, then use **Generate & Download DOCX** to export the report. Historical runs continue using their captured basket versions even after a basket is edited or archived.
     """
 )
 

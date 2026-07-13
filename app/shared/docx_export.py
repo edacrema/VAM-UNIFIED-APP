@@ -14,7 +14,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 from app.services.market_monitor.i18n import t
 
-from .report_blocks import ReportBlock
+from .report_blocks import ReportBlock, basket_definition_table_display
 
 
 def _safe_filename(filename: str) -> str:
@@ -171,6 +171,33 @@ def _add_definition_box(doc: Document, text: str) -> None:
     doc.add_paragraph()
 
 
+def _add_basket_definitions_table_to_document(doc: Document, *, meta: Dict[str, Any]) -> None:
+    headers, rows = basket_definition_table_display(meta)
+    if not headers or not rows:
+        return
+    table = doc.add_table(rows=len(rows) + 1, cols=len(headers))
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for column, header in enumerate(headers):
+        cell = table.rows[0].cells[column]
+        cell.text = header
+        _set_cell_background(cell, (0, 114, 188))
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in paragraph.runs:
+                run.bold = True
+                run.font.size = Pt(8)
+                run.font.color.rgb = RGBColor(255, 255, 255)
+    for row_index, values in enumerate(rows, start=1):
+        for column, value in enumerate(values):
+            cell = table.rows[row_index].cells[column]
+            cell.text = value
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(8)
+    doc.add_paragraph()
+
+
 def build_docx_bytes_from_report_blocks(
     report_blocks: List[ReportBlock],
     *,
@@ -259,6 +286,8 @@ def build_docx_bytes_from_report_blocks(
             meta = block.meta or {}
             if isinstance(meta, dict) and meta.get("table_kind") == "mfi_overview":
                 _add_overview_table_to_document(doc, meta=meta)
+            elif isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
+                _add_basket_definitions_table_to_document(doc, meta=meta)
             continue
 
         if block.type == "definition_box":
