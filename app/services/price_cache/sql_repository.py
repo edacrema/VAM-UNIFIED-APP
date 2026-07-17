@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from .config import POSTGRES_BACKEND, SQLITE_BACKEND, PriceCacheConfig
+from .db_resilience import retry_disconnected_read
 from .schemas import (
     CacheStatus,
     CacheRefreshSummary,
@@ -39,7 +40,13 @@ def create_price_cache_engine(config: PriceCacheConfig) -> Engine:
     if config.backend == POSTGRES_BACKEND:
         if not config.database_url:
             raise ValueError("PRICE_CACHE_DATABASE_URL is required for the postgres price cache backend.")
-        return create_engine(config.database_url, future=True)
+        return create_engine(
+            config.database_url,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=config.pool_recycle_seconds,
+            pool_timeout=config.pool_timeout_seconds,
+        )
     raise ValueError(f"Unsupported price cache backend {config.backend!r}.")
 
 
@@ -47,6 +54,7 @@ class SqlPriceCacheRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    @retry_disconnected_read
     def get_cache_status(self) -> CacheStatus:
         with self.engine.begin() as conn:
             active = conn.execute(
@@ -83,6 +91,7 @@ class SqlPriceCacheRepository:
             error_message=_optional_str(active.get("error_message")),
         )
 
+    @retry_disconnected_read
     def get_active_version_id(self) -> Optional[str]:
         with self.engine.begin() as conn:
             row = conn.execute(
@@ -98,6 +107,7 @@ class SqlPriceCacheRepository:
             return None
         return str(row["cache_version_id"])
 
+    @retry_disconnected_read
     def get_active_version_id_for_country(self, country_iso3: str) -> Optional[str]:
         with self.engine.begin() as conn:
             row = conn.execute(
@@ -114,6 +124,7 @@ class SqlPriceCacheRepository:
             return str(row["cache_version_id"])
         return self.get_active_version_id()
 
+    @retry_disconnected_read
     def list_countries(self) -> List[CountryRecord]:
         with self.engine.begin() as conn:
             country_active_count = conn.execute(
@@ -150,6 +161,7 @@ class SqlPriceCacheRepository:
             ).mappings().all()
         return [_country_from_row(row) for row in rows]
 
+    @retry_disconnected_read
     def get_country_metadata(self, country_iso3: str) -> Optional[CountryMetadata]:
         active_version_id = self.get_active_version_id_for_country(country_iso3)
         if active_version_id is None:
@@ -231,6 +243,7 @@ class SqlPriceCacheRepository:
             currencies=[_currency_from_row(row) for row in currency_rows],
         )
 
+    @retry_disconnected_read
     def get_country_availability(self, country_iso3: str) -> Optional[CountryAvailability]:
         active_version_id = self.get_active_version_id_for_country(country_iso3)
         if active_version_id is None:
@@ -345,6 +358,7 @@ class SqlPriceCacheRepository:
             ],
         )
 
+    @retry_disconnected_read
     def get_price_window(
         self,
         country_iso3: str,
@@ -842,6 +856,7 @@ class SqlPriceCacheRepository:
             )
         return len(insert_rows)
 
+    @retry_disconnected_read
     def get_country_price_keys(self, *, cache_version_id: str, country_iso3: str) -> set[tuple[Any, ...]]:
         with self.engine.begin() as conn:
             rows = conn.execute(
@@ -867,6 +882,7 @@ class SqlPriceCacheRepository:
             ).mappings().all()
         return {_canonical_key_from_price_row(row) for row in rows}
 
+    @retry_disconnected_read
     def count_country_price_rows(self, *, cache_version_id: str, country_iso3: str) -> int:
         with self.engine.begin() as conn:
             row = conn.execute(
@@ -1535,6 +1551,7 @@ class SqlPriceCacheRepository:
                 },
             )
 
+    @retry_disconnected_read
     def count_active_country_price_rows(self, country_iso3: str) -> int:
         active_version_id = self.get_active_version_id_for_country(country_iso3)
         if active_version_id is None:
@@ -1611,6 +1628,7 @@ class SqlPriceCacheRepository:
                 {"lock_name": lock_name, "owner": owner},
             )
 
+    @retry_disconnected_read
     def list_cache_refreshes(self, *, limit: int = 20) -> List[CacheRefreshSummary]:
         with self.engine.begin() as conn:
             rows = conn.execute(
@@ -1626,6 +1644,7 @@ class SqlPriceCacheRepository:
             ).mappings().all()
         return [_refresh_summary_from_row(row) for row in rows]
 
+    @retry_disconnected_read
     def get_cache_refresh(self, cache_version_id: str) -> Optional[CacheRefreshSummary]:
         with self.engine.begin() as conn:
             row = conn.execute(

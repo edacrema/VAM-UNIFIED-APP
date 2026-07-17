@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.services.price_cache.config import load_price_cache_config
+from app.services.price_cache.db_resilience import retry_disconnected_read
 from app.services.price_cache.migrations import apply_migrations
 from app.services.price_cache.sql_repository import SqlPriceCacheRepository, create_price_cache_engine
 from app.shared.countries import resolve_country
@@ -172,6 +173,7 @@ class SqlCountryFoodBasketRepository:
         self.engine = engine
         self.price_repo = SqlPriceCacheRepository(engine)
 
+    @retry_disconnected_read
     def get_active_basket(
         self,
         country_iso3: str,
@@ -204,6 +206,7 @@ class SqlCountryFoodBasketRepository:
             items=self._get_items(version_id),
         )
 
+    @retry_disconnected_read
     def get_active_baskets(
         self,
         country_iso3: str,
@@ -240,6 +243,7 @@ class SqlCountryFoodBasketRepository:
             baskets[basket.basket_role.value] = basket
         return baskets
 
+    @retry_disconnected_read
     def get_basket_version(
         self,
         country_iso3: str,
@@ -269,6 +273,7 @@ class SqlCountryFoodBasketRepository:
             items=self._get_items(version_id),
         )
 
+    @retry_disconnected_read
     def list_basket_history(
         self,
         country_iso3: str,
@@ -716,6 +721,7 @@ class SqlCountryFoodBasketRepository:
 
         return normalized, availability.cache_version_id or metadata.country.cache_version_id
 
+    @retry_disconnected_read
     def _get_price_row_unit(self, country_iso3: str, commodity_id: int) -> tuple[Optional[int], str]:
         active_version_id = self.price_repo.get_active_version_id_for_country(country_iso3)
         if active_version_id is None:

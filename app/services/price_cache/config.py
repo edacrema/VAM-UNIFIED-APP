@@ -25,6 +25,8 @@ class PriceCacheConfig:
     refresh_start_date: Optional[str]
     refresh_end_date: Optional[str]
     refresh_max_workers: int
+    pool_recycle_seconds: int
+    pool_timeout_seconds: int
 
 
 def load_price_cache_config(
@@ -61,6 +63,16 @@ def load_price_cache_config(
         refresh_start_date=_blank_to_none(values.get("PRICE_CACHE_REFRESH_START_DATE")),
         refresh_end_date=_blank_to_none(values.get("PRICE_CACHE_REFRESH_END_DATE")),
         refresh_max_workers=_int_or_default(values.get("PRICE_CACHE_REFRESH_MAX_WORKERS"), 5, minimum=1),
+        pool_recycle_seconds=_int_or_default(
+            values.get("PRICE_CACHE_POOL_RECYCLE_SECONDS"),
+            1800,
+            minimum=1,
+        ),
+        pool_timeout_seconds=_int_or_default(
+            values.get("PRICE_CACHE_POOL_TIMEOUT_SECONDS"),
+            30,
+            minimum=1,
+        ),
     )
     if validate:
         validate_price_cache_config(config)
