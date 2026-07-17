@@ -22,6 +22,7 @@ REQUIRED_COLUMNS = {
     "OutputValue",
     "TradersSampleSize",
 }
+REQUIRED_COLLECTION_DATE_FIELDS = ("StartDate", "EndDate")
 
 DATABRIDGES_COLUMN_MAP = {
     "marketName": "MarketName",
@@ -96,8 +97,8 @@ def load_mfi_from_dataframe(
     country = country_override or str(df["Adm0Name"].iloc[0])
     regions = sorted(df["Adm1Name"].dropna().astype(str).unique().tolist())
     markets = sorted(df["MarketName"].dropna().astype(str).unique().tolist())
-    start_date_str = start_date_override or _first_date(df, "StartDate")
-    end_date_str = end_date_override or _first_date(df, "EndDate")
+    start_date_str = _required_collection_date(df, "StartDate", start_date_override)
+    end_date_str = _required_collection_date(df, "EndDate", end_date_override)
     collection_period = f"{start_date_str} to {end_date_str}"
 
     normalised = df[df["LevelID"] == 1].copy()
@@ -228,6 +229,7 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> Dict[str, An
         return {
             "valid": False,
             "missing_columns": [],
+            "missing_metadata_fields": [],
             "has_normalized_scores": False,
             "preview": {},
             "errors": [f"Failed to read CSV: {str(exc)}"],
@@ -235,6 +237,11 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> Dict[str, An
 
     present = set(df.columns)
     missing = sorted(REQUIRED_COLUMNS - present)
+    missing_metadata = [
+        field
+        for field in REQUIRED_COLLECTION_DATE_FIELDS
+        if _first_date(df, field) == "Unknown"
+    ]
     has_normalized = False
     if "LevelID" in df.columns:
         levels = pd.to_numeric(df["LevelID"], errors="coerce")
@@ -243,6 +250,11 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> Dict[str, An
     errors = []
     if missing:
         errors.append(f"Missing required columns: {', '.join(missing)}")
+    if missing_metadata:
+        errors.append(
+            "Missing or invalid required collection metadata: "
+            + ", ".join(missing_metadata)
+        )
     if not has_normalized:
         errors.append("No normalized scores found (LevelID=1 is required)")
 
@@ -259,8 +271,9 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> Dict[str, An
         preview["dimensions"] = df["DimensionName"].dropna().unique().tolist()
 
     return {
-        "valid": not missing and has_normalized,
+        "valid": not missing and not missing_metadata and has_normalized,
         "missing_columns": missing,
+        "missing_metadata_fields": missing_metadata,
         "has_normalized_scores": has_normalized,
         "preview": preview,
         "errors": errors,
@@ -388,7 +401,24 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 def _first_date(df: pd.DataFrame, column: str) -> str:
     if column not in df.columns or df[column].dropna().empty:
         return "Unknown"
-    return _format_date(df[column].dropna().iloc[0])
+    for value in df[column].dropna().tolist():
+        formatted = _format_date(value)
+        if formatted != "Unknown":
+            return formatted
+    return "Unknown"
+
+
+def _required_collection_date(
+    df: pd.DataFrame,
+    column: str,
+    override: Optional[str],
+) -> str:
+    resolved = _format_date(override) if override not in (None, "") else _first_date(df, column)
+    if resolved == "Unknown":
+        raise ValueError(
+            f"MFI data requires a valid {column} value. Upload a corrected processed CSV or supply an API override."
+        )
+    return resolved
 
 
 def _format_date(value: Any) -> str:

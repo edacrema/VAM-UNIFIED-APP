@@ -148,6 +148,21 @@ def test_disabled_generation_normalizes_omitted_fields_but_rejects_explicit_use(
     assert normalize_secondary_request(mock) == (False, None)
 
 
+def test_generate_report_schema_removes_news_date_customization():
+    assert "news_start_date" not in GenerateReportInput.model_fields
+    assert "news_end_date" not in GenerateReportInput.model_fields
+
+    parsed = GenerateReportInput(
+        country="South Sudan",
+        time_period="2025-02",
+        news_start_date="1999-01-01",
+        news_end_date="1999-01-31",
+    )
+    payload = parsed.model_dump()
+    assert "news_start_date" not in payload
+    assert "news_end_date" not in payload
+
+
 def test_configuration_exposes_flag_and_secondary_mutations_are_gated(monkeypatch):
     class FakeRepo:
         def get_active_baskets(self, _iso3):

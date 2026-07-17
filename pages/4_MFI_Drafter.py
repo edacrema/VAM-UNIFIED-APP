@@ -1,5 +1,3 @@
-from datetime import date
-
 import streamlit as st
 
 from streamlit_shared import (
@@ -8,10 +6,10 @@ from streamlit_shared import (
     render_bug_report_sidebar_link,
     render_instructions_sidebar_button,
     render_onboarding_sidebar_button,
+    render_report_delivery,
     render_report_blocks,
-    render_results_tabs,
     render_wfp_sidebar_logo,
-    request_bytes,
+    request_json,
     run_async_and_poll,
     safe_show_error,
 )
@@ -32,34 +30,26 @@ with bug_col:
     render_bug_report_header_link()
 
 st.caption(
-    "Upload the final processed/elaborated MFI CSV produced by Databridges. "
-    "Optional overrides let you replace the country or collection period when the file metadata is incomplete."
+    "Upload the final processed/elaborated MFI CSV produced by DataBridges. "
+    "The file must include valid country, StartDate, and EndDate metadata."
 )
+
+
+@st.dialog("Required CSV data is missing", icon=":material/warning:")
+def _show_csv_validation_dialog(validation):
+    missing_fields = validation.get("missing_metadata_fields") or validation.get("missing_columns") or []
+    if missing_fields:
+        st.write("The following required fields are missing, empty, or invalid:")
+        for field in missing_fields:
+            st.markdown(f"- **{field}**")
+    for error in validation.get("errors") or []:
+        st.error(str(error))
+    st.info("Please upload a corrected final processed MFI CSV from DataBridges and try again.")
+
 
 with st.form("mfi_drafter_csv"):
     uploaded = st.file_uploader("Processed MFI CSV", type=["csv"], key="mfi_drafter_csv_file")
-    country_override = st.text_input("Country Override (optional)", key="mfi_country_override")
-    use_date_override = st.checkbox(
-        "Override Collection Dates",
-        value=False,
-        key="mfi_use_date_override",
-    )
-    override_cols = st.columns(2)
-    with override_cols[0]:
-        start_override = st.date_input(
-            "Collection Start Override",
-            value=date.today().replace(month=1, day=1),
-            disabled=not use_date_override,
-            key="mfi_csv_start_override",
-        )
-    with override_cols[1]:
-        end_override = st.date_input(
-            "Collection End Override",
-            value=date.today(),
-            disabled=not use_date_override,
-            key="mfi_csv_end_override",
-        )
-    run_csv = st.form_submit_button("Run")
+    run_csv = st.form_submit_button("Generate report", type="primary", width="stretch")
 
 if run_csv:
     try:
@@ -73,29 +63,40 @@ if run_csv:
                     uploaded.type or "text/csv",
                 )
             }
-            data = {}
-            if country_override.strip():
-                data["country_override"] = country_override.strip()
-            if use_date_override:
-                data["data_collection_start_override"] = start_override.strftime("%Y-%m-%d")
-                data["data_collection_end_override"] = end_override.strftime("%Y-%m-%d")
-
-            run_id, final_status, result = run_async_and_poll(
-                start_method="POST",
-                start_path="/mfi-drafter/generate-from-csv-async",
-                status_path_template="/mfi-drafter/status/{run_id}",
-                result_path_template="/mfi-drafter/result/{run_id}",
-                start_data=data,
-                start_files=files,
-                poll_interval_seconds=2.0,
-                timeout_seconds=3600,
+            validation = request_json(
+                "POST",
+                "/mfi-drafter/validate-csv",
+                files=files,
+                timeout=60,
             )
-            st.session_state["mfi_last_result"] = result
-            st.session_state["mfi_last_run_id"] = run_id
-            st.session_state.pop("mfi_docx_bytes", None)
-            st.session_state.pop("mfi_docx_run_id", None)
-            if isinstance(final_status, dict) and final_status.get("status") == "failed":
-                st.error(final_status.get("error") or "failed")
+            if not isinstance(validation, dict) or not validation.get("valid"):
+                _show_csv_validation_dialog(
+                    validation
+                    if isinstance(validation, dict)
+                    else {"errors": ["The CSV could not be validated."]}
+                )
+            else:
+                run_id, final_status, result = run_async_and_poll(
+                    start_method="POST",
+                    start_path="/mfi-drafter/generate-from-csv-async",
+                    status_path_template="/mfi-drafter/status/{run_id}",
+                    result_path_template="/mfi-drafter/result/{run_id}",
+                    start_data={},
+                    start_files=files,
+                    poll_interval_seconds=2.0,
+                    timeout_seconds=3600,
+                )
+                st.session_state["mfi_last_result"] = result
+                st.session_state["mfi_last_run_id"] = run_id
+                for key in (
+                    "mfi_docx_bytes",
+                    "mfi_docx_run_id",
+                    "mfi_docx_error",
+                    "mfi_docx_error_run_id",
+                ):
+                    st.session_state.pop(key, None)
+                if isinstance(final_status, dict) and final_status.get("status") == "failed":
+                    st.error(final_status.get("error") or "failed")
     except Exception as e:
         safe_show_error(e)
 
@@ -106,54 +107,32 @@ if isinstance(result, dict):
 
     display_run_id = str(run_id or result.get("run_id") or "")
 
-    def _summary() -> None:
+    def _preview() -> None:
+        render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
+
+    def _technical_details() -> None:
         cols = st.columns(4)
         cols[0].metric("Run ID", display_run_id)
         cols[1].metric("Country", str(result.get("country") or ""))
         cols[2].metric("National MFI", str(result.get("national_mfi") or ""))
         cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
-
-        render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
-
-    def _visuals() -> None:
-        with st.expander("Risk Distribution", expanded=False):
+        if result.get("warnings"):
+            st.markdown("**Generation notices**")
+            for warning in result.get("warnings") or []:
+                st.warning(str(warning))
+        if result.get("risk_distribution") is not None:
+            st.markdown("**Risk distribution**")
             st.json(result.get("risk_distribution"))
-
-        with st.expander("Markets Data", expanded=False):
+        if result.get("markets_data") is not None:
+            st.markdown("**Markets data**")
             st.json(result.get("markets_data"))
 
-    def _export() -> None:
-        if not run_id:
-            st.info("Export is available for asynchronous runs only.")
-            return
-
-        docx_bytes = None
-        if st.session_state.get("mfi_docx_run_id") == run_id:
-            docx_bytes = st.session_state.get("mfi_docx_bytes")
-
-        if docx_bytes is None:
-            with st.spinner("Preparing DOCX..."):
-                try:
-                    docx_bytes = request_bytes(
-                        "POST",
-                        f"/mfi-drafter/export-docx/{run_id}",
-                        json_body={},
-                        timeout=300,
-                    )
-                except Exception as e:
-                    safe_show_error(e)
-                    return
-
-            st.session_state["mfi_docx_bytes"] = docx_bytes
-            st.session_state["mfi_docx_run_id"] = run_id
-
-        if docx_bytes:
-            st.download_button(
-                "Generate & Download DOCX",
-                data=docx_bytes,
-                file_name=f"mfi-drafter-{run_id}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key=f"mfi_download_docx_{run_id}",
-            )
-
-    render_results_tabs(summary=_summary, json_data=result, visuals=_visuals, export=_export)
+    if run_id:
+        render_report_delivery(
+            run_id=str(run_id),
+            key_prefix="mfi",
+            export_path=f"/mfi-drafter/export-docx/{run_id}",
+            file_name=f"mfi-drafter-{run_id}.docx",
+            render_preview=_preview,
+            render_technical_details=_technical_details,
+        )

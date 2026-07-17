@@ -1705,8 +1705,6 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
     admin1_list = input_data.admin1_list
     currency_code = input_data.currency_code
     enabled_modules = input_data.enabled_modules
-    news_start_date = input_data.news_start_date
-    news_end_date = input_data.news_end_date
     previous_report_text = input_data.previous_report_text
     use_mock_data = input_data.use_mock_data
 
@@ -1730,8 +1728,6 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
             admin1_list=admin1_list,
             currency_code=currency_code,
             enabled_modules=enabled_modules,
-            news_start_date=news_start_date,
-            news_end_date=news_end_date,
             previous_report_text=previous_report_text,
             use_mock_data=use_mock_data,
             basket_version_id=(
@@ -1938,8 +1934,6 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                 admin1_list=admin1_list,
                 currency_code=input_data.currency_code,
                 enabled_modules=input_data.enabled_modules,
-                news_start_date=input_data.news_start_date,
-                news_end_date=input_data.news_end_date,
                 previous_report_text=input_data.previous_report_text,
                 use_mock_data=input_data.use_mock_data,
                 basket_version_id=(

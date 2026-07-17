@@ -132,6 +132,17 @@ def apply_wfp_theme() -> None:
             background: var(--wfp-primary-dark) !important;
             color: #FFFFFF !important;
         }
+        div[class*="st-key-"][class*="_report_delivery"] .stDownloadButton > button {
+            min-height: 4.25rem !important;
+            width: 100% !important;
+            font-size: 1.08rem !important;
+            justify-content: center !important;
+        }
+        div[class*="st-key-"][class*="_report_delivery"] .stButton > button {
+            min-height: 3rem !important;
+            width: 100% !important;
+            justify-content: center !important;
+        }
         .stTextInput input,
         .stTextArea textarea,
         .stNumberInput input,
@@ -644,6 +655,101 @@ def render_results_tabs(
             st.write("No export available")
         else:
             export()
+
+
+def render_report_delivery(
+    *,
+    run_id: str,
+    key_prefix: str,
+    export_path: str,
+    file_name: str,
+    render_preview: Callable[[], None],
+    render_technical_details: Optional[Callable[[], None]] = None,
+    labels: Optional[Dict[str, str]] = None,
+) -> None:
+    """Render a download-first result experience for completed report runs."""
+    text = {
+        "ready": "Report ready",
+        "ready_caption": "Your report has been generated. Download the Word file or preview it on this page.",
+        "preparing": "Preparing your download...",
+        "download": "Download report (.docx)",
+        "view": "View report on this page",
+        "hide": "Hide report preview",
+        "technical": "Technical details",
+        "export_error": "The Word file could not be prepared. You can still preview the report below.",
+        "retry": "Retry preparing download",
+    }
+    text.update(labels or {})
+
+    docx_bytes_key = f"{key_prefix}_docx_bytes"
+    docx_run_id_key = f"{key_prefix}_docx_run_id"
+    docx_error_key = f"{key_prefix}_docx_error"
+    docx_error_run_id_key = f"{key_prefix}_docx_error_run_id"
+    preview_key = f"{key_prefix}_report_preview_{run_id}"
+
+    docx_bytes = None
+    if st.session_state.get(docx_run_id_key) == run_id:
+        docx_bytes = st.session_state.get(docx_bytes_key)
+
+    export_error = None
+    if st.session_state.get(docx_error_run_id_key) == run_id:
+        export_error = st.session_state.get(docx_error_key)
+
+    if docx_bytes is None and not export_error:
+        with st.spinner(text["preparing"]):
+            try:
+                docx_bytes = request_bytes("POST", export_path, json_body={}, timeout=300)
+            except Exception as err:
+                export_error = str(err)
+                st.session_state[docx_error_key] = export_error
+                st.session_state[docx_error_run_id_key] = run_id
+            else:
+                st.session_state[docx_bytes_key] = docx_bytes
+                st.session_state[docx_run_id_key] = run_id
+                st.session_state.pop(docx_error_key, None)
+                st.session_state.pop(docx_error_run_id_key, None)
+
+    with st.container(border=True, key=f"{key_prefix}_report_delivery"):
+        st.subheader(text["ready"])
+        st.caption(text["ready_caption"])
+
+        if docx_bytes:
+            st.download_button(
+                text["download"],
+                data=docx_bytes,
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"{key_prefix}_download_docx_{run_id}",
+                type="primary",
+                width="stretch",
+                on_click="ignore",
+            )
+        else:
+            st.error(text["export_error"])
+            if st.button(
+                text["retry"],
+                key=f"{key_prefix}_retry_docx_{run_id}",
+                width="stretch",
+            ):
+                st.session_state.pop(docx_error_key, None)
+                st.session_state.pop(docx_error_run_id_key, None)
+                st.rerun()
+
+        preview_open = bool(st.session_state.get(preview_key, False))
+        if st.button(
+            text["hide"] if preview_open else text["view"],
+            key=f"{key_prefix}_toggle_preview_{run_id}",
+            width="stretch",
+        ):
+            preview_open = not preview_open
+            st.session_state[preview_key] = preview_open
+
+    if preview_open:
+        render_preview()
+
+    if render_technical_details is not None:
+        with st.expander(text["technical"], expanded=False):
+            render_technical_details()
 
 
 def render_run_status(

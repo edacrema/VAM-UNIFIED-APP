@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+import builtins
+from pathlib import Path
+
+from streamlit.testing.v1 import AppTest
+
+
+PAGE = Path(__file__).resolve().parents[1] / "pages" / "4_MFI_Drafter.py"
+
+
+class FakeUpload:
+    name = "mfi.csv"
+    type = "text/csv"
+
+    @staticmethod
+    def getvalue():
+        return b"csv-data"
+
+
+class FakeMFIBackend:
+    def __init__(self, *, upload=None, validation=None):
+        self.upload = upload
+        self.validation = validation or {
+            "valid": True,
+            "missing_columns": [],
+            "missing_metadata_fields": [],
+            "errors": [],
+        }
+        self.requests = []
+        self.runs = []
+
+    def request_json(self, method, path, **kwargs):
+        self.requests.append((method, path, kwargs))
+        assert path == "/mfi-drafter/validate-csv"
+        return self.validation
+
+    def run_async_and_poll(self, **kwargs):
+        self.runs.append(kwargs)
+        return (
+            "mfi-run-1",
+            {"status": "completed"},
+            {
+                "run_id": "mfi-run-1",
+                "country": "South Sudan",
+                "national_mfi": 6.2,
+                "llm_calls": 1,
+                "report_blocks": [],
+            },
+        )
+
+
+def _element(elements, label):
+    return next(element for element in elements if element.label == label)
+
+
+def _app(monkeypatch, backend):
+    monkeypatch.setattr(builtins, "_mfi_drafter_test_backend", backend, raising=False)
+    page_path = str(PAGE).replace("\\", "\\\\")
+    source = f'''
+import builtins
+import sys
+import types
+import streamlit as st
+
+backend = builtins._mfi_drafter_test_backend
+if backend.upload is not None:
+    st.file_uploader = lambda *args, **kwargs: backend.upload
+
+shared = types.ModuleType("streamlit_shared")
+shared.apply_wfp_theme = lambda: None
+shared.render_wfp_sidebar_logo = lambda: None
+shared.render_onboarding_sidebar_button = lambda **kwargs: None
+shared.render_instructions_sidebar_button = lambda **kwargs: None
+shared.render_bug_report_sidebar_link = lambda **kwargs: None
+shared.render_bug_report_header_link = lambda **kwargs: None
+shared.render_report_delivery = lambda **kwargs: None
+shared.render_report_blocks = lambda *args, **kwargs: None
+shared.request_json = backend.request_json
+shared.run_async_and_poll = backend.run_async_and_poll
+shared.safe_show_error = lambda error: st.error(str(error))
+sys.modules["streamlit_shared"] = shared
+
+page_path = r"{page_path}"
+with open(page_path, encoding="utf-8") as page_file:
+    exec(compile(page_file.read(), page_path, "exec"))
+'''
+    return AppTest.from_string(source).run(timeout=20)
+
+
+def test_mfi_form_removes_override_controls(monkeypatch):
+    app = _app(monkeypatch, FakeMFIBackend())
+
+    assert not app.exception
+    assert _element(app.button, "Generate report")
+    assert not [field for field in app.text_input if "Override" in field.label]
+    assert not [box for box in app.checkbox if "Override" in box.label]
+    assert not [field for field in app.date_input if "Override" in field.label]
+
+
+def test_invalid_mfi_metadata_opens_dialog_and_does_not_start_run(monkeypatch):
+    backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        validation={
+            "valid": False,
+            "missing_columns": [],
+            "missing_metadata_fields": ["StartDate", "EndDate"],
+            "errors": ["Missing or invalid required collection metadata: StartDate, EndDate"],
+        },
+    )
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Generate report").click().run(timeout=20)
+
+    assert not app.exception
+    assert backend.requests
+    assert backend.runs == []
+    assert any("StartDate, EndDate" in error.value for error in app.error)
+    assert any("corrected final processed MFI CSV" in info.value for info in app.info)
+
+
+def test_valid_mfi_metadata_starts_async_generation_without_overrides(monkeypatch):
+    backend = FakeMFIBackend(upload=FakeUpload())
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Generate report").click().run(timeout=20)
+
+    assert not app.exception
+    assert len(backend.runs) == 1
+    assert backend.runs[0]["start_data"] == {}
+    assert "country_override" not in backend.runs[0]["start_data"]
+    assert "data_collection_start_override" not in backend.runs[0]["start_data"]
+    assert "data_collection_end_override" not in backend.runs[0]["start_data"]

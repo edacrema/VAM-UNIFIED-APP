@@ -165,15 +165,6 @@ class GenerateReportInput(BaseModel):
         description="Report language: auto country default, English, French, or Spanish."
     )
 
-    news_start_date: Optional[str] = Field(
-        default=None,
-        description="Optional start date for news retrieval (YYYY-MM-DD). If provided, must be paired with news_end_date."
-    )
-    news_end_date: Optional[str] = Field(
-        default=None,
-        description="Optional end date for news retrieval (YYYY-MM-DD). If provided, must be paired with news_start_date."
-    )
-
     commodity_list: List[str] = Field(
         default=[],
         description="Additional commodities to analyze. Active basket commodities are always included."

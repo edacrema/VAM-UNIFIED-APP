@@ -101,8 +101,6 @@ class MarketReportState(TypedDict):
     # ===== INPUTS =====
     country: str
     time_period: str
-    news_start_date: Optional[str]
-    news_end_date: Optional[str]
     commodity_list: List[str]
     basket_version_id: Optional[str]
     primary_basket_version_id: Optional[str]
@@ -173,8 +171,6 @@ def create_initial_state(
     enabled_modules: List[str],
     basket_version_id: Optional[str] = None,
     basket_selection: Optional[Mapping[str, Any]] = None,
-    news_start_date: Optional[str] = None,
-    news_end_date: Optional[str] = None,
     previous_report_text: str = "",
     use_mock_data: bool = False,
     language: str = "en",
@@ -192,8 +188,6 @@ def create_initial_state(
     return MarketReportState(
         country=country,
         time_period=time_period,
-        news_start_date=news_start_date,
-        news_end_date=news_end_date,
         commodity_list=commodity_list,
         basket_version_id=basket_version_id,
         primary_basket_version_id=primary_version_id,
@@ -2530,22 +2524,15 @@ def node_news_retrieval(state: MarketReportState) -> dict:
     country = state.get("country", "")
     time_period = state.get("time_period", "")
 
-    explicit_start = (state.get("news_start_date") or "").strip()
-    explicit_end = (state.get("news_end_date") or "").strip()
+    try:
+        start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
+    except Exception:
+        start_dt = datetime.utcnow().replace(day=1)
 
-    if explicit_start and explicit_end:
-        start_date = explicit_start[:10]
-        end_date = explicit_end[:10]
-    else:
-        try:
-            start_dt = datetime.strptime(time_period + "-01", "%Y-%m-%d")
-        except Exception:
-            start_dt = datetime.utcnow().replace(day=1)
-
-        end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-        prev_month_start = (start_dt - timedelta(days=1)).replace(day=1)
-        start_date = prev_month_start.strftime("%Y-%m-%d")
-        end_date = end_dt.strftime("%Y-%m-%d")
+    end_dt = (start_dt + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    prev_month_start = (start_dt - timedelta(days=1)).replace(day=1)
+    start_date = prev_month_start.strftime("%Y-%m-%d")
+    end_date = end_dt.strftime("%Y-%m-%d")
     
 
     rw = ReliefWebRetriever(verbose=False)
@@ -3280,8 +3267,6 @@ def run_report_generation(
     enabled_modules: List[str] = None,
     basket_version_id: Optional[str] = None,
     basket_selection: Optional[Any] = None,
-    news_start_date: Optional[str] = None,
-    news_end_date: Optional[str] = None,
     previous_report_text: str = "",
     use_mock_data: bool = False,
     language: str = "auto",
@@ -3312,8 +3297,6 @@ def run_report_generation(
         enabled_modules=enabled_modules,
         basket_version_id=basket_version_id,
         basket_selection=basket_selection_payload,
-        news_start_date=news_start_date,
-        news_end_date=news_end_date,
         previous_report_text=previous_report_text,
         use_mock_data=use_mock_data,
         language=language_info["language"],

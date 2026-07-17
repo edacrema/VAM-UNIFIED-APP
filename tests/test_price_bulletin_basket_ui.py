@@ -4,6 +4,7 @@ import builtins
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 
@@ -64,6 +65,7 @@ class FakePriceBulletinBackend:
         self.reject_run = False
         self.joint_latest_override = None
         self.second_basket_enabled = second_basket_enabled
+        self.refresh_status = "updated"
 
     def configuration(self):
         return {
@@ -140,6 +142,12 @@ class FakePriceBulletinBackend:
                 "latest_joint_reportable_month": joint_latest,
                 "latest_cached_month": "2025-02",
                 "warnings": [],
+            }
+        if path.endswith("/reportable-months/refresh") and method == "POST":
+            return {
+                "status": self.refresh_status,
+                "rows_saved": 4 if self.refresh_status == "updated" else 0,
+                "warnings": ["operator detail that must not be shown"],
             }
         raise AssertionError(f"Unexpected request: {method} {path} {payload}")
 
@@ -219,6 +227,7 @@ shared.render_instructions_sidebar_button = lambda **kwargs: None
 shared.render_bug_report_sidebar_link = lambda **kwargs: None
 shared.render_bug_report_header_link = lambda **kwargs: None
 shared.render_results_tabs = lambda **kwargs: None
+shared.render_report_delivery = lambda **kwargs: None
 shared.render_report_blocks = lambda *args, **kwargs: None
 shared.render_report_sections = lambda *args, **kwargs: None
 shared.render_visualizations = lambda *args, **kwargs: None
@@ -262,6 +271,17 @@ def test_saved_cards_inclusion_and_id_based_additional_options(monkeypatch):
     assert backend.reportability_params[-1]["secondary_basket_version_id"] is None
 
 
+def test_cache_panel_and_news_date_controls_are_not_rendered(monkeypatch):
+    backend = FakePriceBulletinBackend()
+    app = _app(monkeypatch, backend)
+
+    assert not app.exception
+    assert not [box for box in app.checkbox if box.label == "Use News Dates"]
+    assert not [field for field in app.date_input if field.label in {"News Start Date", "News End Date"}]
+    assert not [metric for metric in app.metric if metric.label in {"Status", "Price Rows", "Cache version"}]
+    assert not any("Price Cache" in item.value for item in app.markdown)
+
+
 def test_joint_reportability_rollback_names_the_secondary(monkeypatch):
     backend = FakePriceBulletinBackend()
     backend.joint_latest_override = "2025-01"
@@ -269,9 +289,30 @@ def test_joint_reportability_rollback_names_the_secondary(monkeypatch):
     app = _app(monkeypatch, backend)
 
     assert any(
-        "Including Urban basket moves the latest reportable month from 2025-02 to 2025-01" in info.value
+        "Including Urban basket changes the latest reportable month from 2025-02 to 2025-01" in info.value
         for info in app.info
     )
+
+
+@pytest.mark.parametrize(
+    ("refresh_status", "element_type", "expected"),
+    [
+        ("updated", "success", "DataBridges refresh succeeded: 4 new price rows were added."),
+        ("no_update", "info", "DataBridges refresh succeeded but found nothing new."),
+        ("unavailable", "warning", "DataBridges refresh failed. Please try again later."),
+    ],
+)
+def test_refresh_outcomes_are_actionable(monkeypatch, refresh_status, element_type, expected):
+    backend = FakePriceBulletinBackend()
+    backend.refresh_status = refresh_status
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Refresh from DataBridges").click().run(timeout=20)
+
+    elements = getattr(app, element_type)
+    assert any(expected in element.value for element in elements)
+    notices = list(app.info) + list(app.warning)
+    assert not any("operator detail" in element.value for element in notices)
 
 
 def test_edit_publish_cancel_and_archive_use_plural_routes(monkeypatch):
@@ -347,6 +388,8 @@ def test_disjoint_secondary_scope_blocks_run_and_exclusion_pins_payload(monkeypa
     assert payload["include_secondary_basket"] is False
     assert payload["secondary_basket_version_id"] is None
     assert "basket_version_id" not in payload
+    assert "news_start_date" not in payload
+    assert "news_end_date" not in payload
     assert _element(app.checkbox, "Include Urban basket in this report").value is True
 
 

@@ -1,5 +1,3 @@
-from datetime import date
-
 import streamlit as st
 
 from app.services.market_monitor.i18n import LANGUAGE_NAMES, t
@@ -35,21 +33,13 @@ from streamlit_shared import (
     render_instructions_sidebar_button,
     render_onboarding_sidebar_button,
     quote_path_param,
-    render_results_tabs,
+    render_report_delivery,
     render_report_blocks,
-    render_report_sections,
-    render_visualizations,
     render_wfp_sidebar_logo,
-    request_bytes,
     request_json,
     run_async_and_poll,
     safe_show_error,
 )
-
-
-def _short_id(value):
-    text = str(value or "")
-    return text[:8] if text else "n/a"
 
 
 def _clear_cache_version_dependent_state():
@@ -88,16 +78,10 @@ def _render_basket_summary(role, basket):
         if basket.get("short_description"):
             st.write(str(basket.get("short_description")))
         st.caption(scope_label)
-        columns = st.columns(4)
+        columns = st.columns(2)
         columns[0].metric("Version", str(basket.get("version_number") or "n/a"))
         columns[1].metric("Items", str(len(items)))
-        columns[2].metric("Created by", str(basket.get("created_by_user_id") or "unknown"))
-        columns[3].metric("Cache version", _short_id(basket.get("cache_version_id_at_creation")))
-        st.caption(
-            "Published: "
-            f"{basket.get('created_at') or 'n/a'} | "
-            f"Basket ID: {_short_id(basket.get('basket_version_id'))}"
-        )
+        st.caption(f"Published: {basket.get('created_at') or 'n/a'}")
         if basket.get("change_note"):
             st.caption(f"Change note: {basket.get('change_note')}")
         summary_rows = [
@@ -359,43 +343,18 @@ try:
         _clear_cache_version_dependent_state()
     st.session_state["mm_cache_status_resp"] = cache_status_resp
     st.session_state["mm_cache_status_version"] = current_cache_version
-except Exception as e:
+except Exception:
     cache_status_resp = st.session_state.get("mm_cache_status_resp")
     if cache_status_resp is None:
         st.session_state.pop("mm_cache_status_resp", None)
-        safe_show_error(e)
 
 if isinstance(cache_status_resp, dict):
     cache_status = cache_status_resp
 
-st.markdown("#### Price Cache")
-status_cols = st.columns(4)
-status_cols[0].metric("Status", str(cache_status.get("status") or "inactive"))
-status_cols[1].metric("Countries", str(cache_status.get("active_country_count") or 0))
-status_cols[2].metric("Price Rows", str(cache_status.get("rows_prices") or 0))
 active_version = str(cache_status.get("active_version_id") or "")
-status_cols[3].metric("Version", active_version[:8] if active_version else "none")
-
-if cache_status.get("completed_at") or cache_status.get("activated_at"):
-    st.caption(
-        "Completed: "
-        f"{cache_status.get('completed_at') or 'n/a'} | Activated: {cache_status.get('activated_at') or 'n/a'}"
-    )
-
-cache_warnings = cache_status.get("warnings") or []
-if cache_warnings:
-    with st.expander("Cache warnings", expanded=False):
-        for warning in cache_warnings:
-            st.warning(str(warning))
-
-cache_operator_warnings = cache_status.get("operator_warnings") or []
-if cache_operator_warnings:
-    with st.expander("Cache processing notes (for administrators)", expanded=False):
-        for warning in cache_operator_warnings:
-            st.info(str(warning))
 
 if not cache_status.get("has_active_cache"):
-    st.warning("No active price cache is available. Run a cache refresh before drafting a Price Bulletin.")
+    st.warning("No price data available.")
     st.stop()
 
 countries_resp = (
@@ -427,7 +386,7 @@ if isinstance(countries_resp, dict):
 if countries:
     country = st.selectbox("Country", countries, index=0, key="mm_country")
 else:
-    st.warning("The active cache does not contain any countries with monthly price data.")
+    st.warning("No countries or commodities available.")
     st.stop()
 
 metadata = None
@@ -449,12 +408,11 @@ if country:
                 timeout=30,
             )
             metadata_cache[metadata_cache_key] = metadata
-        except Exception as e:
+        except Exception:
             metadata = None
-            safe_show_error(e)
 
 if not isinstance(metadata, dict):
-    st.warning("Cached metadata is not available for the selected country.")
+    st.warning("No countries or commodities available.")
     st.stop()
 
 regions = metadata.get("regions") or []
@@ -468,23 +426,10 @@ if not commodities:
     commodities = [item for item in raw_commodities if isinstance(item, str)]
 default_commodities = metadata.get("default_commodities") or []
 
-selected_latest = metadata.get("latest_cached_date")
 selected_version = str(metadata.get("cache_version_id") or "")
-st.caption(
-    "Selected country cache: "
-    f"latest date {selected_latest or 'n/a'} | version {selected_version[:8] if selected_version else 'n/a'}"
-)
-for warning in metadata.get("warnings") or []:
-    st.warning(str(warning))
-
-operator_warnings = metadata.get("operator_warnings") or []
-if operator_warnings:
-    with st.expander("Cache processing notes (for administrators)", expanded=False):
-        for warning in operator_warnings:
-            st.info(str(warning))
 
 if not commodities:
-    st.warning("The selected country has no cached priced commodities.")
+    st.warning("No countries or commodities available.")
     st.stop()
 
 baskets_resp = None
@@ -495,9 +440,8 @@ if country:
             f"/market-monitor/countries/{quote_path_param(country)}/baskets",
             timeout=30,
         )
-    except Exception as e:
+    except Exception:
         baskets_resp = None
-        safe_show_error(e)
 
 if not isinstance(baskets_resp, dict):
     st.warning("Basket configuration is not available for the selected country.")
@@ -599,9 +543,8 @@ if active_primary:
                 timeout=30,
             )
             reportable_cache[reportable_cache_key] = reportable_resp
-        except Exception as e:
+        except Exception:
             reportable_resp = None
-            safe_show_error(e)
 
 if isinstance(reportable_resp, dict):
     raw_months = reportable_resp.get("reportable_months") or []
@@ -625,16 +568,16 @@ if isinstance(reportable_resp, dict):
         else:
             rollback_target = "no jointly reportable month"
         st.info(
-            f"Including {active_secondary.get('basket_name') or 'the second basket'} moves the latest reportable "
-            f"month from {latest_primary_reportable} to {rollback_target} because both baskets must be complete."
+            "The selected basket has incomplete prices for newer months. "
+            f"Including {active_secondary.get('basket_name') or 'the second basket'} changes the latest reportable "
+            f"month from {latest_primary_reportable} to {rollback_target}."
         )
     if latest_cached_month and latest_reportable_month and str(latest_cached_month) > str(latest_reportable_month):
         st.info(
-            f"Latest cached month is {latest_cached_month}, but the latest reportable basket month is "
-            f"{latest_reportable_month} because newer basket actual prices are incomplete."
+            "The selected basket has incomplete prices for newer months. "
+            f"The latest reportable month is {latest_reportable_month}; the latest available price month is "
+            f"{latest_cached_month}."
         )
-    for warning in reportable_resp.get("warnings") or []:
-        st.warning(str(warning))
 
 refresh_cols = st.columns([1, 3])
 with refresh_cols[0]:
@@ -648,7 +591,7 @@ with refresh_cols[1]:
         st.caption(
             "Latest reportable month: "
             f"{reportable_resp.get('latest_reportable_month') or 'n/a'} | "
-            f"Latest cached month: {reportable_resp.get('latest_cached_month') or 'n/a'}"
+            f"Latest available price month: {reportable_resp.get('latest_cached_month') or 'n/a'}"
         )
 
 if refresh_clicked and active_primary:
@@ -679,24 +622,22 @@ if refresh_clicked and active_primary:
         status = refresh_result.get("status") if isinstance(refresh_result, dict) else None
         if status == "updated":
             st.success(
-                "DataBridges refresh updated the country cache "
-                f"({refresh_result.get('rows_saved', 0)} new rows saved)."
+                "DataBridges refresh succeeded: "
+                f"{refresh_result.get('rows_saved', 0)} new price rows were added."
             )
         elif status == "no_update":
-            st.info("DataBridges refresh completed; no newer usable rows were found.")
+            st.info("DataBridges refresh succeeded but found nothing new.")
         else:
-            st.warning("DataBridges refresh is unavailable right now.")
-        for warning in (refresh_result.get("warnings") if isinstance(refresh_result, dict) else []) or []:
-            st.warning(str(warning))
-    except Exception as e:
-        safe_show_error(e)
+            st.warning("DataBridges refresh failed. Please try again later.")
+    except Exception:
+        st.warning("DataBridges refresh failed. Please try again later.")
 
 if not active_primary:
     st.info("Report generation is disabled until the primary food basket is published.")
     st.stop()
 
 if active_primary and not time_period_options:
-    st.warning("No reportable basket month is available yet. Try refreshing from DataBridges or check the basket data coverage.")
+    st.warning("No reportable month is available. Try refreshing from DataBridges or check the basket data coverage.")
     st.stop()
 
 with st.form("market_monitor_form"):
@@ -727,26 +668,6 @@ with st.form("market_monitor_form"):
     language = next(
         code for code, label in language_labels.items() if label == selected_language_label
     )
-
-    use_news_dates = st.checkbox("Use News Dates", value=False, key="mm_use_news_dates")
-    news_start_date_date = st.date_input(
-        "News Start Date",
-        value=date.today(),
-        disabled=not use_news_dates,
-        key="mm_news_start_date",
-    )
-    news_end_date_date = st.date_input(
-        "News End Date",
-        value=date.today(),
-        disabled=not use_news_dates,
-        key="mm_news_end_date",
-    )
-
-    if use_news_dates and news_end_date_date < news_start_date_date:
-        st.error("News End Date must be on or after News Start Date.")
-
-    news_start_date = news_start_date_date.strftime("%Y-%m-%d") if use_news_dates else ""
-    news_end_date = news_end_date_date.strftime("%Y-%m-%d") if use_news_dates else ""
 
     included_baskets = [active_primary]
     if include_secondary_basket and active_secondary:
@@ -827,8 +748,6 @@ if submitted and not overlap_errors:
             "admin1_list": admin1_list,
             "currency_code": currency_code,
             "enabled_modules": enabled_modules,
-            "news_start_date": news_start_date or None,
-            "news_end_date": news_end_date or None,
             "previous_report_text": previous_report_text or "",
             "use_mock_data": False,
             "primary_basket_version_id": active_primary.get("basket_version_id"),
@@ -851,6 +770,13 @@ if submitted and not overlap_errors:
         )
         st.session_state["mm_last_result"] = result
         st.session_state["mm_last_run_id"] = run_id
+        for key in (
+            "mm_docx_bytes",
+            "mm_docx_run_id",
+            "mm_docx_error",
+            "mm_docx_error_run_id",
+        ):
+            st.session_state.pop(key, None)
         if isinstance(final_status, dict) and final_status.get("status") in {"completed", "failed"}:
             advance_report_iteration(st.session_state, country)
         st.rerun()
@@ -866,7 +792,10 @@ if isinstance(result, dict):
     display_run_id = str(run_id or result.get("run_id") or "")
     result_language = str(result.get("language") or "en")
 
-    def _summary() -> None:
+    def _preview() -> None:
+        render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
+
+    def _technical_details() -> None:
         cols = st.columns(4)
         cols[0].metric(t(result_language, "ui.run_id"), display_run_id)
         cols[1].metric(t(result_language, "ui.country"), str(result.get("country") or ""))
@@ -882,84 +811,55 @@ if isinstance(result, dict):
 
         result_warnings = result.get("warnings") or []
         if result_warnings:
-            with st.expander(t(result_language, "ui.warnings"), expanded=False):
-                for warning in result_warnings:
-                    st.warning(str(warning))
+            st.markdown(f"**{t(result_language, 'ui.warnings')}**")
+            for warning in result_warnings:
+                st.warning(str(warning))
 
         qa_review = result.get("qa_review") or {}
         qa_flags = qa_review.get("flags") or [] if isinstance(qa_review, dict) else []
         if qa_flags:
-            with st.expander(t(result_language, "ui.qa_review"), expanded=False):
-                st.caption(
+            st.markdown(f"**{t(result_language, 'ui.qa_review')}**")
+            st.caption(
+                t(
+                    result_language,
+                    "ui.qa_status",
+                    status=str(qa_review.get("status") or "not_recorded"),
+                    attempts=int(qa_review.get("correction_attempts") or 0),
+                )
+            )
+            for flag in qa_flags:
+                if not isinstance(flag, dict):
+                    continue
+                st.warning(
                     t(
                         result_language,
-                        "ui.qa_status",
-                        status=str(qa_review.get("status") or "not_recorded"),
-                        attempts=int(qa_review.get("correction_attempts") or 0),
+                        "ui.qa_flag",
+                        section=str(flag.get("section") or "GLOBAL"),
+                        severity=str(flag.get("severity") or "medium"),
+                        details=str(flag.get("details") or flag.get("claim") or ""),
                     )
                 )
-                for flag in qa_flags:
-                    if not isinstance(flag, dict):
-                        continue
-                    st.warning(
-                        t(
-                            result_language,
-                            "ui.qa_flag",
-                            section=str(flag.get("section") or "GLOBAL"),
-                            severity=str(flag.get("severity") or "medium"),
-                            details=str(flag.get("details") or flag.get("claim") or ""),
-                        )
-                    )
-
-        cache_metadata = result.get("cache_metadata")
-        if isinstance(cache_metadata, dict) and cache_metadata:
-            with st.expander(t(result_language, "ui.cache_metadata"), expanded=False):
-                st.json(cache_metadata)
-
-        render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
-
-    def _visuals() -> None:
-        with st.expander(t(result_language, "ui.report_sections"), expanded=False):
-            render_report_sections(result.get("report_sections"))
-
-        st.subheader(t(result_language, "ui.visualizations"))
-        render_visualizations(result.get("visualizations"))
-
-        with st.expander(t(result_language, "ui.data_statistics"), expanded=False):
+        if result.get("data_statistics") is not None:
+            st.markdown(f"**{t(result_language, 'ui.data_statistics')}**")
             st.json(result.get("data_statistics"))
 
-    def _export() -> None:
-        if not run_id:
-            st.info(t(result_language, "ui.export_unavailable"))
-            return
-
-        docx_bytes = None
-        if st.session_state.get("mm_docx_run_id") == run_id:
-            docx_bytes = st.session_state.get("mm_docx_bytes")
-
-        if docx_bytes is None:
-            with st.spinner(t(result_language, "ui.preparing_docx")):
-                try:
-                    docx_bytes = request_bytes(
-                        "POST",
-                        f"/market-monitor/export-docx/{run_id}",
-                        json_body={},
-                        timeout=300,
-                    )
-                except Exception as e:
-                    safe_show_error(e)
-                    return
-
-            st.session_state["mm_docx_bytes"] = docx_bytes
-            st.session_state["mm_docx_run_id"] = run_id
-
-        if docx_bytes:
-            st.download_button(
-                t(result_language, "ui.download_docx"),
-                data=docx_bytes,
-                file_name=f"market-monitor-{run_id}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key=f"mm_download_docx_{run_id}",
-            )
-
-    render_results_tabs(summary=_summary, json_data=result, visuals=_visuals, export=_export)
+    if run_id:
+        render_report_delivery(
+            run_id=str(run_id),
+            key_prefix="mm",
+            export_path=f"/market-monitor/export-docx/{run_id}",
+            file_name=f"market-monitor-{run_id}.docx",
+            render_preview=_preview,
+            render_technical_details=_technical_details,
+            labels={
+                "ready": t(result_language, "ui.report_ready"),
+                "ready_caption": t(result_language, "ui.report_ready_caption"),
+                "preparing": t(result_language, "ui.preparing_docx"),
+                "download": t(result_language, "ui.download_report"),
+                "view": t(result_language, "ui.view_report"),
+                "hide": t(result_language, "ui.hide_report"),
+                "technical": t(result_language, "ui.technical_details"),
+                "export_error": t(result_language, "ui.export_error"),
+                "retry": t(result_language, "ui.retry_export"),
+            },
+        )

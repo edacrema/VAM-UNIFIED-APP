@@ -231,8 +231,6 @@ def test_market_monitor_news_retrieval_combines_and_deduplicates(monkeypatch):
         admin1_list=[],
         currency_code="SSP",
         enabled_modules=[],
-        news_start_date="2025-01-01",
-        news_end_date="2025-01-31",
     )
     result = market_graph.node_news_retrieval(state)
 
@@ -241,6 +239,8 @@ def test_market_monitor_news_retrieval_combines_and_deduplicates(monkeypatch):
     assert any(doc["doc_id"] == "seerist_1" and doc["content"] == "Seerist title 1" for doc in result["documents"])
     assert result["retriever_traces"][1]["retriever"] == "Seerist"
     assert "warnings" not in result
+    assert next(doc for doc in result["documents"] if doc["source"] == "ReliefWeb")["date"] == "2024-12-01"
+    assert all(doc["date"] == "2025-01-31" for doc in result["documents"] if doc["source"] == "Seerist")
 
 
 def test_mfi_context_retrieval_falls_back_to_reliefweb_when_seerist_unavailable(monkeypatch):

@@ -195,14 +195,14 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-1. **Select a country.** The active PriceCache supplies available commodities, units, regions, and reportable months.
+1. **Select a country.** The application loads the available commodities, units, regions, and reportable months.
 2. **Configure the primary basket.** A blank primary name becomes `MEB`. Custom primary names require a description. Choose national or selected-region scope and publish at least one positive commodity quantity.
 3. **Optionally add a second basket.** It requires its own name, description, scope, regions where applicable, and positive quantities. Editing publishes a new immutable version. Removing it archives the active version without deleting report history.
 4. **Choose whether to include the second basket.** Every new report iteration defaults to included. Uncheck it for a primary-only run without changing the saved configuration.
 5. **Select report regions.** Run regions remain independent from basket scope. A selected-region basket must overlap the run regions; an empty region selection means all available regions.
 6. **Select a reportable month.** Eligibility requires complete prices for every included basket component. Including a second basket may move the latest jointly reportable month back. Use **Refresh from DataBridges** to attempt a selection-aware refresh.
 7. **Review locked and additional commodities.** Basket components are locked by commodity ID. You may add other priced commodities; shared components are retrieved once but retain their basket-specific quantities.
-8. **Choose report language and optional inputs.** English, French, and Spanish are supported. Optional news dates and exchange-rate, fuel, livestock, and labour modules can be enabled when relevant data is available.
+8. **Choose the report language and optional analysis modules.** English, French, and Spanish are supported. Exchange-rate, fuel, livestock, and labour modules can be enabled when relevant data is available. News dates are selected automatically from the report month.
 9. **Click "Run".** The submitted primary and optional secondary version IDs are recorded immutably for that run.
         """
     )
@@ -212,7 +212,7 @@ with right:
 st.subheader("Output")
 st.markdown(
     """
-The agent takes approximately **10 minutes** to complete. The result contains basket definitions, separate scope-correct basket charts, statistics, narrative sections, and any QA warnings. Absolute basket costs are reported independently rather than compared directly. Review unresolved QA details in Streamlit, then use **Generate & Download DOCX** to export the report. Historical runs continue using their captured basket versions even after a basket is edited or archived.
+The agent takes approximately **10 minutes** to complete. When the report is ready, the first action shown is **Download report (.docx)**. Use **View report on this page** underneath it only when you want to review the report in Streamlit without downloading it. Run information, QA notices, and supporting statistics remain available in the closed **Technical details** section. Historical runs continue using their captured basket versions even after a basket is edited or archived.
     """
 )
 
@@ -231,7 +231,7 @@ The MFI Report Drafter generates a complete Market Functionality Index (MFI) ass
 st.subheader("When to use it")
 st.markdown(
     """
-Use this tool **after** your raw MFI data has been processed by Databridges. Upload the final processed CSV and use the optional overrides only when the file metadata is incomplete.
+Use this tool **after** your raw MFI data has been processed by DataBridges. Upload the final processed CSV with valid `Adm0Name`, `StartDate`, and `EndDate` metadata. If required metadata is missing or invalid, the application will ask you to correct the CSV before generating a report.
     """
 )
 
@@ -240,9 +240,9 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-1. **Upload the processed MFI CSV**.
-2. **Add optional country/date overrides** only if the file metadata is missing or incorrect.
-3. **Click "Run"** to generate the MFI report.
+1. **Upload the final processed MFI CSV.**
+2. **Confirm the file contains valid country and collection-date metadata.** Missing or invalid fields are listed in a pop-up before generation starts.
+3. **Click "Generate report"** to create the MFI report.
         """
     )
 with right:
@@ -251,6 +251,6 @@ with right:
 st.subheader("Output")
 st.markdown(
     """
-The agent takes approximately **20 minutes** to complete. Once finished, the generated report will appear in the output window below the form. Click **"Export"** to generate and download the report as a **.docx** file.
+The agent takes approximately **20 minutes** to complete. When it is ready, use the large **Download report (.docx)** button first. To read it without downloading, click **View report on this page** underneath. The report preview stays closed until requested.
     """
 )

@@ -203,8 +203,6 @@ async def generate_market_monitor(input_data: GenerateReportInput):
                 else input_data.effective_primary_basket_version_id
             ),
             basket_selection=basket_selection,
-            news_start_date=input_data.news_start_date,
-            news_end_date=input_data.news_end_date,
             previous_report_text=input_data.previous_report_text,
             use_mock_data=input_data.use_mock_data,
             language=input_data.language,
@@ -459,8 +457,6 @@ async def generate_market_monitor_async(
                     else input_data.effective_primary_basket_version_id
                 ),
                 basket_selection=run_basket_selection,
-                news_start_date=input_data.news_start_date,
-                news_end_date=input_data.news_end_date,
                 previous_report_text=input_data.previous_report_text,
                 use_mock_data=input_data.use_mock_data,
                 language=input_data.language,
