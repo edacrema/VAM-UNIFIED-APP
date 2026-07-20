@@ -1,6 +1,9 @@
 import base64
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -373,6 +376,38 @@ def quote_path_param(value: Any) -> str:
     return quote(str(value), safe="")
 
 
+_DISPATCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_DISPATCH_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_dispatch_executor() -> ThreadPoolExecutor:
+    global _DISPATCH_EXECUTOR
+    if _DISPATCH_EXECUTOR is None:
+        with _DISPATCH_EXECUTOR_LOCK:
+            if _DISPATCH_EXECUTOR is None:
+                _DISPATCH_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=8, thread_name_prefix="dispatch-deadline"
+                )
+    return _DISPATCH_EXECUTOR
+
+
+def _dispatch_with_deadline(method: str, path: str, *, timeout: float, **kwargs: Any) -> Any:
+    # A timed-out dispatch keeps running in its worker thread until it finishes
+    # (bounded pool; DB-level timeouts make hung calls die within tens of
+    # seconds), but the UI gets a visible error instead of an eternal spinner.
+    future = _get_dispatch_executor().submit(
+        lambda: dispatch_request(method, path, **kwargs)
+    )
+    try:
+        return future.result(timeout=timeout)
+    except _FutureTimeoutError:
+        future.cancel()
+        raise RuntimeError(
+            f"{method} {path} timed out after {timeout}s waiting for the local backend; "
+            "the database connection may be unavailable. Retry or reload the page."
+        ) from None
+
+
 def request_json(
     method: str,
     path: str,
@@ -383,7 +418,15 @@ def request_json(
     files: Optional[dict] = None,
     timeout: int = 60,
 ) -> Any:
-    resp = dispatch_request(method, path, params=params, json_body=json_body, data=data, files=files)
+    resp = _dispatch_with_deadline(
+        method,
+        path,
+        timeout=timeout,
+        params=params,
+        json_body=json_body,
+        data=data,
+        files=files,
+    )
     if resp.status_code >= 400:
         try:
             detail = resp.json()
@@ -401,7 +444,7 @@ def request_json(
 
 
 def request_bytes(method: str, path: str, *, json_body: Any = None, timeout: int = 120) -> bytes:
-    resp = dispatch_request(method, path, json_body=json_body)
+    resp = _dispatch_with_deadline(method, path, timeout=timeout, json_body=json_body)
     if resp.status_code >= 400:
         try:
             detail = resp.json()

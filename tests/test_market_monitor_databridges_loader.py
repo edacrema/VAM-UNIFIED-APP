@@ -908,6 +908,22 @@ def test_country_metadata_derives_commodity_units_from_price_rows(monkeypatch, t
     assert maize["unit_id"] == 100
 
 
+def test_country_metadata_skips_price_row_unit_scan_when_units_present(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _seed_loader_cache(repo)
+    _patch_repo(monkeypatch, repo)
+
+    def _unexpected_unit_query(*_args, **_kwargs):
+        raise AssertionError("price-row unit query must not run when commodity units are present")
+
+    monkeypatch.setattr(repo, "get_commodity_price_units", _unexpected_unit_query)
+    monkeypatch.setattr(repo, "get_price_window", _unexpected_unit_query)
+
+    metadata = data_loader.get_country_metadata("South Sudan")
+
+    assert all(item["unit"] == "kg" for item in metadata["commodities"])
+
+
 def test_reportable_months_ignore_forecast_only_latest_month(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
     version_id = _seed_loader_cache(repo)

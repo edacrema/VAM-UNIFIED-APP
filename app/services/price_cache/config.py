@@ -27,6 +27,12 @@ class PriceCacheConfig:
     refresh_max_workers: int
     pool_recycle_seconds: int
     pool_timeout_seconds: int
+    connect_timeout_seconds: int
+    tcp_keepalives_idle_seconds: int
+    tcp_keepalives_interval_seconds: int
+    tcp_keepalives_count: int
+    tcp_user_timeout_ms: int
+    statement_timeout_ms: int
 
 
 def load_price_cache_config(
@@ -65,12 +71,42 @@ def load_price_cache_config(
         refresh_max_workers=_int_or_default(values.get("PRICE_CACHE_REFRESH_MAX_WORKERS"), 5, minimum=1),
         pool_recycle_seconds=_int_or_default(
             values.get("PRICE_CACHE_POOL_RECYCLE_SECONDS"),
-            1800,
+            240,
             minimum=1,
         ),
         pool_timeout_seconds=_int_or_default(
             values.get("PRICE_CACHE_POOL_TIMEOUT_SECONDS"),
             30,
+            minimum=1,
+        ),
+        connect_timeout_seconds=_int_or_default(
+            values.get("PRICE_CACHE_CONNECT_TIMEOUT_SECONDS"),
+            10,
+            minimum=1,
+        ),
+        tcp_keepalives_idle_seconds=_int_or_default(
+            values.get("PRICE_CACHE_TCP_KEEPALIVES_IDLE_SECONDS"),
+            30,
+            minimum=1,
+        ),
+        tcp_keepalives_interval_seconds=_int_or_default(
+            values.get("PRICE_CACHE_TCP_KEEPALIVES_INTERVAL_SECONDS"),
+            10,
+            minimum=1,
+        ),
+        tcp_keepalives_count=_int_or_default(
+            values.get("PRICE_CACHE_TCP_KEEPALIVES_COUNT"),
+            3,
+            minimum=1,
+        ),
+        tcp_user_timeout_ms=_int_or_default(
+            values.get("PRICE_CACHE_TCP_USER_TIMEOUT_MS"),
+            30000,
+            minimum=1,
+        ),
+        statement_timeout_ms=_int_or_default(
+            values.get("PRICE_CACHE_STATEMENT_TIMEOUT_MS"),
+            120000,
             minimum=1,
         ),
     )

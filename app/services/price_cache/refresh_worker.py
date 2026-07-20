@@ -399,7 +399,9 @@ class PriceCacheRefreshWorker:
 
 def build_worker() -> PriceCacheRefreshWorker:
     config = load_price_cache_config()
-    engine = create_price_cache_engine(config)
+    # The worker's bulk snapshot writes legitimately run longer than the app's
+    # statement_timeout cap, so its engine opts out of it.
+    engine = create_price_cache_engine(config, apply_statement_timeout=False)
     apply_migrations(engine, config.backend)
     repository = SqlPriceCacheRepository(engine)
     adapter = DataBridgesClientAdapter()

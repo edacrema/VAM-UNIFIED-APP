@@ -412,7 +412,16 @@ def get_country_metadata(country: str) -> Dict[str, Any]:
     raw_commodities = list(cache_metadata.commodities)
     priced_commodities = [item for item in raw_commodities if int(item.commodity_id) in priced_ids]
     unpriced_commodities = [item for item in raw_commodities if int(item.commodity_id) not in priced_ids]
-    price_row_units = _price_row_units_by_commodity(repo, iso3, availability)
+    missing_unit_ids = [
+        int(item.commodity_id)
+        for item in raw_commodities
+        if item.commodity_unit_id is None or not str(item.commodity_unit_name or "").strip()
+    ]
+    price_row_units = (
+        _price_row_units_by_commodity(repo, iso3, availability, commodity_ids=missing_unit_ids)
+        if missing_unit_ids
+        else {}
+    )
 
     def commodity_payload(item: Any, *, priced: bool) -> dict[str, Any]:
         return {
@@ -4870,7 +4879,18 @@ def _price_row_units_by_commodity(
     repo: PriceCacheRepository,
     iso3: str,
     availability: Any,
+    *,
+    commodity_ids: Optional[Sequence[int]] = None,
 ) -> dict[int, dict[str, Any]]:
+    if hasattr(repo, "get_commodity_price_units"):
+        return {
+            commodity_id: {"unit_id": unit_id, "unit": unit_name}
+            for commodity_id, (unit_id, unit_name) in repo.get_commodity_price_units(
+                iso3, commodity_ids=commodity_ids
+            ).items()
+            if unit_name
+        }
+    # Legacy full-window scan kept for fake repositories without the aggregate.
     if not hasattr(repo, "get_price_window"):
         return {}
     start = _date_wire(getattr(availability, "date_start", None))

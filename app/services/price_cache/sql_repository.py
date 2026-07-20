@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine, text
@@ -30,7 +30,31 @@ from .schemas import (
 MappingLike = Mapping[str, Any]
 
 
-def create_price_cache_engine(config: PriceCacheConfig) -> Engine:
+def _merge_libpq_options(database_url: str, extra: str) -> str:
+    """Append libpq options to any already present in the URL query string.
+
+    SQLAlchemy overrides URL-derived connect kwargs with ``connect_args``, so a
+    bare ``options`` entry would silently drop e.g. ``options=-csearch_path=...``
+    carried by the configured URL.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+
+        existing = make_url(database_url).query.get("options")
+    except Exception:
+        existing = None
+    if isinstance(existing, (tuple, list)):
+        existing = existing[0] if existing else None
+    if existing:
+        return f"{existing} {extra}"
+    return extra
+
+
+def create_price_cache_engine(
+    config: PriceCacheConfig,
+    *,
+    apply_statement_timeout: bool = True,
+) -> Engine:
     if config.backend == SQLITE_BACKEND:
         sqlite_path = config.sqlite_path
         if not sqlite_path.is_absolute():
@@ -40,14 +64,37 @@ def create_price_cache_engine(config: PriceCacheConfig) -> Engine:
     if config.backend == POSTGRES_BACKEND:
         if not config.database_url:
             raise ValueError("PRICE_CACHE_DATABASE_URL is required for the postgres price cache backend.")
+        # Cloud Run silently drops idle TCP flows to Cloud SQL; without these
+        # libpq settings a checked-out dead socket blocks on TCP retransmission
+        # for 15+ minutes instead of failing fast for retry_disconnected_read.
+        connect_args: Dict[str, Any] = {
+            "connect_timeout": config.connect_timeout_seconds,
+            "keepalives": 1,
+            "keepalives_idle": config.tcp_keepalives_idle_seconds,
+            "keepalives_interval": config.tcp_keepalives_interval_seconds,
+            "keepalives_count": config.tcp_keepalives_count,
+            "tcp_user_timeout": config.tcp_user_timeout_ms,
+        }
+        if apply_statement_timeout:
+            connect_args["options"] = _merge_libpq_options(
+                config.database_url,
+                f"-c statement_timeout={config.statement_timeout_ms}",
+            )
         return create_engine(
             config.database_url,
             future=True,
             pool_pre_ping=True,
             pool_recycle=config.pool_recycle_seconds,
             pool_timeout=config.pool_timeout_seconds,
+            connect_args=connect_args,
         )
     raise ValueError(f"Unsupported price cache backend {config.backend!r}.")
+
+
+def _disable_statement_timeout_for_transaction(conn: Any) -> None:
+    """Lift the session statement_timeout for one known-long write transaction."""
+    if conn.dialect.name == "postgresql":
+        conn.execute(text("SET LOCAL statement_timeout = 0"))
 
 
 class SqlPriceCacheRepository:
@@ -428,6 +475,65 @@ class SqlPriceCacheRepository:
             rows = conn.execute(text(query), params).mappings().all()
         return [_monthly_price_from_row(row) for row in rows]
 
+    @retry_disconnected_read
+    def get_commodity_price_units(
+        self,
+        country_iso3: str,
+        *,
+        commodity_ids: Optional[Sequence[int]] = None,
+    ) -> Dict[int, Tuple[Optional[int], str]]:
+        """Return one (unit_id, unit_name) per commodity derived from price rows.
+
+        Aggregates in SQL so callers never materialize the country's full price
+        history just to recover unit metadata.
+        """
+        active_version_id = self.get_active_version_id_for_country(country_iso3)
+        if active_version_id is None:
+            return {}
+
+        clauses = [
+            "cache_version_id = :cache_version_id",
+            "country_iso3 = :country_iso3",
+            "commodity_unit_name IS NOT NULL",
+            "commodity_unit_name <> ''",
+        ]
+        params: Dict[str, Any] = {
+            "cache_version_id": active_version_id,
+            "country_iso3": country_iso3.upper(),
+        }
+        _add_in_clause(clauses, params, "commodity_id", commodity_ids, "commodity_id")
+        query = f"""
+            SELECT commodity_id, commodity_unit_id, commodity_unit_name
+            FROM cached_price_monthly
+            WHERE {' AND '.join(clauses)}
+            GROUP BY commodity_id, commodity_unit_id, commodity_unit_name
+        """
+        with self.engine.begin() as conn:
+            rows = conn.execute(text(query), params).mappings().all()
+
+        # Deterministic pick per commodity, sorted in Python because NULL
+        # ordering differs between sqlite and postgres.
+        units: Dict[int, Tuple[Optional[int], str]] = {}
+        def _sort_key(row: Mapping[str, Any]) -> Tuple[int, str, int, Any]:
+            unit_id = row.get("commodity_unit_id")
+            return (
+                int(row["commodity_id"]),
+                str(row["commodity_unit_name"]),
+                1 if unit_id is None else 0,
+                unit_id if unit_id is not None else 0,
+            )
+
+        for row in sorted(rows, key=_sort_key):
+            commodity_id = int(row["commodity_id"])
+            if commodity_id in units:
+                continue
+            unit_id = row.get("commodity_unit_id")
+            units[commodity_id] = (
+                int(unit_id) if unit_id is not None else None,
+                str(row["commodity_unit_name"]),
+            )
+        return units
+
     def copy_country_snapshot(
         self,
         *,
@@ -442,6 +548,7 @@ class SqlPriceCacheRepository:
             "country_iso3": country,
         }
         with self.engine.begin() as conn:
+            _disable_statement_timeout_for_transaction(conn)
             for table in ("cached_price_monthly", "cached_markets", "cached_commodities", "cached_countries"):
                 conn.execute(
                     text(
@@ -683,6 +790,7 @@ class SqlPriceCacheRepository:
             if row.get("market_id") not in (None, "")
         ]
         with self.engine.begin() as conn:
+            _disable_statement_timeout_for_transaction(conn)
             if commodity_rows:
                 _delete_by_ids(
                     conn,
@@ -774,6 +882,7 @@ class SqlPriceCacheRepository:
         if not insert_rows:
             return 0
         with self.engine.begin() as conn:
+            _disable_statement_timeout_for_transaction(conn)
             conn.execute(
                 text(
                     """

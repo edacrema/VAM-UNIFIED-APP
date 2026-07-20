@@ -61,13 +61,31 @@ def test_pool_configuration_defaults_and_overrides() -> None:
             "PRICE_CACHE_BACKEND": "sqlite",
             "PRICE_CACHE_POOL_RECYCLE_SECONDS": "900",
             "PRICE_CACHE_POOL_TIMEOUT_SECONDS": "12",
+            "PRICE_CACHE_CONNECT_TIMEOUT_SECONDS": "7",
+            "PRICE_CACHE_TCP_KEEPALIVES_IDLE_SECONDS": "21",
+            "PRICE_CACHE_TCP_KEEPALIVES_INTERVAL_SECONDS": "6",
+            "PRICE_CACHE_TCP_KEEPALIVES_COUNT": "5",
+            "PRICE_CACHE_TCP_USER_TIMEOUT_MS": "15000",
+            "PRICE_CACHE_STATEMENT_TIMEOUT_MS": "45000",
         }
     )
 
-    assert default_config.pool_recycle_seconds == 1800
+    assert default_config.pool_recycle_seconds == 240
     assert default_config.pool_timeout_seconds == 30
+    assert default_config.connect_timeout_seconds == 10
+    assert default_config.tcp_keepalives_idle_seconds == 30
+    assert default_config.tcp_keepalives_interval_seconds == 10
+    assert default_config.tcp_keepalives_count == 3
+    assert default_config.tcp_user_timeout_ms == 30000
+    assert default_config.statement_timeout_ms == 120000
     assert override_config.pool_recycle_seconds == 900
     assert override_config.pool_timeout_seconds == 12
+    assert override_config.connect_timeout_seconds == 7
+    assert override_config.tcp_keepalives_idle_seconds == 21
+    assert override_config.tcp_keepalives_interval_seconds == 6
+    assert override_config.tcp_keepalives_count == 5
+    assert override_config.tcp_user_timeout_ms == 15000
+    assert override_config.statement_timeout_ms == 45000
 
 
 @pytest.mark.parametrize(
@@ -77,6 +95,14 @@ def test_pool_configuration_defaults_and_overrides() -> None:
         ("PRICE_CACHE_POOL_TIMEOUT_SECONDS", "0"),
         ("PRICE_CACHE_POOL_RECYCLE_SECONDS", "not-an-integer"),
         ("PRICE_CACHE_POOL_TIMEOUT_SECONDS", "not-an-integer"),
+        ("PRICE_CACHE_CONNECT_TIMEOUT_SECONDS", "0"),
+        ("PRICE_CACHE_CONNECT_TIMEOUT_SECONDS", "not-an-integer"),
+        ("PRICE_CACHE_TCP_KEEPALIVES_IDLE_SECONDS", "0"),
+        ("PRICE_CACHE_TCP_KEEPALIVES_INTERVAL_SECONDS", "0"),
+        ("PRICE_CACHE_TCP_KEEPALIVES_COUNT", "0"),
+        ("PRICE_CACHE_TCP_USER_TIMEOUT_MS", "0"),
+        ("PRICE_CACHE_STATEMENT_TIMEOUT_MS", "0"),
+        ("PRICE_CACHE_STATEMENT_TIMEOUT_MS", "not-an-integer"),
     ],
 )
 def test_pool_configuration_rejects_invalid_values(name: str, value: str) -> None:
@@ -118,8 +144,109 @@ def test_postgres_engine_receives_resilience_pool_arguments(monkeypatch) -> None
             "pool_pre_ping": True,
             "pool_recycle": 901,
             "pool_timeout": 13,
+            "connect_args": {
+                "connect_timeout": 10,
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 3,
+                "tcp_user_timeout": 30000,
+                "options": "-c statement_timeout=120000",
+            },
         },
     }
+
+
+def test_worker_engine_skips_statement_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_engine(url: str, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(sql_repository, "create_engine", fake_create_engine)
+    config = load_price_cache_config(
+        {
+            "PRICE_CACHE_BACKEND": "postgres",
+            "PRICE_CACHE_DATABASE_URL": "postgresql://example.invalid/cache",
+        }
+    )
+
+    create_price_cache_engine(config, apply_statement_timeout=False)
+
+    connect_args = captured["kwargs"]["connect_args"]
+    assert "options" not in connect_args
+    assert connect_args["keepalives"] == 1
+    assert connect_args["connect_timeout"] == 10
+    assert connect_args["tcp_user_timeout"] == 30000
+
+
+def test_statement_timeout_merges_with_url_options(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_engine(url: str, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(sql_repository, "create_engine", fake_create_engine)
+    config = load_price_cache_config(
+        {
+            "PRICE_CACHE_BACKEND": "postgres",
+            "PRICE_CACHE_DATABASE_URL": (
+                "postgresql://example.invalid/cache?options=-csearch_path%3Dfoo"
+            ),
+        }
+    )
+
+    create_price_cache_engine(config)
+
+    connect_args = captured["kwargs"]["connect_args"]
+    assert connect_args["options"] == "-csearch_path=foo -c statement_timeout=120000"
+
+
+def test_disable_statement_timeout_helper_targets_postgres_only() -> None:
+    from types import SimpleNamespace
+
+    executed: list[str] = []
+    postgres_conn = SimpleNamespace(
+        dialect=SimpleNamespace(name="postgresql"),
+        execute=lambda clause: executed.append(str(clause)),
+    )
+    sqlite_conn = SimpleNamespace(
+        dialect=SimpleNamespace(name="sqlite"),
+        execute=lambda clause: executed.append("unexpected"),
+    )
+
+    sql_repository._disable_statement_timeout_for_transaction(postgres_conn)
+    sql_repository._disable_statement_timeout_for_transaction(sqlite_conn)
+
+    assert executed == ["SET LOCAL statement_timeout = 0"]
+
+
+def test_sqlite_copy_country_snapshot_emits_no_set_local(tmp_path: Path) -> None:
+    repository = _sqlite_repository(tmp_path)
+    statements: list[str] = []
+
+    def record_statement(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(" ".join(str(statement).split()))
+
+    event.listen(repository.engine, "before_cursor_execute", record_statement)
+
+    repository.copy_country_snapshot(
+        source_cache_version_id=repository.get_active_version_id() or "",
+        target_cache_version_id=str(uuid.uuid4()),
+        country_iso3="SSD",
+    )
+
+    assert statements
+    assert not any("SET LOCAL" in statement for statement in statements)
 
 
 def test_sqlite_engine_arguments_are_unchanged(monkeypatch, tmp_path: Path) -> None:
@@ -398,6 +525,7 @@ def test_read_methods_are_protected_and_mutations_are_not() -> None:
         "get_country_metadata",
         "get_country_availability",
         "get_price_window",
+        "get_commodity_price_units",
         "get_country_price_keys",
         "count_country_price_rows",
         "count_active_country_price_rows",

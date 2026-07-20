@@ -677,3 +677,50 @@ def test_publish_cache_version_is_atomic_when_final_update_fails(tmp_path):
     assert repo.get_active_version_id() == old_version
     assert repo.get_active_version_id_for_country("SSD") == old_version
     assert repo.get_cache_refresh(new_version).status == "building"
+
+
+def test_get_commodity_price_units_aggregates_per_commodity(tmp_path):
+    repo = _repo(tmp_path)
+    seed_cache_snapshot(repo)
+
+    units = repo.get_commodity_price_units("SSD")
+
+    assert units == {1: (100, "kg"), 2: (100, "kg")}
+
+
+def test_get_commodity_price_units_narrows_to_requested_ids(tmp_path):
+    repo = _repo(tmp_path)
+    seed_cache_snapshot(repo)
+
+    units = repo.get_commodity_price_units("SSD", commodity_ids=[1])
+
+    assert units == {1: (100, "kg")}
+
+
+def test_get_commodity_price_units_skips_blank_unit_rows(tmp_path):
+    repo = _repo(tmp_path)
+    cache_version_id = seed_cache_snapshot(repo)
+    with repo.engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE cached_price_monthly
+                SET commodity_unit_name = '',
+                    commodity_unit_id = NULL
+                WHERE cache_version_id = :cache_version_id
+                  AND commodity_id = 2
+                """
+            ),
+            {"cache_version_id": cache_version_id},
+        )
+
+    units = repo.get_commodity_price_units("SSD")
+
+    assert units == {1: (100, "kg")}
+
+
+def test_get_commodity_price_units_returns_empty_for_unknown_country(tmp_path):
+    repo = _repo(tmp_path)
+    seed_cache_snapshot(repo)
+
+    assert repo.get_commodity_price_units("XXX") == {}
