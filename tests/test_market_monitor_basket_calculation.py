@@ -211,7 +211,7 @@ def test_selected_region_scope_requires_run_overlap():
         )
 
 
-def test_configured_unit_id_is_strict_and_legacy_item_can_fallback_to_unit_name():
+def test_unit_id_mismatch_falls_back_to_unit_name_and_warns():
     frame = _price_frame(months=("2025-02",))
     frame["Unit ID"] = None
     configured = _spec("primary")
@@ -238,11 +238,61 @@ def test_configured_unit_id_is_strict_and_legacy_item_can_fallback_to_unit_name(
 
     configured_row = result.national[result.national["BasketRole"] == "primary"].iloc[0]
     legacy_row = result.national[result.national["BasketRole"] == "secondary"].iloc[0]
-    assert not bool(configured_row["Complete"])
-    assert pd.isna(configured_row["Cost"])
+    # Unit-id match finds nothing, but the unit-name fallback still narrows to
+    # the "kg" rows, so the month stays complete and the "bag" poison row stays
+    # out of the cost.
+    assert bool(configured_row["Complete"])
+    assert configured_row["Cost"] == 15.0
     assert bool(legacy_row["Complete"])
     assert legacy_row["Cost"] == 15.0
+    assert any("do not match the configured unit" in warning for warning in result.warnings)
     assert any("legacy component unit metadata" in warning for warning in result.warnings)
+
+
+def test_unusable_unit_metadata_never_blocks_completeness():
+    """Production regression: refreshed price rows carrying no usable unit
+    metadata must not zero out reportable months (pre-second-basket semantics:
+    any price for the commodity in the month keeps it complete)."""
+    frame = _price_frame(months=("2025-02",))
+    frame["Unit ID"] = None
+    frame["Unit"] = ""
+    configured = _spec("primary")
+    months = pd.DatetimeIndex([pd.Timestamp("2025-02-01")])
+
+    result = calculate_basket_series(
+        frame,
+        [configured],
+        full_date_index=months,
+        run_regions=[],
+        available_regions=["Region A", "Region B"],
+    )
+
+    row = result.national[result.national["BasketRole"] == "primary"].iloc[0]
+    assert bool(row["Complete"])
+    assert row["Cost"] is not None and not pd.isna(row["Cost"])
+    summary = result.summaries["primary"]
+    assert summary.loc[summary["Complete"].astype(bool), "Date"].tolist() == [pd.Timestamp("2025-02-01")]
+    assert any("do not match the configured unit" in warning for warning in result.warnings)
+
+
+def test_matching_unit_rows_are_still_preferred_for_costs():
+    frame = _price_frame(months=("2025-02",))
+    configured = _spec("primary")
+    months = pd.DatetimeIndex([pd.Timestamp("2025-02-01")])
+
+    result = calculate_basket_series(
+        frame,
+        [configured],
+        full_date_index=months,
+        run_regions=[],
+        available_regions=["Region A", "Region B"],
+    )
+
+    row = result.national[result.national["BasketRole"] == "primary"].iloc[0]
+    # Unit-100 rows exist, so the 999/"bag" rows must stay excluded from the mean.
+    assert bool(row["Complete"])
+    assert row["Cost"] == 15.0
+    assert not any("do not match the configured unit" in warning for warning in result.warnings)
 
 
 def test_secondary_only_components_do_not_drive_optional_module_ordering():

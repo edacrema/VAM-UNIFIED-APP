@@ -235,6 +235,7 @@ def calculate_basket_series(
                 f"{spec.role.title()} basket {spec.name!r} contains legacy component unit metadata; "
                 "unit-name or commodity-level matching was used where necessary."
             )
+        warnings.extend(_unit_drift_warnings(working, spec))
 
         if spec.scope_type == "national":
             for date in full_date_index:
@@ -594,6 +595,32 @@ def _prepare_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def _unit_drift_warnings(frame: pd.DataFrame, spec: BasketCalculationSpec) -> list[str]:
+    """Report components whose cached price rows never match the configured unit.
+
+    The unit filter in _component_rows silently falls back to unit-agnostic
+    matching in that case; this keeps the drift visible to operators.
+    """
+    if frame.empty:
+        return []
+    warnings: list[str] = []
+    commodity_ids = pd.to_numeric(frame["Commodity ID"], errors="coerce")
+    unit_ids = pd.to_numeric(frame["Unit ID"], errors="coerce")
+    for item in spec.items:
+        if item.unit_id is None:
+            continue
+        commodity_mask = commodity_ids == item.commodity_id
+        if not bool(commodity_mask.any()):
+            continue
+        if not bool((unit_ids[commodity_mask] == item.unit_id).any()):
+            warnings.append(
+                f"{spec.role.title()} basket {spec.name!r}: cached prices for "
+                f"{item.commodity_name} do not match the configured unit "
+                f"(id {item.unit_id}); unit-agnostic matching was used."
+            )
+    return warnings
+
+
 def _component_rows(frame: pd.DataFrame, item: BasketCalculationItem, date: pd.Timestamp, region: Optional[str]) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -603,8 +630,15 @@ def _component_rows(frame: pd.DataFrame, item: BasketCalculationItem, date: pd.T
     ]
     if region is not None:
         rows = rows[rows["Admin 1"].astype(str).str.casefold() == str(region).casefold()]
+    # Unit matching narrows to unit-consistent rows but never empties the
+    # selection: completeness must depend only on a price existing for the
+    # commodity/month/region, matching the pre-second-basket semantics.
     if item.unit_id is not None:
-        rows = rows[pd.to_numeric(rows["Unit ID"], errors="coerce") == item.unit_id]
+        matching = rows[pd.to_numeric(rows["Unit ID"], errors="coerce") == item.unit_id]
+        if matching.empty and item.unit_name:
+            matching = rows[rows["Unit"].astype(str).str.strip().str.casefold() == item.unit_name.casefold()]
+        if not matching.empty:
+            rows = matching
     elif item.unit_name:
         matching = rows[rows["Unit"].astype(str).str.strip().str.casefold() == item.unit_name.casefold()]
         if not matching.empty:

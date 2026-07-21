@@ -638,6 +638,24 @@ if not active_primary:
 
 if active_primary and not time_period_options:
     st.warning("No reportable month is available. Try refreshing from DataBridges or check the basket data coverage.")
+    if isinstance(reportable_resp, dict):
+        for reportability_warning in reportable_resp.get("warnings") or []:
+            if str(reportability_warning).strip():
+                st.warning(str(reportability_warning))
+        missing_by_month = reportable_resp.get("missing_by_month")
+        if isinstance(missing_by_month, dict) and missing_by_month:
+            latest_missing_month = max(missing_by_month)
+            missing_names = [str(name) for name in missing_by_month.get(latest_missing_month) or []]
+            if missing_names:
+                shown_names = ", ".join(missing_names[:5])
+                if len(missing_names) > 5:
+                    shown_names += f" (+{len(missing_names) - 5} more)"
+                st.caption(f"Missing in {latest_missing_month}: {shown_names}")
+    else:
+        st.caption(
+            "Reportable-month details are unavailable because the data request failed or timed out. "
+            "Reload the page to retry."
+        )
     st.stop()
 
 with st.form("market_monitor_form"):
