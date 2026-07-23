@@ -523,6 +523,7 @@ reportability_selection = {
 
 reportable_resp = None
 reportable_cache_key = None
+reportable_fetch_error = None
 if active_primary:
     reportable_cache = st.session_state.setdefault("mm_country_reportable_months", {})
     reportable_cache_key = (
@@ -540,11 +541,12 @@ if active_primary:
                 "GET",
                 f"/market-monitor/countries/{quote_path_param(country)}/reportable-months",
                 params=reportability_selection,
-                timeout=30,
+                timeout=180,
             )
             reportable_cache[reportable_cache_key] = reportable_resp
-        except Exception:
+        except Exception as exc:
             reportable_resp = None
+            reportable_fetch_error = str(exc)
 
 if isinstance(reportable_resp, dict):
     raw_months = reportable_resp.get("reportable_months") or []
@@ -608,7 +610,7 @@ if refresh_clicked and active_primary:
             "GET",
             f"/market-monitor/countries/{quote_path_param(country)}/reportable-months",
             params=reportability_selection,
-            timeout=30,
+            timeout=180,
         )
         if isinstance(reportable_resp, dict):
             time_period_options = [
@@ -656,6 +658,8 @@ if active_primary and not time_period_options:
             "Reportable-month details are unavailable because the data request failed or timed out. "
             "Reload the page to retry."
         )
+        if reportable_fetch_error:
+            st.caption(f"Details: {reportable_fetch_error}")
     st.stop()
 
 with st.form("market_monitor_form"):
