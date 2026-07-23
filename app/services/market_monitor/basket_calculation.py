@@ -237,16 +237,17 @@ def calculate_basket_series(
             )
         warnings.extend(_unit_drift_warnings(working, spec))
 
+        mean_index = _ComponentMeanIndex(working, spec.items)
         if spec.scope_type == "national":
             for date in full_date_index:
-                national_rows.append(_series_row(working, spec, pd.Timestamp(date), region=None))
+                national_rows.append(_series_row(mean_index, spec, pd.Timestamp(date), region=None))
             for region in normalized_run_regions:
                 for date in full_date_index:
-                    regional_rows.append(_series_row(working, spec, pd.Timestamp(date), region=region))
+                    regional_rows.append(_series_row(mean_index, spec, pd.Timestamp(date), region=region))
         else:
             for region in spec_regions:
                 for date in full_date_index:
-                    regional_rows.append(_series_row(working, spec, pd.Timestamp(date), region=region))
+                    regional_rows.append(_series_row(mean_index, spec, pd.Timestamp(date), region=region))
 
         spec_national = [row for row in national_rows if row["BasketRole"] == spec.role]
         spec_regional = [row for row in regional_rows if row["BasketRole"] == spec.role]
@@ -391,17 +392,86 @@ def target_coverage_gaps(
     return gaps
 
 
+class _ComponentMeanIndex:
+    """Precomputed per-component monthly mean prices.
+
+    Replicates _component_rows semantics -- commodity/month(/region) filtering
+    with unit-id-then-unit-name preference that narrows but never empties --
+    via grouped aggregations, so building long series avoids scanning the full
+    price frame once per (component, month, region) cell.
+    """
+
+    def __init__(self, frame: pd.DataFrame, items: Sequence[BasketCalculationItem]) -> None:
+        self._national: list[dict[Any, Optional[float]]] = [{} for _ in items]
+        self._regional: list[dict[Any, Optional[float]]] = [{} for _ in items]
+        if frame is None or frame.empty or not items:
+            return
+        commodity_ids = pd.to_numeric(frame["Commodity ID"], errors="coerce")
+        unit_ids = pd.to_numeric(frame["Unit ID"], errors="coerce")
+        unit_names = frame["Unit"].astype(str).str.strip().str.casefold()
+        base = pd.DataFrame(
+            {
+                "month": frame["Price Date"],
+                "region_cf": frame["Admin 1"].astype(str).str.casefold(),
+                "price": frame["Price"],
+            }
+        )
+        for item_index, item in enumerate(items):
+            item_mask = commodity_ids == item.commodity_id
+            if not bool(item_mask.any()):
+                continue
+            tier_masks: list[pd.Series] = []
+            if item.unit_id is not None:
+                tier_masks.append(item_mask & (unit_ids == item.unit_id))
+            if item.unit_name:
+                tier_masks.append(item_mask & (unit_names == item.unit_name.casefold()))
+            tier_masks.append(item_mask)
+            self._national[item_index] = _first_tier_means(base, tier_masks, ["month"])
+            self._regional[item_index] = _first_tier_means(base, tier_masks, ["region_cf", "month"])
+
+    def mean_price(self, item_index: int, month: pd.Timestamp, region: Optional[str]) -> Optional[float]:
+        if region is None:
+            return self._national[item_index].get(month)
+        return self._regional[item_index].get((str(region).casefold(), month))
+
+
+def _first_tier_means(
+    base: pd.DataFrame,
+    tier_masks: Sequence[pd.Series],
+    keys: list[str],
+) -> dict[Any, Optional[float]]:
+    """Mean price per group taken from the first tier with rows for that group.
+
+    A group key claimed by an earlier tier is never overwritten: rows exist in
+    that tier for the cell, so later tiers must not contribute -- mirroring the
+    narrowing (not emptying) unit preference of _component_rows. A tier group
+    whose prices are all NaN still claims its key with None.
+    """
+    means: dict[Any, Optional[float]] = {}
+    for mask in tier_masks:
+        subset = base[mask]
+        if subset.empty:
+            continue
+        grouped = subset.groupby(keys, sort=False)["price"].mean()
+        for key, value in grouped.items():
+            if key in means:
+                continue
+            means[key] = float(value) if pd.notna(value) else None
+    return means
+
+
 def _series_row(
-    frame: pd.DataFrame,
+    mean_index: _ComponentMeanIndex,
     spec: BasketCalculationSpec,
     date: pd.Timestamp,
     *,
     region: Optional[str],
 ) -> dict[str, Any]:
+    month_key = pd.Timestamp(date).to_period("M").to_timestamp()
     contributions: list[Optional[float]] = []
     missing: list[str] = []
-    for item in spec.items:
-        mean_price = _component_mean_price(frame, item, date, region)
+    for item_index, item in enumerate(spec.items):
+        mean_price = mean_index.mean_price(item_index, month_key, region)
         if mean_price is None:
             contributions.append(None)
             missing.append(item.commodity_name)
@@ -413,7 +483,7 @@ def _series_row(
         region if region is not None else "Average across selected regions"
     )
     return {
-        "Date": pd.Timestamp(date).to_period("M").to_timestamp(),
+        "Date": month_key,
         "BasketRole": spec.role,
         "BasketVersionId": spec.basket_version_id,
         "BasketName": spec.name,

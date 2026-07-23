@@ -311,6 +311,144 @@ def test_secondary_only_components_do_not_drive_optional_module_ordering():
     ) == ["Maize", "Salt"]
 
 
+def test_vectorized_series_matches_per_cell_reference():
+    """The grouped-aggregation index must reproduce _component_mean_price
+    cell-by-cell across unit preference, name fallback, unit-agnostic
+    fallback, NaN prices, and missing months/regions."""
+    import numpy as np
+
+    from app.services.market_monitor import basket_calculation as bc
+
+    def _row(cid, name, month, region, price, unit_id, unit):
+        return {
+            "Commodity ID": cid,
+            "Commodity": name,
+            "Price Date": pd.Timestamp(f"{month}-01"),
+            "Price": price,
+            "Admin 1": region,
+            "Unit ID": unit_id,
+            "Unit": unit,
+        }
+
+    rows = []
+    for month in ("2025-01", "2025-02", "2025-03"):
+        rows.append(_row(1, "Maize", month, "Region A", 10, 100, "kg"))
+        if month != "2025-03":
+            rows.append(_row(1, "Maize", month, "Region B", 20, 100, "kg"))
+        rows.append(_row(1, "Maize", month, "Region A", 999, 999, "bag"))
+        rows.append(_row(1, "Maize", month, "Region B", 999, 999, "bag"))
+        if month != "2025-02":
+            rows.append(_row(2, "Beans", month, "Region A", 7, None, ""))
+            rows.append(_row(2, "Beans", month, "Region B", 7, None, ""))
+    rows.append(_row(3, "Oil", "2025-01", "Region A", 55, 77, "KG "))
+    rows.append(_row(3, "Oil", "2025-01", "Region A", 500, 88, "bag"))
+    rows.append(_row(3, "Oil", "2025-02", "Region A", 500, 88, "bag"))
+    rows.append(_row(4, "Salt", "2025-01", "Region A", np.nan, 100, "kg"))
+    rows.append(_row(4, "Salt", "2025-01", "Region A", 3, 999, "bag"))
+    frame = pd.DataFrame(rows)
+
+    primary = _spec(
+        "primary",
+        items=[
+            {"commodity_id": 1, "commodity_name": "Maize", "databridges_unit_id": 100, "databridges_unit": "kg", "weight_quantity": 2},
+            {"commodity_id": 2, "commodity_name": "Beans", "databridges_unit_id": 5, "databridges_unit": "lt", "weight_quantity": 1},
+            {"commodity_id": 3, "commodity_name": "Oil", "databridges_unit": "kg", "weight_quantity": 1},
+            {"commodity_id": 4, "commodity_name": "Salt", "databridges_unit_id": 100, "databridges_unit": "kg", "weight_quantity": 1},
+        ],
+    )
+    secondary = _spec(
+        "secondary",
+        scope="selected_regions",
+        regions=["Region A", "Region B"],
+        items=[
+            {"commodity_id": 1, "commodity_name": "Maize", "databridges_unit_id": 100, "databridges_unit": "kg", "weight_quantity": 3},
+        ],
+    )
+    months = pd.DatetimeIndex([pd.Timestamp("2025-01-01"), pd.Timestamp("2025-02-01"), pd.Timestamp("2025-03-01")])
+
+    result = calculate_basket_series(
+        frame,
+        [primary, secondary],
+        full_date_index=months,
+        run_regions=["Region A", "Region B"],
+        available_regions=["Region A", "Region B"],
+    )
+
+    prepared = bc._prepare_price_frame(frame)
+    specs_by_role = {"primary": primary, "secondary": secondary}
+    checked = 0
+    for source in (result.national, result.regional):
+        for row in source.to_dict(orient="records"):
+            spec = specs_by_role[row["BasketRole"]]
+            region = row["Region"] if isinstance(row["Region"], str) else None
+            expected_missing = []
+            expected_contributions = []
+            for item in spec.items:
+                reference = bc._component_mean_price(prepared, item, pd.Timestamp(row["Date"]), region)
+                if reference is None:
+                    expected_missing.append(item.commodity_name)
+                else:
+                    expected_contributions.append(reference * item.quantity)
+            expected_complete = bool(spec.items) and not expected_missing
+            assert bool(row["Complete"]) == expected_complete, (row["BasketRole"], row["Date"], region)
+            assert list(row["MissingComponentNames"]) == expected_missing, (row["BasketRole"], row["Date"], region)
+            if expected_complete:
+                assert row["Cost"] == round(float(sum(expected_contributions)), 2), (row["BasketRole"], row["Date"], region)
+            else:
+                assert pd.isna(row["Cost"])
+            checked += 1
+    assert checked == (3 + 6) + 6  # 3 national + 6 regional (primary) + 6 regional (secondary)
+
+
+def test_large_series_completes_quickly():
+    """Bangladesh-scale frames must not take minutes (regression for the
+    per-cell quadratic scan that stalled the reportable-months endpoint)."""
+    import time
+
+    months = pd.date_range("2016-01-01", periods=120, freq="MS")
+    regions = [f"Region {chr(65 + i)}" for i in range(8)]
+    commodity_ids = list(range(1, 11))
+    rows = []
+    for cid in commodity_ids:
+        for region in regions:
+            for market in range(3):
+                for month in months:
+                    rows.append(
+                        {
+                            "Commodity ID": cid,
+                            "Commodity": f"Commodity {cid}",
+                            "Price Date": month,
+                            "Price": 10.0 + cid + market,
+                            "Admin 1": region,
+                            "Unit ID": 100,
+                            "Unit": "kg",
+                        }
+                    )
+    frame = pd.DataFrame(rows)
+    spec = _spec(
+        "primary",
+        items=[
+            {"commodity_id": cid, "commodity_name": f"Commodity {cid}", "databridges_unit_id": 100, "databridges_unit": "kg", "weight_quantity": 1}
+            for cid in commodity_ids
+        ],
+    )
+
+    started = time.monotonic()
+    result = calculate_basket_series(
+        frame,
+        [spec],
+        full_date_index=months,
+        run_regions=regions,
+        available_regions=regions,
+    )
+    elapsed = time.monotonic() - started
+
+    summary = result.summaries["primary"]
+    assert summary["Complete"].astype(bool).all()
+    assert len(summary) == len(months)
+    assert elapsed < 15, f"basket series took {elapsed:.1f}s for a 28.8k-row frame"
+
+
 def _monthly_row(commodity_id, name, month, region, price):
     return SimpleNamespace(
         price_flag="actual",
