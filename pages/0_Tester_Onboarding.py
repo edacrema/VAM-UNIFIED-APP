@@ -1,7 +1,7 @@
 import streamlit as st
 
 from streamlit_shared import (
-    BUG_REPORT_URL,
+    BUG_REPORT_MESSAGE,
     INSTRUCTIONS_PAGE_URL,
     apply_wfp_theme,
     render_bug_report_sidebar_link,
@@ -88,8 +88,6 @@ For questions about the testing process: **Myriam Nyamira — miriam.nyamira@wfp
 
 ## Bug Report Form
 
-When you encounter a problem, submit a report here:
-
-**[Bug Report Form]({BUG_REPORT_URL})**
+**{BUG_REPORT_MESSAGE}.**
 """
 )

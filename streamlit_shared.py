@@ -22,9 +22,7 @@ WFP_LIGHT = "#E6F1FA"
 WFP_BG = "#EEF4FA"
 WFP_TEXT = "#0C1E2E"
 INSTRUCTIONS_PAGE_URL = "https://vam-llm-marketaissist-977145147401.europe-west1.run.app/How_To_Use_The_Tools"
-BUG_REPORT_URL = (
-    "https://forms.office.com/Pages/ResponsePage.aspx?id=rtkqRtnXBkK4dHGx4Hl3b3uHHV05qUNErdnrYmKEQzNUNzhUMEFQOEZKNElTQk9XTFFLNjlSNjNEOS4u"
-)
+BUG_REPORT_MESSAGE = "The second testing phase is going to start soon"
 INSTRUCTIONS_PAGE_PATH = "pages/1_How_To_Use_The_Tools.py"
 ONBOARDING_PAGE_PATH = "pages/0_Tester_Onboarding.py"
 
@@ -352,22 +350,20 @@ def render_onboarding_sidebar_button(
 
 def render_bug_report_header_link(
     *,
-    label: str = "Report a bug",
-    url: str = BUG_REPORT_URL,
+    label: str = BUG_REPORT_MESSAGE,
 ) -> None:
     st.markdown(
-        f'<div style="text-align: right;"><a class="bug-report-button" href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></div>',
+        f'<div style="text-align: right;"><span class="bug-report-button">{label}</span></div>',
         unsafe_allow_html=True,
     )
 
 
 def render_bug_report_sidebar_link(
     *,
-    label: str = "Report a bug",
-    url: str = BUG_REPORT_URL,
+    label: str = BUG_REPORT_MESSAGE,
 ) -> None:
     st.markdown(
-        f'<a class="sidebar-bug-link" href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>',
+        f'<span class="sidebar-bug-link">{label}</span>',
         unsafe_allow_html=True,
     )
 
