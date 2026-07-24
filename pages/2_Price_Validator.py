@@ -1,5 +1,6 @@
 import streamlit as st
 
+from app.shared.countries import supported_country_options
 from streamlit_shared import (
     apply_wfp_theme,
     render_bug_report_header_link,
@@ -28,13 +29,23 @@ with bug_col:
     render_bug_report_header_link()
 
 with st.form("price_validator_async"):
+    country = st.selectbox(
+        "Country",
+        options=[option["name"] for option in supported_country_options()],
+        index=None,
+        placeholder="Select the country of the dataset",
+        help="The official market list for this country is fetched from DataBridges to validate market names.",
+        key="price_val_country_async",
+    )
     uploaded = st.file_uploader("Price Data (.xlsx)", type=["xlsx"], key="price_val_file_async")
     template = st.file_uploader("Template (.xlsx)", type=["xlsx"], key="price_val_template_async")
     submitted = st.form_submit_button("Validate")
 
 if submitted:
     try:
-        if uploaded is None or template is None:
+        if not country:
+            st.error("Please select the country of the dataset")
+        elif uploaded is None or template is None:
             st.error("Please upload both the dataset and template")
         else:
             files = {
@@ -55,6 +66,7 @@ if submitted:
                 start_path="/price-validator/validate-file-async",
                 status_path_template="/price-validator/status/{run_id}",
                 result_path_template="/price-validator/result/{run_id}",
+                start_data={"country": country},
                 start_files=files,
                 poll_interval_seconds=2.0,
                 timeout_seconds=1800,

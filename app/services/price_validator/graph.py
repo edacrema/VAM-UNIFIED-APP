@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict, Annotated, Literal, Dict, Any, Optional, Callable
@@ -26,6 +27,8 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.shared.llm import get_model
+from app.shared.countries import resolve_country
+from app.shared.databridges import get_databridges_client
 from app.shared.gcs import (
     download_gcs_to_file,
     get_market_names_cache_path,
@@ -186,7 +189,8 @@ class PriceDataState(TypedDict):
 
 def create_initial_state(
     file_path: str,
-    template_path: str | None = None
+    template_path: str | None = None,
+    country: str | None = None,
 ) -> PriceDataState:
     """Crea stato iniziale per il grafo."""
     
@@ -211,7 +215,7 @@ def create_initial_state(
         llm_calls=0,
         final_report=None,
         file_name=Path(file_path).name,
-        country=None,
+        country=(str(country).strip() or None) if country else None,
         num_products=None,
         num_markets=None
     )
@@ -247,7 +251,36 @@ def _get_market_names_gcs_uri() -> str | None:
     return get_market_names_gcs_uri()
 
 
-def _load_market_names() -> set[str]:
+_MARKET_NAMES_CACHE: dict[str, tuple[float, set[str]]] = {}
+_MARKET_NAMES_CACHE_TTL_SECONDS = 3600.0
+
+
+def _fetch_market_names_from_databridges(country: str) -> set[str]:
+    display_name, iso3 = resolve_country(country)
+
+    cached = _MARKET_NAMES_CACHE.get(iso3)
+    if cached and time.time() < cached[0]:
+        return cached[1]
+
+    markets = get_databridges_client().list_markets(iso3)
+    names: set[str] = set()
+    for market in markets:
+        for key in ("marketName", "marketLocalName"):
+            value = market.get(key)
+            if value is None:
+                continue
+            trimmed = _trim_value(value)
+            if trimmed:
+                names.add(trimmed)
+
+    if not names:
+        raise ValueError(f"DataBridges returned no markets for {display_name} ({iso3})")
+
+    _MARKET_NAMES_CACHE[iso3] = (time.time() + _MARKET_NAMES_CACHE_TTL_SECONDS, names)
+    return names
+
+
+def _load_market_names_from_gcs() -> set[str]:
     gcs_uri = _get_market_names_gcs_uri()
     if not gcs_uri:
         raise FileNotFoundError("Market names GCS URI not configured")
@@ -271,6 +304,31 @@ def _load_market_names() -> set[str]:
 
     values = df[column].dropna().astype(str).map(_trim_value)
     return {value for value in values if value}
+
+
+def _load_market_names(country: str | None) -> set[str]:
+    """Official market list for the dataset country, fetched live from DataBridges.
+
+    The static GCS CSV is only a fallback so validation survives a DataBridges
+    outage or a legacy API call that did not provide a country.
+    """
+    if country and str(country).strip():
+        primary_error: Exception | None = None
+        try:
+            return _fetch_market_names_from_databridges(country)
+        except Exception as exc:
+            primary_error = exc
+            logger.warning("DataBridges market lookup failed for %s: %s", country, exc)
+    else:
+        primary_error = ValueError("No country was provided for the market lookup")
+
+    try:
+        return _load_market_names_from_gcs()
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"DataBridges lookup failed ({primary_error}) and the GCS fallback "
+            f"is unavailable ({fallback_error})"
+        ) from primary_error
 
 
 def _build_affected_rows(indices: list[tuple[int, str]], column: str) -> list[dict]:
@@ -632,13 +690,13 @@ def layer3_content_validation(state: PriceDataState) -> dict:
 
     market_names: set[str] = set()
     try:
-        market_names = _load_market_names()
+        market_names = _load_market_names(state.get("country"))
     except Exception as exc:
         errors.append(ValidationError(
             code="L3.5",
             severity=Severity.CRITICAL,
             message=f"Unable to load market names: {exc}",
-            suggestion="Ensure market_names.csv is available in the GCS bucket",
+            suggestion="Verify the selected country and the DataBridges API credentials",
         ))
 
     invalid_markets: list[tuple[int, str]] = []
@@ -837,18 +895,21 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
 def run_troubleshooting(
     file_path: str,
     template_path: str | None = None,
+    country: str | None = None,
     on_step: Optional[OnStepCallback] = None
 ) -> dict:
     """
     Entry point per validazione Price Data.
-    
+
     Args:
         file_path: Path al file Excel (.xlsx)
         template_path: Path al template corretto (obbligatorio)
-    
+        country: Paese del dataset; usato per scaricare la lista ufficiale
+            dei mercati da DataBridges
+
     Returns:
         Stato finale con report
     """
-    initial_state = create_initial_state(file_path, template_path)
+    initial_state = create_initial_state(file_path, template_path, country=country)
     agent = build_graph(on_step=on_step)
     return agent.invoke(initial_state)

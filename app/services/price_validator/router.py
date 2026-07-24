@@ -3,7 +3,7 @@ Price Validator - Router
 ========================
 FastAPI endpoints for the Price Data validation service.
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 
 import tempfile
 import os
@@ -12,6 +12,8 @@ import traceback
 
 from .graph import run_troubleshooting
 from .schemas import ValidateFileOutput, ValidateFileStatusOutput
+
+from app.shared.countries import supported_country_options
 
 from app.shared.async_runs import (
     create_run,
@@ -30,7 +32,8 @@ router = APIRouter()
 @router.post("/validate-file", response_model=ValidateFileOutput)
 async def validate_price_data_file(
     file: UploadFile = File(..., description="Price Data dataset (.xlsx)"),
-    template: UploadFile = File(..., description="Template (.xlsx)")
+    template: UploadFile = File(..., description="Template (.xlsx)"),
+    country: str = Form(..., description="Country of the dataset (name or ISO3 code)")
 ):
     """
     Validates a Price Data dataset (XLSX only).
@@ -84,9 +87,13 @@ async def validate_price_data_file(
         # Perform validation
         logger.info(f"Starting validation for: {file.filename}")
         
+        if not country or not country.strip():
+            raise HTTPException(status_code=400, detail="Country is required")
+
         result = run_troubleshooting(
             file_path=tmp_path,
-            template_path=template_path
+            template_path=template_path,
+            country=country.strip()
         )
         
         # Calculate success
@@ -129,10 +136,14 @@ async def validate_price_data_file(
 async def validate_price_data_file_async(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Price Data dataset (.xlsx)"),
-    template: UploadFile = File(..., description="Template (.xlsx)")
+    template: UploadFile = File(..., description="Template (.xlsx)"),
+    country: str = Form(..., description="Country of the dataset (name or ISO3 code)")
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
+
+    if not country or not country.strip():
+        raise HTTPException(status_code=400, detail="Country is required")
 
     valid_extensions = ['.xlsx']
     file_ext = os.path.splitext(file.filename)[1].lower()
@@ -191,6 +202,7 @@ async def validate_price_data_file_async(
             result = run_troubleshooting(
                 file_path=tmp_path,
                 template_path=template_path,
+                country=country.strip(),
                 on_step=on_step,
             )
 
@@ -277,6 +289,18 @@ def get_service_info():
                        "and produces a deterministic diagnostic report.",
         "version": "1.0.0",
         "inputs": [
+            {
+                "name": "country",
+                "type": "select",
+                "required": True,
+                "label": "Country",
+                "description": "Country the dataset refers to; used to fetch the official "
+                               "market list for that country from DataBridges",
+                "options": [
+                    {"value": option["name"], "label": option["name"]}
+                    for option in supported_country_options()
+                ]
+            },
             {
                 "name": "file",
                 "type": "file",

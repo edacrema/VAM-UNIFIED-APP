@@ -161,9 +161,10 @@ left, right = st.columns([1.35, 1])
 with left:
     st.markdown(
         """
-1. **Upload your price data file**: Drag and drop (or browse) your raw price dataset in **CSV, XLSX, or XLS format**.
-2. **Upload the DataBridges template**: Upload the same template you previously registered on DataBridges for this dataset. The validator needs it because DataBridges uses this template to assess compatibility with the uploaded data — the validator performs the same check.
-3. **Click "Validate"**.
+1. **Select the country**: Choose the country the dataset refers to. The validator uses it to fetch the official list of market names for that country directly from DataBridges.
+2. **Upload your price data file**: Drag and drop (or browse) your raw price dataset in **CSV, XLSX, or XLS format**.
+3. **Upload the DataBridges template**: Upload the same template you previously registered on DataBridges for this dataset. The validator needs it because DataBridges uses this template to assess compatibility with the uploaded data — the validator performs the same check.
+4. **Click "Validate"**.
         """
     )
 with right:

@@ -35,6 +35,7 @@ from app.shared.live_outputs import (
 )
 from app.shared.report_blocks import build_market_monitor_report_blocks, build_mfi_report_blocks
 from app.shared.databridges import get_databridges_client
+from app.shared.countries import supported_country_options
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
 from app.services.mfi_drafter.data_loader import (
@@ -773,9 +774,9 @@ def _dispatch_price_validator(
     params: Dict[str, Any],
 ) -> LocalResponse:
     if method == "POST" and parts == ["validate-file"]:
-        return _price_validate_sync(files=files)
+        return _price_validate_sync(data=data, files=files, params=params)
     if method == "POST" and parts == ["validate-file-async"]:
-        return _price_validate_async(files=files)
+        return _price_validate_async(data=data, files=files, params=params)
     if method == "GET" and len(parts) == 2 and parts[0] == "status":
         return _price_validate_status(parts[1])
     if method == "GET" and len(parts) == 2 and parts[0] == "result":
@@ -796,7 +797,12 @@ def _dispatch_price_validator(
     raise LocalHTTPException(404, f"Unknown Price validator endpoint: {'/'.join(parts)}")
 
 
-def _price_validate_sync(*, files: Any) -> LocalResponse:
+def _price_validate_sync(
+    *,
+    data: Optional[Dict[str, Any]],
+    files: Any,
+    params: Dict[str, Any],
+) -> LocalResponse:
     upload = _extract_file(files, "file")
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
@@ -805,6 +811,10 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
     file_ext = os.path.splitext(upload.filename)[1].lower()
     if file_ext not in valid_extensions:
         raise LocalHTTPException(400, f"Unsupported file format. Use: {', '.join(valid_extensions)}")
+
+    country = _get_form_value(data, "country", None) or _get_form_value(params, "country", None)
+    if not country or not str(country).strip():
+        raise LocalHTTPException(400, "Country is required")
 
     tmp_path = None
     template_path = None
@@ -821,7 +831,11 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
 
         template_path = _save_temp_file(template_upload.content, template_ext)
 
-        result = run_price_troubleshooting(file_path=tmp_path, template_path=template_path)
+        result = run_price_troubleshooting(
+            file_path=tmp_path,
+            template_path=template_path,
+            country=str(country).strip(),
+        )
 
         layer_results = result.get("layer_results", [])
         success = all(lr.get("passed", False) for lr in layer_results)
@@ -848,7 +862,12 @@ def _price_validate_sync(*, files: Any) -> LocalResponse:
             os.unlink(template_path)
 
 
-def _price_validate_async(*, files: Any) -> LocalResponse:
+def _price_validate_async(
+    *,
+    data: Optional[Dict[str, Any]],
+    files: Any,
+    params: Dict[str, Any],
+) -> LocalResponse:
     upload = _extract_file(files, "file")
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
@@ -857,6 +876,10 @@ def _price_validate_async(*, files: Any) -> LocalResponse:
     file_ext = os.path.splitext(upload.filename)[1].lower()
     if file_ext not in valid_extensions:
         raise LocalHTTPException(400, f"Unsupported file format. Use: {', '.join(valid_extensions)}")
+
+    country = _get_form_value(data, "country", None) or _get_form_value(params, "country", None)
+    if not country or not str(country).strip():
+        raise LocalHTTPException(400, "Country is required")
 
     run_id = f"price_val_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
@@ -891,7 +914,12 @@ def _price_validate_async(*, files: Any) -> LocalResponse:
                 else:
                     update_run(run_id, current_node=node_name)
 
-            result = run_price_troubleshooting(file_path=tmp_path, template_path=template_path, on_step=on_step)
+            result = run_price_troubleshooting(
+                file_path=tmp_path,
+                template_path=template_path,
+                country=str(country).strip(),
+                on_step=on_step,
+            )
 
             layer_results = result.get("layer_results", [])
             success = all(lr.get("passed", False) for lr in layer_results)
@@ -961,6 +989,18 @@ def _price_validator_info() -> Dict[str, Any]:
         "and generates a deterministic diagnostic report.",
         "version": "1.0.0",
         "inputs": [
+            {
+                "name": "country",
+                "type": "select",
+                "required": True,
+                "label": "Country",
+                "description": "Country the dataset refers to; used to fetch the official "
+                "market list for that country from DataBridges",
+                "options": [
+                    {"value": option["name"], "label": option["name"]}
+                    for option in supported_country_options()
+                ],
+            },
             {
                 "name": "file",
                 "type": "file",
