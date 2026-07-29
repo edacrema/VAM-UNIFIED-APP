@@ -1,14 +1,39 @@
-"""MFI data loading and normalisation helpers."""
+"""Strict Full MFI data preparation, validation, and typed evidence loading."""
 from __future__ import annotations
 
 import io
 import logging
-from typing import Any, BinaryIO, Dict, List, Optional, Union
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, BinaryIO, Iterable, Optional, Union
 
-import numpy as np
 import pandas as pd
 
-from .schemas import DIMENSION_NAME_MAP, SCORE_VARIABLE_MAP, get_risk_level
+from .methodology import (
+    ANALYSIS_SCHEMA_VERSION,
+    DISPLAY_DIMENSIONS,
+    DRIVERS_BY_DIMENSION,
+    METHODOLOGY_VERSION,
+    MFIR_SCORE_VARIABLE,
+    OFFICIAL_DIMENSION_SCORE_VARIABLES,
+    OFFICIAL_FULL_SCORE_VARIABLES,
+    OFFICIAL_SCORE_DEFINITIONS,
+    OVERALL_SCORE_VARIABLE,
+    SCORE_AUTHORITY,
+    SCORE_VALIDATION_ABS_TOLERANCE,
+    SUBSECTIONS_BY_DIMENSION,
+    MetricDefinition,
+    calculate_current_databridge_mfi,
+    calculate_dimension_score,
+    within_score_tolerance,
+)
+from .schemas import (
+    MFIExcludedMarketRecord,
+    MFIMethodologyWarning,
+    MFIMetric,
+    MFIMetricSummary,
+    get_risk_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,348 +79,756 @@ DATABRIDGES_COLUMN_MAP = {
     "market_longitude": "MarketLongitude",
 }
 
+CSVSource = Union[BinaryIO, bytes, str, Path]
+
 
 def load_mfi_from_csv(
-    file_content: Union[BinaryIO, bytes, str],
+    file_content: CSVSource,
     country_override: Optional[str] = None,
     start_date_override: Optional[str] = None,
     end_date_override: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Load processed MFI CSV data and transform it to the report graph shape."""
-    if isinstance(file_content, str):
-        df = pd.read_csv(file_content)
-    elif isinstance(file_content, bytes):
-        df = pd.read_csv(io.BytesIO(file_content))
-    else:
-        df = pd.read_csv(file_content)
-
+) -> dict[str, Any]:
+    """Load a complete processed DataBridge CSV through the shared preparation path."""
     return load_mfi_from_dataframe(
-        df,
+        _read_full_csv(file_content),
         country_override=country_override,
         start_date_override=start_date_override,
         end_date_override=end_date_override,
     )
+
+
 def load_mfi_from_dataframe(
     df: pd.DataFrame,
     country_override: Optional[str] = None,
     start_date_override: Optional[str] = None,
     end_date_override: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Transform processed MFI rows into the format expected by the MFI graph."""
-    df = df.copy()
-    df = _standardise_columns(df)
-    _validate_required_columns(df)
+) -> dict[str, Any]:
+    """Build the canonical Phase-1 representation for authoritative Full MFI records."""
+    prepared = _prepare_dataframe(df)
+    start_date = _required_collection_date(prepared, "StartDate", start_date_override)
+    end_date = _required_collection_date(prepared, "EndDate", end_date_override)
+    included_markets, excluded_records = _classify_market_records(prepared)
 
-    df["LevelID"] = pd.to_numeric(df["LevelID"], errors="coerce")
-    df["OutputValue"] = pd.to_numeric(df["OutputValue"], errors="coerce")
-    df["TradersSampleSize"] = pd.to_numeric(df["TradersSampleSize"], errors="coerce").fillna(0)
-    for column in ["MarketName", "Adm0Name", "Adm1Name", "DimensionName", "VariableName"]:
-        df[column] = df[column].astype(str).str.strip()
-    if "Adm2Name" not in df.columns:
-        df["Adm2Name"] = df["Adm1Name"]
+    methodology_warnings: list[MFIMethodologyWarning] = []
+    if excluded_records:
+        methodology_warnings.append(
+            MFIMethodologyWarning(
+                code="mfir_records_excluded",
+                message=(
+                    f"Excluded {len(excluded_records)} MFIr-only market record"
+                    f"{'s' if len(excluded_records) != 1 else ''}; only complete Full MFI "
+                    "records are authoritative for this analysis."
+                ),
+            )
+        )
 
-    country = country_override or str(df["Adm0Name"].iloc[0])
-    regions = sorted(df["Adm1Name"].dropna().astype(str).unique().tolist())
-    markets = sorted(df["MarketName"].dropna().astype(str).unique().tolist())
-    start_date_str = _required_collection_date(df, "StartDate", start_date_override)
-    end_date_str = _required_collection_date(df, "EndDate", end_date_override)
-    collection_period = f"{start_date_str} to {end_date_str}"
+    market_records: list[dict[str, Any]] = []
+    evidence_models: dict[str, dict[str, list[MFIMetric]]] = {}
+    for market_name in included_markets:
+        market_df = prepared[prepared["MarketName"] == market_name]
+        rows_by_key = _rows_by_semantic_key(market_df)
+        official_scores = _official_scores_for_market(rows_by_key)
+        subsections, subsection_warnings = _extract_evidence_group(
+            rows_by_key,
+            market_name,
+            (definition for definitions in SUBSECTIONS_BY_DIMENSION.values() for definition in definitions),
+        )
+        drivers, driver_warnings = _extract_evidence_group(
+            rows_by_key,
+            market_name,
+            (definition for definitions in DRIVERS_BY_DIMENSION.values() for definition in definitions),
+        )
+        methodology_warnings.extend(subsection_warnings)
+        methodology_warnings.extend(driver_warnings)
 
-    normalised = df[df["LevelID"] == 1].copy()
-    if normalised.empty:
-        raise ValueError("No normalized scores found (LevelID=1). Check MFI data.")
-    normalised["VariableName"] = normalised["VariableName"].astype(str).str.strip()
+        _apply_quality_normalization(subsections)
+        _validate_dimension_formulas(
+            market_name,
+            official_scores,
+            subsections,
+            methodology_warnings,
+        )
+        _validate_overall_formula(
+            market_name,
+            official_scores,
+            methodology_warnings,
+        )
 
-    score_frames = []
-    for dimension, variable_name in SCORE_VARIABLE_MAP.items():
-        rows = normalised[
-            (normalised["DimensionName"] == dimension)
-            & (normalised["VariableName"] == variable_name)
-        ]
-        if not rows.empty:
-            score_frames.append(rows)
-    if not score_frames:
-        raise ValueError("No matching score variables found. Check DimensionName and VariableName values.")
-    scores_df = pd.concat(score_frames, ignore_index=True)
+        representative = market_df.iloc[0]
+        admin1 = _clean_text(representative.get("Adm1Name")) or ""
+        traders = _nullable_int(_first_non_null(market_df["TradersSampleSize"]))
+        latitude = _first_numeric(market_df.get("MarketLatitude"))
+        longitude = _first_numeric(market_df.get("MarketLongitude"))
+        overall = official_scores["MFI"]
 
-    markets_data = []
-    for market in markets:
-        market_scores = scores_df[scores_df["MarketName"] == market]
-        if market_scores.empty:
-            logger.warning("No normalized scores found for market: %s", market)
-            continue
-
-        admin0 = str(market_scores["Adm0Name"].iloc[0])
-        admin1 = str(market_scores["Adm1Name"].iloc[0])
-        admin2 = str(market_scores["Adm2Name"].iloc[0]) if "Adm2Name" in market_scores.columns else admin1
-        traders = int(_safe_float(market_scores["TradersSampleSize"].iloc[0], default=0.0) or 0)
-        lat = _safe_float(market_scores["MarketLatitude"].iloc[0]) if "MarketLatitude" in market_scores.columns else None
-        lon = _safe_float(market_scores["MarketLongitude"].iloc[0]) if "MarketLongitude" in market_scores.columns else None
-
-        dimension_scores = {}
-        for _, row in market_scores.iterrows():
-            csv_dim = row["DimensionName"]
-            if csv_dim == "MFI":
-                continue
-            agent_dim = DIMENSION_NAME_MAP.get(csv_dim, csv_dim)
-            dimension_scores[agent_dim] = round(_safe_float(row["OutputValue"], default=0.0), 1)
-
-        mfi_row = market_scores[market_scores["DimensionName"] == "MFI"]
-        if not mfi_row.empty:
-            overall_mfi = round(_safe_float(mfi_row["OutputValue"].iloc[0], default=0.0), 2)
-        else:
-            overall_mfi = round(float(np.mean(list(dimension_scores.values()))), 2) if dimension_scores else 0.0
-
-        markets_data.append(
+        evidence_models[market_name] = {
+            "subsections": subsections,
+            "drivers": drivers,
+        }
+        market_records.append(
             {
-                "market_name": market,
-                "admin0": admin0,
+                "market_name": market_name,
+                "admin0": _clean_text(representative.get("Adm0Name")) or "",
                 "admin1": admin1,
-                "admin2": admin2,
+                "admin2": _clean_text(representative.get("Adm2Name")) or admin1,
                 "region": admin1,
-                "overall_mfi": overall_mfi,
-                "dimension_scores": dimension_scores,
-                "sub_scores": _extract_sub_scores(df, market),
-                "risk_level": get_risk_level(overall_mfi),
+                "overall_mfi": overall,
+                "dimension_scores": {
+                    dimension: official_scores[dimension] for dimension in DISPLAY_DIMENSIONS
+                },
+                "risk_level": get_risk_level(overall),
                 "traders_surveyed": traders,
-                "latitude": lat,
-                "longitude": lon,
+                "latitude": latitude,
+                "longitude": longitude,
             }
         )
 
-    if not markets_data:
-        raise ValueError("No valid market data found. Check LevelID=1 and score variables.")
+    _apply_assessment_coverage(evidence_models, len(market_records))
+    metric_summaries = _build_metric_summaries(evidence_models, len(market_records))
+    for market in market_records:
+        groups = evidence_models[market["market_name"]]
+        market["subsections"] = _group_evidence_by_dimension(groups["subsections"])
+        market["drivers"] = _group_evidence_by_dimension(groups["drivers"])
 
-    dimension_aggregations = []
-    for _csv_dim, agent_dim in DIMENSION_NAME_MAP.items():
-        national_values = [
-            market["dimension_scores"].get(agent_dim)
-            for market in markets_data
-            if agent_dim in market["dimension_scores"]
-        ]
-        national_score = round(float(np.mean(national_values)), 1) if national_values else 0.0
-        regional_scores = {}
-        for region in regions:
-            region_values = [
-                market["dimension_scores"].get(agent_dim)
-                for market in markets_data
-                if market["region"] == region and agent_dim in market["dimension_scores"]
-            ]
-            if region_values:
-                regional_scores[region] = round(float(np.mean(region_values)), 1)
-        market_scores = {
-            market["market_name"]: market["dimension_scores"].get(agent_dim, 0)
-            for market in markets_data
-            if agent_dim in market["dimension_scores"]
-        }
-        dimension_aggregations.append(
-            {
-                "dimension": agent_dim,
-                "national_score": national_score,
-                "regional_scores": regional_scores,
-                "market_scores": market_scores,
-            }
-        )
+    regions = sorted({market["region"] for market in market_records if market["region"]})
+    dimension_aggregations = _build_dimension_aggregations(market_records, regions)
+    country = country_override or market_records[0]["admin0"]
+    warnings = [warning.message for warning in methodology_warnings]
 
-    survey_metadata = {
-        "country": country,
-        "collection_period": collection_period,
-        "total_traders": sum(market["traders_surveyed"] for market in markets_data),
-        "total_markets": len(markets_data),
-        "regions_covered": regions,
-    }
     return {
-        "markets_data": markets_data,
+        "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
+        "methodology_version": METHODOLOGY_VERSION,
+        "score_authority": SCORE_AUTHORITY,
+        "excluded_market_records": [record.model_dump() for record in excluded_records],
+        "methodology_warnings": [warning.model_dump() for warning in methodology_warnings],
+        "warnings": warnings,
+        "markets_data": market_records,
         "dimension_scores": dimension_aggregations,
-        "survey_metadata": survey_metadata,
+        "metric_summaries": metric_summaries,
+        "survey_metadata": {
+            "country": country,
+            "collection_period": f"{start_date} to {end_date}",
+            "total_traders": sum(
+                market["traders_surveyed"] or 0 for market in market_records
+            ),
+            "total_markets": len(market_records),
+            "included_full_mfi_markets": len(market_records),
+            "excluded_market_records": len(excluded_records),
+            "regions_covered": regions,
+        },
         "country": country,
-        "data_collection_start": start_date_str,
-        "data_collection_end": end_date_str,
-        "markets": [market["market_name"] for market in markets_data],
+        "data_collection_start": start_date,
+        "data_collection_end": end_date,
+        "markets": [market["market_name"] for market in market_records],
     }
 
 
-def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> Dict[str, Any]:
-    """Validate processed MFI CSV shape. Kept for internal/backward compatibility."""
+def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> dict[str, Any]:
+    """Validate the complete upload using the same preparation and semantic path as loading."""
     try:
-        if isinstance(file_content, bytes):
-            df = pd.read_csv(io.BytesIO(file_content), nrows=1000)
-        else:
-            if hasattr(file_content, "seek"):
-                file_content.seek(0)
-            df = pd.read_csv(file_content, nrows=1000)
-        df = _standardise_columns(df)
+        frame = _read_full_csv(file_content)
     except Exception as exc:
-        return {
-            "valid": False,
-            "missing_columns": [],
-            "missing_metadata_fields": [],
-            "has_normalized_scores": False,
-            "preview": {},
-            "errors": [f"Failed to read CSV: {str(exc)}"],
-        }
+        return _validation_failure(f"Failed to read CSV: {exc}")
 
-    present = set(df.columns)
-    missing = sorted(REQUIRED_COLUMNS - present)
+    standardised = _standardise_columns(frame.copy())
+    missing = sorted(REQUIRED_COLUMNS - set(standardised.columns))
     missing_metadata = [
-        field
-        for field in REQUIRED_COLLECTION_DATE_FIELDS
-        if _first_date(df, field) == "Unknown"
+        field for field in REQUIRED_COLLECTION_DATE_FIELDS if _first_date(standardised, field) == "Unknown"
     ]
-    has_normalized = False
-    if "LevelID" in df.columns:
-        levels = pd.to_numeric(df["LevelID"], errors="coerce")
-        has_normalized = bool((levels == 1).any())
-
-    errors = []
+    preview = _build_preview(standardised)
+    errors: list[str] = []
     if missing:
         errors.append(f"Missing required columns: {', '.join(missing)}")
     if missing_metadata:
         errors.append(
-            "Missing or invalid required collection metadata: "
-            + ", ".join(missing_metadata)
+            "Missing or invalid required collection metadata: " + ", ".join(missing_metadata)
         )
-    if not has_normalized:
+
+    loaded: Optional[dict[str, Any]] = None
+    if not errors:
+        try:
+            loaded = load_mfi_from_dataframe(standardised)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    has_normalized = False
+    if "LevelID" in standardised.columns:
+        has_normalized = bool(
+            (pd.to_numeric(standardised["LevelID"], errors="coerce") == 1).any()
+        )
+    if not has_normalized and not any("LevelID=1" in error for error in errors):
         errors.append("No normalized scores found (LevelID=1 is required)")
 
-    preview = {"columns": list(df.columns)}
-    if "Adm0Name" in df.columns and not df.empty:
-        preview["country"] = df["Adm0Name"].iloc[0]
-    if "MarketName" in df.columns:
-        preview["markets_count"] = int(df["MarketName"].nunique())
-        preview["markets_sample"] = df["MarketName"].dropna().unique()[:5].tolist()
-    if "Adm1Name" in df.columns:
-        preview["regions_count"] = int(df["Adm1Name"].nunique())
-        preview["regions"] = df["Adm1Name"].dropna().unique().tolist()
-    if "DimensionName" in df.columns:
-        preview["dimensions"] = df["DimensionName"].dropna().unique().tolist()
-
     return {
-        "valid": not missing and not missing_metadata and has_normalized,
+        "valid": not errors,
         "missing_columns": missing,
         "missing_metadata_fields": missing_metadata,
         "has_normalized_scores": has_normalized,
         "preview": preview,
         "errors": errors,
+        "warnings": loaded["warnings"] if loaded else [],
+        "methodology_warnings": loaded["methodology_warnings"] if loaded else [],
+        "excluded_market_records": loaded["excluded_market_records"] if loaded else [],
     }
 
 
-def _extract_sub_scores(df: pd.DataFrame, market: str) -> Dict[str, Dict[str, Any]]:
-    market_df = df[df["MarketName"] == market]
-    trader_mean = market_df[market_df["LevelID"] == 5].copy()
-    market_mean = market_df[market_df["LevelID"] == 6].copy()
-    if not trader_mean.empty:
-        trader_mean["VariableName"] = trader_mean["VariableName"].astype(str).str.strip()
-    if not market_mean.empty:
-        market_mean["VariableName"] = market_mean["VariableName"].astype(str).str.strip()
+def _read_full_csv(file_content: CSVSource) -> pd.DataFrame:
+    if isinstance(file_content, Path):
+        return pd.read_csv(file_content)
+    if isinstance(file_content, str):
+        return pd.read_csv(file_content)
+    if isinstance(file_content, bytes):
+        return pd.read_csv(io.BytesIO(file_content))
+    if hasattr(file_content, "seek"):
+        file_content.seek(0)
+    return pd.read_csv(file_content)
 
-    def safe_mean(series: pd.Series) -> float:
-        if series.empty:
-            return 0.0
-        return _safe_float(series.mean(), default=0.0)
 
-    def safe_first(series: pd.Series) -> float:
-        if series.empty:
-            return 0.0
-        return _safe_float(series.iloc[0], default=0.0)
+def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    prepared = _standardise_columns(df.copy())
+    _validate_required_columns(prepared)
+    if prepared.empty:
+        raise ValueError("MFI data is empty.")
 
-    avail_scarcity = trader_mean[
-        trader_mean["VariableName"].str.contains("AvailabilityScarcity_FCer", na=False)
-    ]["OutputValue"]
-    avail_runout = trader_mean[
-        trader_mean["VariableName"].str.contains("AvailabilityRunout_FCer", na=False)
-    ]["OutputValue"]
-    price_increase = trader_mean[
-        trader_mean["VariableName"].str.contains("PriceIncrease_FCer", na=False)
-    ]["OutputValue"]
-    price_stability = trader_mean[
-        trader_mean["VariableName"].str.contains("PriceStability", na=False)
-    ]["OutputValue"]
-    density = trader_mean[
-        trader_mean["VariableName"].str.contains("VulnerabilityDensity", na=False)
-    ]["OutputValue"]
-    complexity = trader_mean[
-        trader_mean["VariableName"].str.contains("VulnerabilityComplexity", na=False)
-    ]["OutputValue"]
-    criticality = trader_mean[
-        trader_mean["VariableName"].str.contains("VulnerabilityCriticality", na=False)
-    ]["OutputValue"]
-    concentration = market_mean[
-        market_mean["VariableName"].str.contains("CompetitionConcentration", na=False)
-    ]["OutputValue"]
-    monopoly = market_mean[
-        market_mean["VariableName"].str.contains("CompetitionMonopoly", na=False)
-    ]["OutputValue"]
-    checkout = trader_mean[
-        trader_mean["VariableName"].str.contains("ServiceCheckout", na=False)
-    ]["OutputValue"]
-    shopping = trader_mean[
-        trader_mean["VariableName"].str.contains("ServiceShopping", na=False)
-    ]["OutputValue"]
-    quality_vars = trader_mean[
-        (trader_mean["DimensionName"] == "Quality")
-        & (trader_mean["VariableName"].str.startswith("Quality", na=False))
-    ]["OutputValue"]
-    access = market_mean[
-        market_mean["VariableName"].str.contains("AccessProtectionAccess", na=False)
-    ]["OutputValue"]
-    protection = market_mean[
-        market_mean["VariableName"].str.contains("AccessProtectionProtection", na=False)
-    ]["OutputValue"]
-    assort_vars = trader_mean[trader_mean["DimensionName"] == "Assortment"]["OutputValue"]
-    assort_score = safe_mean(assort_vars) * 10 if not assort_vars.empty else 7.5
+    for column in (
+        "MarketName",
+        "Adm0Name",
+        "Adm1Name",
+        "Adm2Name",
+        "DimensionName",
+        "VariableName",
+    ):
+        if column in prepared.columns:
+            prepared[column] = prepared[column].astype("string").str.strip()
 
+    prepared["LevelID"] = pd.to_numeric(prepared["LevelID"], errors="coerce")
+    prepared["OutputValue"] = pd.to_numeric(prepared["OutputValue"], errors="coerce")
+    prepared["TradersSampleSize"] = pd.to_numeric(
+        prepared["TradersSampleSize"], errors="coerce"
+    )
+    for column in ("MarketLatitude", "MarketLongitude"):
+        if column in prepared.columns:
+            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+
+    if prepared["MarketName"].isna().any() or (prepared["MarketName"] == "").any():
+        raise ValueError("MFI data contains rows without a MarketName.")
+    if "Adm2Name" not in prepared.columns:
+        prepared["Adm2Name"] = prepared["Adm1Name"]
+    return prepared
+
+
+def _classify_market_records(
+    df: pd.DataFrame,
+) -> tuple[list[str], list[MFIExcludedMarketRecord]]:
+    included: list[str] = []
+    excluded: list[MFIExcludedMarketRecord] = []
+    failures: list[str] = []
+
+    for market_name in sorted(df["MarketName"].dropna().unique().tolist()):
+        market_df = df[df["MarketName"] == market_name]
+        level_one = market_df[market_df["LevelID"] == 1]
+        observed_level_one = sorted(level_one["VariableName"].dropna().unique().tolist())
+        expected_counts: dict[str, int] = {}
+        for definition in OFFICIAL_SCORE_DEFINITIONS:
+            expected_counts[definition.variable_name] = len(
+                level_one[
+                    (level_one["DimensionName"] == definition.csv_dimension)
+                    & (level_one["VariableName"] == definition.variable_name)
+                ]
+            )
+
+        has_full_signature = any(
+            variable in set(observed_level_one) for variable in OFFICIAL_FULL_SCORE_VARIABLES
+        )
+        has_mfir_signature = MFIR_SCORE_VARIABLE in set(observed_level_one)
+        if not has_full_signature and has_mfir_signature:
+            excluded.append(
+                MFIExcludedMarketRecord(
+                    market_name=market_name,
+                    detected_record_type="mfir_only",
+                    reason="MFIr signature present without a Full MFI Level-1 signature.",
+                    available_level1_variables=observed_level_one,
+                    missing_level1_variables=[
+                        variable
+                        for variable in OFFICIAL_FULL_SCORE_VARIABLES
+                        if variable not in observed_level_one
+                    ],
+                )
+            )
+            continue
+
+        market_errors: list[str] = []
+        for definition in OFFICIAL_SCORE_DEFINITIONS:
+            count = expected_counts[definition.variable_name]
+            if count == 0:
+                market_errors.append(f"missing {definition.variable_name}")
+                continue
+            if count > 1:
+                market_errors.append(f"duplicated {definition.variable_name}")
+                continue
+            value = level_one.loc[
+                (level_one["DimensionName"] == definition.csv_dimension)
+                & (level_one["VariableName"] == definition.variable_name),
+                "OutputValue",
+            ].iloc[0]
+            if pd.isna(value):
+                market_errors.append(f"non-numeric {definition.variable_name}")
+            elif not 0.0 <= float(value) <= 10.0:
+                market_errors.append(
+                    f"out-of-range {definition.variable_name}={float(value)}"
+                )
+        if market_errors:
+            failures.append(f"{market_name}: {', '.join(market_errors)}")
+        else:
+            included.append(market_name)
+
+    if failures:
+        raise ValueError(
+            "Invalid or incomplete Full MFI Level-1 record(s): " + "; ".join(failures)
+        )
+    if not included:
+        if excluded:
+            raise ValueError(
+                "The upload contains MFIr-only records but no valid complete Full MFI markets."
+            )
+        raise ValueError("The upload contains no valid complete Full MFI markets.")
+    return included, excluded
+
+
+def _rows_by_semantic_key(
+    market_df: pd.DataFrame,
+) -> dict[tuple[int, str, str], pd.DataFrame]:
+    keyed: dict[tuple[int, str, str], pd.DataFrame] = {}
+    usable = market_df.dropna(subset=["LevelID", "DimensionName", "VariableName"])
+    for key, rows in usable.groupby(
+        ["LevelID", "DimensionName", "VariableName"], sort=False, dropna=False
+    ):
+        level_id, dimension_name, variable_name = key
+        keyed[(int(level_id), str(dimension_name), str(variable_name))] = rows
+    return keyed
+
+
+def _official_scores_for_market(
+    rows_by_key: dict[tuple[int, str, str], pd.DataFrame],
+) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for definition in OFFICIAL_SCORE_DEFINITIONS:
+        value = rows_by_key[definition.key]["OutputValue"].iloc[0]
+        scores[definition.dimension] = float(value)
+    return scores
+
+
+def _extract_evidence_group(
+    rows_by_key: dict[tuple[int, str, str], pd.DataFrame],
+    market_name: str,
+    definitions: Iterable[MetricDefinition],
+) -> tuple[list[MFIMetric], list[MFIMethodologyWarning]]:
+    metrics: list[MFIMetric] = []
+    warnings: list[MFIMethodologyWarning] = []
+    for definition in definitions:
+        rows = rows_by_key.get(definition.key)
+        if rows is None:
+            rows = pd.DataFrame(columns=["OutputValue", "TradersSampleSize"])
+        count = len(rows)
+        raw_value = float(rows["OutputValue"].iloc[0]) if count and pd.notna(rows["OutputValue"].iloc[0]) else None
+        applicability = "available"
+        validation = "valid"
+        normalized: Optional[float] = None
+
+        if count == 0 or raw_value is None:
+            validation = "missing"
+            applicability = _missing_applicability(definition)
+        elif count > 1:
+            validation = "duplicate"
+        elif not definition.raw_min <= raw_value <= definition.raw_max:
+            validation = "out_of_range"
+        else:
+            normalized = definition.normalize(raw_value)
+
+        metric = MFIMetric(
+            metric_id=definition.metric_id,
+            dimension=definition.dimension,
+            display_name=definition.display_name,
+            variable_name=definition.variable_name,
+            source_level_id=definition.source_level_id,
+            source_level_name=definition.source_level_name,
+            role=definition.role,
+            raw_value=raw_value,
+            raw_min=definition.raw_min,
+            raw_max=definition.raw_max,
+            normalized_value=normalized,
+            orientation=definition.orientation,
+            unit=definition.unit,
+            evidence_scope=definition.evidence_scope,
+            observed_raw_values=[
+                float(value) if pd.notna(value) else None
+                for value in rows["OutputValue"].tolist()
+            ],
+            applicability_status=applicability,
+            validation_status=validation,
+            methodology_note=definition.methodology_note,
+            product_group=definition.product_group,
+            question_group=definition.question_group,
+            item_name=definition.item_name,
+            severity_weight=definition.severity_weight,
+            traders_sample_size=_nullable_int(_first_non_null(rows["TradersSampleSize"]))
+            if count
+            else None,
+        )
+        metrics.append(metric)
+
+        should_warn = definition.role in {
+            "official_subsection",
+            "dimension_validation_component",
+        } and validation != "valid"
+        if should_warn:
+            warnings.append(
+                _evidence_warning(
+                    market_name,
+                    definition,
+                    validation,
+                    raw_value,
+                    count,
+                )
+            )
+        elif validation in {"duplicate", "out_of_range"}:
+            warnings.append(
+                _evidence_warning(
+                    market_name,
+                    definition,
+                    validation,
+                    raw_value,
+                    count,
+                )
+            )
+    return metrics, warnings
+
+
+def _missing_applicability(definition: MetricDefinition) -> str:
+    if definition.applicability_rule == "quality_applicability":
+        return "not_applicable"
+    if definition.applicability_rule in {"optional_item", "optional_product_group"}:
+        return "not_represented"
+    return "missing"
+
+
+def _evidence_warning(
+    market_name: str,
+    definition: MetricDefinition,
+    validation: str,
+    raw_value: Optional[float],
+    count: int,
+) -> MFIMethodologyWarning:
+    if validation == "missing":
+        detail = "is absent or non-numeric"
+    elif validation == "duplicate":
+        detail = f"appears {count} times"
+    else:
+        detail = (
+            f"has value {raw_value}, outside its registered range "
+            f"{definition.raw_min}–{definition.raw_max}"
+        )
+    return MFIMethodologyWarning(
+        code=f"evidence_{validation}",
+        message=(
+            f"{market_name}: {definition.display_name} ({definition.variable_name}) "
+            f"{detail}; the official Level-1 score remains authoritative."
+        ),
+        market_name=market_name,
+        dimension=definition.dimension,
+        metric_ids=[definition.metric_id],
+        actual_value=raw_value,
+    )
+
+
+def _apply_quality_normalization(subsections: list[MFIMetric]) -> None:
+    by_id = {metric.metric_id: metric for metric in subsections}
+    measure = by_id.get("quality.measure")
+    maximum = by_id.get("quality.maximum")
+    if (
+        measure
+        and maximum
+        and measure.validation_status == "valid"
+        and maximum.validation_status == "valid"
+        and measure.raw_value is not None
+        and maximum.raw_value is not None
+        and maximum.raw_value > 0
+    ):
+        measure.normalized_value = measure.raw_value / maximum.raw_value * 10.0
+
+
+def _validate_dimension_formulas(
+    market_name: str,
+    official_scores: dict[str, float],
+    subsections: list[MFIMetric],
+    warnings: list[MFIMethodologyWarning],
+) -> None:
+    metrics_by_id = {metric.metric_id: metric for metric in subsections}
+    for dimension in DISPLAY_DIMENSIONS:
+        components = [
+            metric for metric in subsections if metric.dimension == dimension
+        ]
+        if not components or any(
+            metric.validation_status != "valid" or metric.raw_value is None
+            for metric in components
+        ):
+            continue
+        expected = calculate_dimension_score(
+            dimension,
+            {metric.metric_id: metric.raw_value for metric in components if metric.raw_value is not None},
+        )
+        if expected is None:
+            for metric in components:
+                metrics_by_id[metric.metric_id].validation_status = "formula_mismatch"
+                metrics_by_id[metric.metric_id].normalized_value = None
+            warnings.append(
+                MFIMethodologyWarning(
+                    code="dimension_formula_unavailable",
+                    message=(
+                        f"{market_name}: {dimension} subsection evidence cannot produce "
+                        "a valid methodology score; the official Level-1 score remains "
+                        "authoritative and the explanatory evidence was marked unusable."
+                    ),
+                    market_name=market_name,
+                    dimension=dimension,
+                    metric_ids=[metric.metric_id for metric in components],
+                    actual_value=official_scores[dimension],
+                    tolerance=SCORE_VALIDATION_ABS_TOLERANCE,
+                )
+            )
+            continue
+        actual = official_scores[dimension]
+        if within_score_tolerance(actual, expected):
+            continue
+        for metric in components:
+            metrics_by_id[metric.metric_id].validation_status = "formula_mismatch"
+            metrics_by_id[metric.metric_id].normalized_value = None
+        warnings.append(
+            MFIMethodologyWarning(
+                code="dimension_formula_mismatch",
+                message=(
+                    f"{market_name}: {dimension} subsection evidence calculates to "
+                    f"{expected}, while the authoritative Level-1 score is {actual}; "
+                    "the explanatory evidence was marked unusable."
+                ),
+                market_name=market_name,
+                dimension=dimension,
+                metric_ids=[metric.metric_id for metric in components],
+                expected_value=expected,
+                actual_value=actual,
+                delta=actual - expected,
+                tolerance=SCORE_VALIDATION_ABS_TOLERANCE,
+            )
+        )
+
+
+def _validate_overall_formula(
+    market_name: str,
+    official_scores: dict[str, float],
+    warnings: list[MFIMethodologyWarning],
+) -> None:
+    expected = calculate_current_databridge_mfi(
+        official_scores[dimension] for dimension in DISPLAY_DIMENSIONS
+    )
+    actual = official_scores["MFI"]
+    if expected is None or within_score_tolerance(actual, expected):
+        return
+    warnings.append(
+        MFIMethodologyWarning(
+            code="overall_formula_mismatch",
+            message=(
+                f"{market_name}: the current DataBridge overall formula calculates to "
+                f"{expected}, while the authoritative stored MFIScoreMFI is {actual}; "
+                "the stored score was retained."
+            ),
+            market_name=market_name,
+            dimension="MFI",
+            metric_ids=["mfi.overall"],
+            expected_value=expected,
+            actual_value=actual,
+            delta=actual - expected,
+            tolerance=SCORE_VALIDATION_ABS_TOLERANCE,
+        )
+    )
+
+
+def _apply_assessment_coverage(
+    evidence_models: dict[str, dict[str, list[MFIMetric]]],
+    total_markets: int,
+) -> None:
+    all_metrics = [
+        metric
+        for groups in evidence_models.values()
+        for group in groups.values()
+        for metric in group
+    ]
+    coverage: dict[str, int] = defaultdict(int)
+    missing: dict[str, int] = defaultdict(int)
+    for metric in all_metrics:
+        if metric.applicability_status == "available" and metric.validation_status == "valid":
+            coverage[metric.metric_id] += 1
+        elif metric.applicability_status == "missing" or (
+            metric.applicability_status == "available"
+            and metric.validation_status != "valid"
+        ):
+            missing[metric.metric_id] += 1
+    for metric in all_metrics:
+        metric.market_coverage = coverage[metric.metric_id]
+        metric.market_coverage_total = total_markets
+        metric.missing_count = missing[metric.metric_id]
+
+
+def _build_metric_summaries(
+    evidence_models: dict[str, dict[str, list[MFIMetric]]],
+    total_markets: int,
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[MFIMetric]] = defaultdict(list)
+    for groups in evidence_models.values():
+        for metrics in groups.values():
+            for metric in metrics:
+                grouped[metric.metric_id].append(metric)
+
+    summaries: dict[str, list[dict[str, Any]]] = {
+        dimension: [] for dimension in DISPLAY_DIMENSIONS
+    }
+    for metric_id, metrics in grouped.items():
+        reference = metrics[0]
+        available = [
+            metric
+            for metric in metrics
+            if metric.applicability_status == "available"
+            and metric.validation_status == "valid"
+            and metric.raw_value is not None
+        ]
+        normalized = [
+            metric.normalized_value
+            for metric in available
+            if metric.normalized_value is not None
+        ]
+        numerator = sum(metric.raw_value for metric in available if metric.raw_value is not None)
+        denominator = len(available)
+        missing_count = sum(
+            metric.applicability_status == "missing"
+            or (
+                metric.applicability_status == "available"
+                and metric.validation_status != "valid"
+            )
+            for metric in metrics
+        )
+        summary = MFIMetricSummary(
+            metric_id=metric_id,
+            dimension=reference.dimension,
+            display_name=reference.display_name,
+            role=reference.role,
+            mean_raw_value=numerator / denominator if denominator else None,
+            mean_normalized_value=(
+                sum(normalized) / len(normalized) if normalized else None
+            ),
+            aggregation_numerator=numerator if denominator else None,
+            aggregation_denominator=denominator,
+            available_market_count=denominator,
+            total_assessed_market_count=total_markets,
+            missing_count=missing_count,
+            unit=reference.unit,
+            orientation=reference.orientation,
+            evidence_scope=reference.evidence_scope,
+            contributing_metric_ids=[metric_id] if denominator else [],
+            methodology_note=reference.methodology_note,
+        )
+        summaries[reference.dimension].append(summary.model_dump())
+    for dimension in summaries:
+        summaries[dimension].sort(key=lambda item: item["metric_id"])
+    return summaries
+
+
+def _group_evidence_by_dimension(metrics: list[MFIMetric]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {
+        dimension: [] for dimension in DISPLAY_DIMENSIONS
+    }
+    for metric in metrics:
+        grouped[metric.dimension].append(metric.model_dump())
+    return grouped
+
+
+def _build_dimension_aggregations(
+    markets_data: list[dict[str, Any]], regions: list[str]
+) -> list[dict[str, Any]]:
+    aggregations: list[dict[str, Any]] = []
+    for dimension in DISPLAY_DIMENSIONS:
+        market_scores = {
+            market["market_name"]: market["dimension_scores"][dimension]
+            for market in markets_data
+        }
+        values = list(market_scores.values())
+        regional_scores = {
+            region: sum(
+                market["dimension_scores"][dimension]
+                for market in markets_data
+                if market["region"] == region
+            )
+            / sum(1 for market in markets_data if market["region"] == region)
+            for region in regions
+        }
+        aggregations.append(
+            {
+                "dimension": dimension,
+                "national_score": sum(values) / len(values),
+                "regional_scores": regional_scores,
+                "market_scores": market_scores,
+            }
+        )
+    return aggregations
+
+
+def _build_preview(df: pd.DataFrame) -> dict[str, Any]:
+    preview: dict[str, Any] = {"columns": list(df.columns)}
+    if "Adm0Name" in df.columns and not df.empty:
+        preview["country"] = _clean_text(df["Adm0Name"].iloc[0])
+    if "MarketName" in df.columns:
+        preview["markets_count"] = int(df["MarketName"].nunique())
+        preview["markets_sample"] = [
+            _clean_text(value) for value in df["MarketName"].dropna().unique()[:5]
+        ]
+    if "Adm1Name" in df.columns:
+        preview["regions_count"] = int(df["Adm1Name"].nunique())
+        preview["regions"] = [
+            _clean_text(value) for value in df["Adm1Name"].dropna().unique()
+        ]
+    if "DimensionName" in df.columns:
+        preview["dimensions"] = [
+            _clean_text(value) for value in df["DimensionName"].dropna().unique()
+        ]
+    return preview
+
+
+def _validation_failure(message: str) -> dict[str, Any]:
     return {
-        "Availability": {
-            "scarce_cereals_pct": round(max(0, 1 - safe_mean(avail_scarcity)), 2),
-            "runout_cereals_pct": round(max(0, 1 - safe_mean(avail_runout)), 2),
-        },
-        "Price": {
-            "increase_cereals_pct": round(max(0, 1 - safe_mean(price_increase)), 2),
-            "unstable_cereals_pct": round(max(0, 1 - safe_mean(price_stability)), 2),
-        },
-        "Resilience": {
-            "low_density_pct": round(max(0, 1 - safe_mean(density)), 2),
-            "high_complexity_pct": round(max(0, 1 - safe_mean(complexity)), 2),
-            "high_criticality_pct": round(max(0, 1 - safe_mean(criticality)), 2),
-        },
-        "Competition": {
-            "less_than_five_competitors": int(safe_first(concentration) < 3),
-            "monopoly_risk": int(safe_first(monopoly) > 3),
-        },
-        "Infrastructure": {
-            "condition_good": int(safe_first(trader_mean[trader_mean["VariableName"] == "InfrastructureConditionGood"]["OutputValue"]) > 0.5),
-            "condition_medium": int(safe_first(trader_mean[trader_mean["VariableName"] == "InfrastructureConditionMedium"]["OutputValue"]) > 0.5),
-            "condition_poor": int(safe_first(trader_mean[trader_mean["VariableName"] == "InfrastructureConditionPoor"]["OutputValue"]) > 0.5),
-        },
-        "Service": {
-            "checkout_score": round(safe_mean(checkout) * 10, 1),
-            "shopping_experience_score": round(safe_mean(shopping) * 10, 1),
-        },
-        "Food Quality": {
-            "quality_standards_met_pct": round(safe_mean(quality_vars), 2) if not quality_vars.empty else 0.75,
-            "quality_problems_pct": round(max(0, 1 - safe_mean(quality_vars)), 2) if not quality_vars.empty else 0.25,
-        },
-        "Access & Protection": {
-            "access_issues_pct": round(max(0, 1 - safe_mean(access)), 2),
-            "protection_issues_pct": round(max(0, 1 - safe_mean(protection)), 2),
-        },
-        "Assortment": {
-            "breadth": round(assort_score, 1),
-            "depth": round(assort_score, 1),
-        },
+        "valid": False,
+        "missing_columns": [],
+        "missing_metadata_fields": [],
+        "has_normalized_scores": False,
+        "preview": {},
+        "errors": [message],
+        "warnings": [],
+        "methodology_warnings": [],
+        "excluded_market_records": [],
     }
 
 
 def _standardise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename = {column: DATABRIDGES_COLUMN_MAP.get(str(column), str(column).strip()) for column in df.columns}
+    rename = {
+        column: DATABRIDGES_COLUMN_MAP.get(str(column), str(column).strip())
+        for column in df.columns
+    }
     return df.rename(columns=rename)
 
 
 def _validate_required_columns(df: pd.DataFrame) -> None:
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
-        raise ValueError(f"MFI data missing required columns: {', '.join(sorted(missing))}")
+        raise ValueError(
+            f"MFI data missing required columns: {', '.join(sorted(missing))}"
+        )
 
 
 def _first_date(df: pd.DataFrame, column: str) -> str:
@@ -409,14 +842,17 @@ def _first_date(df: pd.DataFrame, column: str) -> str:
 
 
 def _required_collection_date(
-    df: pd.DataFrame,
-    column: str,
-    override: Optional[str],
+    df: pd.DataFrame, column: str, override: Optional[str]
 ) -> str:
-    resolved = _format_date(override) if override not in (None, "") else _first_date(df, column)
+    resolved = (
+        _format_date(override)
+        if override not in (None, "")
+        else _first_date(df, column)
+    )
     if resolved == "Unknown":
         raise ValueError(
-            f"MFI data requires a valid {column} value. Upload a corrected processed CSV or supply an API override."
+            f"MFI data requires a valid {column} value. Upload a corrected processed "
+            "CSV or supply an API override."
         )
     return resolved
 
@@ -424,19 +860,31 @@ def _required_collection_date(
 def _format_date(value: Any) -> str:
     if value in (None, ""):
         return "Unknown"
-    try:
-        parsed = pd.to_datetime(value, errors="coerce")
-        if pd.isna(parsed):
-            return "Unknown"
-        return parsed.strftime("%Y-%m-%d")
-    except Exception:
-        return str(value)
-def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
-    if value in (None, ""):
-        return default
-    try:
-        if pd.isna(value):
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return "Unknown"
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    if value is None or pd.isna(value):
+        return None
+    return str(value).strip()
+
+
+def _first_non_null(values: pd.Series) -> Any:
+    available = values.dropna()
+    return available.iloc[0] if not available.empty else None
+
+
+def _nullable_int(value: Any) -> Optional[int]:
+    if value is None or pd.isna(value):
+        return None
+    return int(value)
+
+
+def _first_numeric(values: Optional[pd.Series]) -> Optional[float]:
+    if values is None:
+        return None
+    value = _first_non_null(values)
+    return float(value) if value is not None else None

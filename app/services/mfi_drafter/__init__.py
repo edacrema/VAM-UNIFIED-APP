@@ -20,6 +20,10 @@ __all__ = [
     "GenerateMFIReportInput",
     "GenerateMFIReportOutput",
     "MFIReportStatusOutput",
+    "MFIMetric",
+    "MFIMetricSummary",
+    "MFIMethodologyWarning",
+    "MFIExcludedMarketRecord",
 ]
 
 
@@ -48,6 +52,10 @@ def __getattr__(name: str):
         "GenerateMFIReportInput",
         "GenerateMFIReportOutput",
         "MFIReportStatusOutput",
+        "MFIMetric",
+        "MFIMetricSummary",
+        "MFIMethodologyWarning",
+        "MFIExcludedMarketRecord",
     }:
         return getattr(import_module(".schemas", __name__), name)
     raise AttributeError(name)

@@ -42,6 +42,7 @@ from app.services.mfi_drafter.data_loader import (
     load_mfi_from_csv,
     validate_csv_structure,
 )
+from app.services.mfi_drafter.compatibility import with_legacy_sub_score_aliases
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
@@ -430,10 +431,17 @@ def _build_mfi_report_output(
         "country": country,
         "data_collection_start": data_collection_start,
         "data_collection_end": data_collection_end,
+        "analysis_schema_version": result.get("analysis_schema_version", "2.0"),
+        "methodology_version": result.get("methodology_version", "databridge-current"),
+        "score_authority": result.get("score_authority", "synthetic_mock"),
+        "excluded_market_records": result.get("excluded_market_records", []),
+        "methodology_warnings": result.get("methodology_warnings", []),
         "survey_metadata": result.get("survey_metadata", {}),
         "national_mfi": national_mfi,
         "risk_distribution": risk_dist,
-        "markets_data": result.get("markets_data", []),
+        "markets_data": with_legacy_sub_score_aliases(
+            result.get("markets_data", [])
+        ),
         "dimension_scores": result.get("dimension_scores", []),
         "executive_summary": result.get("executive_summary", ""),
         "dimension_findings": normalized_dimension_findings,

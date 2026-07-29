@@ -19,8 +19,9 @@ class FakeUpload:
 
 
 class FakeMFIBackend:
-    def __init__(self, *, upload=None, validation=None):
+    def __init__(self, *, upload=None, validation=None, result=None):
         self.upload = upload
+        self.result = result
         self.validation = validation or {
             "valid": True,
             "missing_columns": [],
@@ -37,6 +38,8 @@ class FakeMFIBackend:
 
     def run_async_and_poll(self, **kwargs):
         self.runs.append(kwargs)
+        if self.result is not None:
+            return ("mfi-run-1", {"status": "completed"}, self.result)
         return (
             "mfi-run-1",
             {"status": "completed"},
@@ -131,3 +134,38 @@ def test_valid_mfi_metadata_starts_async_generation_without_overrides(monkeypatc
     assert "country_override" not in backend.runs[0]["start_data"]
     assert "data_collection_start_override" not in backend.runs[0]["start_data"]
     assert "data_collection_end_override" not in backend.runs[0]["start_data"]
+
+
+def test_methodology_warning_is_prominent_in_result_view(monkeypatch):
+    backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        result={
+            "run_id": "mfi-run-1",
+            "country": "South Sudan",
+            "national_mfi": 6.2,
+            "llm_calls": 1,
+            "report_blocks": [],
+            "methodology_warnings": [
+                {
+                    "code": "mfir_records_excluded",
+                    "message": "Excluded six MFIr-only records.",
+                }
+            ],
+            "excluded_market_records": [
+                {"market_name": "Hinche"},
+                {"market_name": "Jacmel"},
+            ],
+        },
+    )
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Generate report").click().run(timeout=20)
+
+    assert not app.exception
+    assert any(
+        "Excluded six MFIr-only records" in warning.value for warning in app.warning
+    )
+    assert any(
+        "Excluded MFIr-only records: Hinche, Jacmel" in caption.value
+        for caption in app.caption
+    )

@@ -35,7 +35,7 @@ st.caption(
 )
 
 
-@st.dialog("Required CSV data is missing", icon=":material/warning:")
+@st.dialog("Required CSV data is missing")
 def _show_csv_validation_dialog(validation):
     missing_fields = validation.get("missing_metadata_fields") or validation.get("missing_columns") or []
     if missing_fields:
@@ -106,6 +106,23 @@ run_id = st.session_state.get("mfi_last_run_id")
 if isinstance(result, dict):
 
     display_run_id = str(run_id or result.get("run_id") or "")
+    methodology_warnings = result.get("methodology_warnings") or []
+    excluded_records = result.get("excluded_market_records") or []
+
+    if methodology_warnings or excluded_records:
+        st.subheader("Methodology and coverage notices")
+        for warning in methodology_warnings:
+            message = warning.get("message") if isinstance(warning, dict) else warning
+            if message:
+                st.warning(str(message))
+        if excluded_records:
+            excluded_names = [
+                str(record.get("market_name"))
+                for record in excluded_records
+                if isinstance(record, dict) and record.get("market_name")
+            ]
+            if excluded_names:
+                st.caption("Excluded MFIr-only records: " + ", ".join(excluded_names))
 
     def _preview() -> None:
         render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))

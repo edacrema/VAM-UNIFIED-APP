@@ -19,26 +19,26 @@ import base64
 import random
 import logging
 from math import pi
-from datetime import datetime, timedelta
 from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
 
 import operator
 from collections import Counter
 
-import pandas as pd
 import numpy as np
 
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage
 
 from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .schemas import (
-    MFI_DIMENSIONS, RISK_COLORS, get_risk_level,
-    Document, MFIMarketData, MFIDimensionScore, SurveyMetadata
+    MFI_DIMENSIONS, RISK_COLORS, get_risk_level, MFIMetric
 )
-from .data_loader import load_mfi_from_csv
+from .methodology import (
+    ANALYSIS_SCHEMA_VERSION,
+    METHODOLOGY_VERSION,
+    SUBSECTIONS_BY_DIMENSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,13 @@ class MFIReportState(TypedDict):
     raw_survey_data: Optional[str]
     markets_data: List[Dict[str, Any]]
     dimension_scores: List[Dict[str, Any]]
+    metric_summaries: Dict[str, List[Dict[str, Any]]]
     survey_metadata: Optional[Dict[str, Any]]
+    analysis_schema_version: str
+    methodology_version: str
+    score_authority: str
+    excluded_market_records: List[Dict[str, Any]]
+    methodology_warnings: List[Dict[str, Any]]
     
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
@@ -113,7 +119,17 @@ def create_initial_state(
         raw_survey_data=None,
         markets_data=[],
         dimension_scores=[],
+        metric_summaries=(csv_data or {}).get("metric_summaries", {}),
         survey_metadata=None,
+        analysis_schema_version=(csv_data or {}).get(
+            "analysis_schema_version", ANALYSIS_SCHEMA_VERSION
+        ),
+        methodology_version=(csv_data or {}).get(
+            "methodology_version", METHODOLOGY_VERSION
+        ),
+        score_authority=(csv_data or {}).get("score_authority", "synthetic_mock"),
+        excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
+        methodology_warnings=(csv_data or {}).get("methodology_warnings", []),
         contextual_documents=[],
         document_references=[],
         seerist_documents=[],
@@ -158,6 +174,36 @@ def robust_json_parse(response: Any) -> Optional[Dict]:
         return json.loads(raw_output[start_index:end_index+1])
     except json.JSONDecodeError:
         return None
+
+
+def _metric_prompt_view(metric: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the typed semantics a drafter needs without audit-only metadata."""
+    return {
+        key: metric.get(key)
+        for key in (
+            "metric_id",
+            "display_name",
+            "role",
+            "raw_value",
+            "mean_raw_value",
+            "normalized_value",
+            "mean_normalized_value",
+            "unit",
+            "orientation",
+            "evidence_scope",
+            "applicability_status",
+            "validation_status",
+            "available_market_count",
+            "total_assessed_market_count",
+            "market_coverage",
+            "market_coverage_total",
+            "missing_count",
+            "product_group",
+            "question_group",
+            "item_name",
+        )
+        if key in metric
+    }
 
 
 def _normalize_llm_text(value: Any, *, bulletify: bool = False) -> str:
@@ -318,7 +364,7 @@ def generate_mock_mfi_data(
     data_collection_start: str,
     data_collection_end: str
 ) -> Dict[str, Any]:
-    """Genera dati MFI mock realistici."""
+    """Generate explicitly synthetic data in the canonical typed evidence shape."""
     logger.info(f"[MOCK] Generating MFI data for {country} ({len(markets)} markets)")
     
     # Mock admin mapping (API-like enrichment)
@@ -335,62 +381,65 @@ def generate_mock_mfi_data(
         admin_info = market_admin_map.get(market, {"admin0": country, "admin1": "Unknown", "admin2": "Unknown"})
         region = admin_info["admin1"]
         dimension_scores = {}
-        sub_scores = {}
-        
+        subsections: Dict[str, List[Dict[str, Any]]] = {
+            dimension: [] for dimension in MFI_DIMENSIONS
+        }
+        drivers: Dict[str, List[Dict[str, Any]]] = {
+            dimension: [] for dimension in MFI_DIMENSIONS
+        }
+
         for dim in MFI_DIMENSIONS:
             base_score = random.uniform(4.5, 9.5)
             dimension_scores[dim] = round(base_score, 1)
-            
-            # Sub-scores specifici per dimensione
-            if dim == "Assortment":
-                sub_scores[dim] = {
-                    "breadth": round(base_score + random.uniform(-0.5, 0.5), 1),
-                    "depth": round(base_score + random.uniform(-0.5, 0.5), 1)
-                }
-            elif dim == "Availability":
-                sub_scores[dim] = {
-                    "scarce_cereals_pct": round(random.uniform(0.1, 0.5), 2),
-                    "runout_cereals_pct": round(random.uniform(0.1, 0.4), 2)
-                }
-            elif dim == "Price":
-                sub_scores[dim] = {
-                    "increase_cereals_pct": round(random.uniform(0.2, 0.6), 2),
-                    "unstable_cereals_pct": round(random.uniform(0.3, 0.8), 2)
-                }
-            elif dim == "Resilience":
-                sub_scores[dim] = {
-                    "low_density_pct": round(random.uniform(0.05, 0.6), 2),
-                    "high_complexity_pct": round(random.uniform(0.05, 0.5), 2),
-                    "high_criticality_pct": round(random.uniform(0.05, 0.5), 2)
-                }
-            elif dim == "Competition":
-                sub_scores[dim] = {
-                    "less_than_five_competitors": random.choice([0, 1]),
-                    "monopoly_risk": random.choice([0, 1])
-                }
-            elif dim == "Infrastructure":
-                sub_scores[dim] = {
-                    "condition_good": random.choice([0, 1]),
-                    "condition_medium": random.choice([0, 1]),
-                    "condition_poor": random.choice([0, 1])
-                }
-            elif dim == "Service":
-                sub_scores[dim] = {
-                    "checkout_score": round(random.uniform(4, 9), 1),
-                    "shopping_experience_score": round(random.uniform(3, 8), 1)
-                }
-            elif dim == "Food Quality":
-                standards_met = round(random.uniform(0.5, 0.95), 2)
-                sub_scores[dim] = {
-                    "quality_standards_met_pct": standards_met,
-                    "quality_problems_pct": round(max(0, 1 - standards_met), 2)
-                }
-            elif dim == "Access & Protection":
-                sub_scores[dim] = {
-                    "access_issues_pct": round(random.uniform(0, 0.3), 2),
-                    "protection_issues_pct": round(random.uniform(0, 0.2), 2)
-                }
-        
+
+            quality_maximum = 8.0
+            quality_measure = random.uniform(0.0, quality_maximum)
+            for definition in SUBSECTIONS_BY_DIMENSION[dim]:
+                if definition.metric_id == "quality.maximum":
+                    raw_value = quality_maximum
+                elif definition.metric_id == "quality.measure":
+                    raw_value = quality_measure
+                else:
+                    raw_value = random.uniform(definition.raw_min, definition.raw_max)
+                normalized = definition.normalize(
+                    raw_value,
+                    dynamic_max=quality_maximum
+                    if definition.metric_id == "quality.measure"
+                    else None,
+                )
+                subsections[dim].append(
+                    MFIMetric(
+                        metric_id=definition.metric_id,
+                        dimension=definition.dimension,
+                        display_name=definition.display_name,
+                        variable_name=definition.variable_name,
+                        source_level_id=definition.source_level_id,
+                        source_level_name=definition.source_level_name,
+                        role=definition.role,
+                        raw_value=raw_value,
+                        raw_min=definition.raw_min,
+                        raw_max=definition.raw_max,
+                        normalized_value=normalized,
+                        orientation=definition.orientation,
+                        unit=definition.unit,
+                        evidence_scope=definition.evidence_scope,
+                        observed_raw_values=[raw_value],
+                        market_coverage=len(markets),
+                        market_coverage_total=len(markets),
+                        missing_count=0,
+                        applicability_status="available",
+                        validation_status="valid",
+                        methodology_note=(
+                            "Synthetic mock evidence for workflow demonstration only; "
+                            "not a DataBridge observation."
+                        ),
+                        product_group=definition.product_group,
+                        question_group=definition.question_group,
+                        item_name=definition.item_name,
+                        severity_weight=definition.severity_weight,
+                    ).model_dump()
+                )
+
         overall_mfi = round(np.mean(list(dimension_scores.values())), 1)
         markets_data.append({
             "market_name": market,
@@ -400,7 +449,8 @@ def generate_mock_mfi_data(
             "region": region,
             "overall_mfi": overall_mfi,
             "dimension_scores": dimension_scores,
-            "sub_scores": sub_scores,
+            "subsections": subsections,
+            "drivers": drivers,
             "risk_level": get_risk_level(overall_mfi),
             "traders_surveyed": random.randint(15, 30)
         })
@@ -434,10 +484,62 @@ def generate_mock_mfi_data(
     }
     
     return {
+        "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
+        "methodology_version": METHODOLOGY_VERSION,
+        "score_authority": "synthetic_mock",
+        "excluded_market_records": [],
+        "methodology_warnings": [],
+        "warnings": [],
         "markets_data": markets_data,
         "dimension_scores": dimension_aggregations,
+        "metric_summaries": _summarize_mock_evidence(markets_data),
         "survey_metadata": survey_metadata
     }
+
+
+def _summarize_mock_evidence(
+    markets_data: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Summarize synthetic typed metrics with the same deterministic market mean."""
+    summaries: Dict[str, List[Dict[str, Any]]] = {
+        dimension: [] for dimension in MFI_DIMENSIONS
+    }
+    for dimension in MFI_DIMENSIONS:
+        by_metric: Dict[str, List[Dict[str, Any]]] = {}
+        for market in markets_data:
+            for metric in market["subsections"].get(dimension, []):
+                by_metric.setdefault(metric["metric_id"], []).append(metric)
+        for metric_id, metrics in sorted(by_metric.items()):
+            raw_values = [float(metric["raw_value"]) for metric in metrics]
+            normalized = [
+                float(metric["normalized_value"])
+                for metric in metrics
+                if metric.get("normalized_value") is not None
+            ]
+            reference = metrics[0]
+            summaries[dimension].append(
+                {
+                    "metric_id": metric_id,
+                    "dimension": dimension,
+                    "display_name": reference["display_name"],
+                    "role": reference["role"],
+                    "mean_raw_value": sum(raw_values) / len(raw_values),
+                    "mean_normalized_value": (
+                        sum(normalized) / len(normalized) if normalized else None
+                    ),
+                    "aggregation_numerator": sum(raw_values),
+                    "aggregation_denominator": len(raw_values),
+                    "available_market_count": len(raw_values),
+                    "total_assessed_market_count": len(markets_data),
+                    "missing_count": len(markets_data) - len(raw_values),
+                    "unit": reference["unit"],
+                    "orientation": reference["orientation"],
+                    "evidence_scope": reference["evidence_scope"],
+                    "contributing_metric_ids": [metric_id],
+                    "methodology_note": reference["methodology_note"],
+                }
+            )
+    return summaries
 
 
 def node_mfi_data_agent(state: MFIReportState) -> dict:
@@ -463,9 +565,16 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
     logger.info(f"Risk distribution: {risk_dist}")
     
     return {
+        "analysis_schema_version": data.get("analysis_schema_version", ANALYSIS_SCHEMA_VERSION),
+        "methodology_version": data.get("methodology_version", METHODOLOGY_VERSION),
+        "score_authority": data.get("score_authority", "synthetic_mock"),
+        "excluded_market_records": data.get("excluded_market_records", []),
+        "methodology_warnings": data.get("methodology_warnings", []),
         "markets_data": data["markets_data"],
         "dimension_scores": data["dimension_scores"],
+        "metric_summaries": data.get("metric_summaries", {}),
         "survey_metadata": data["survey_metadata"],
+        "warnings": data.get("warnings", []),
         "current_node": "mfi_data_agent"
     }
 
@@ -996,7 +1105,6 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
     
     llm = get_model()
     dimension_findings = state.get("dimension_findings", {})
-    markets_data = state["markets_data"]
     llm_calls = 0
     
     for dim_data in state["dimension_scores"]:
@@ -1004,13 +1112,10 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
         logger.info(f"Processing dimension: {dimension}")
         
         try:
-            # Aggregate sub-scores
-            sub_scores_combined = {}
-            for market in markets_data:
-                if dimension in market.get("sub_scores", {}):
-                    for k, v in market["sub_scores"][dimension].items():
-                        sub_scores_combined.setdefault(k, []).append(v)
-            sub_scores_avg = {k: round(np.mean(v), 2) for k, v in sub_scores_combined.items()}
+            typed_evidence = [
+                _metric_prompt_view(metric)
+                for metric in state.get("metric_summaries", {}).get(dimension, [])
+            ]
             
             prompt = f"""Generate findings for the **{dimension}** MFI dimension.
 
@@ -1023,20 +1128,15 @@ Data:
 - National Score: {dim_data['national_score']}/10
 - Regional: {json.dumps(dim_data['regional_scores'])}
 - Markets: {json.dumps(dim_data['market_scores'])}
-- Sub-scores (0-1 fractions): {json.dumps(sub_scores_avg)}
+- Typed explanatory evidence summaries: {json.dumps(typed_evidence)}
 
-Sub-score interpretation rules (MANDATORY):
-- All values are 0-1 fractions. To write percentages, multiply by 100.
-- DO NOT INVERT these values.
-- Unless explicitly stated otherwise, higher *_pct means a higher rate of the named problem (worse).
-- Exception: quality_standards_met_pct is positive (higher = better). quality_problems_pct is negative (higher = worse).
-- For Availability and Price sub-scores in particular, treat them strictly as problem rates even if the National Score is high.
-
-Examples (do not contradict these):
-- scarce_cereals_pct=0.80 means 80% of traders report cereal SCARCITY (not 20%).
-- runout_cereals_pct=0.82 means 82% of traders report cereal STOCKOUTS (not 18%).
-- increase_cereals_pct=0.83 means 83% of traders report cereal PRICE INCREASES.
-- unstable_cereals_pct=0.58 means 58% of traders report cereal PRICE INSTABILITY.
+Typed evidence interpretation rules (MANDATORY):
+- Evidence is already aggregated as a deterministic, unweighted mean across available markets.
+- Do not average, invert, complement, or otherwise transform a supplied value.
+- Read `unit`, `orientation`, and `evidence_scope` for every metric.
+- `higher_is_better` and `higher_is_worse` explicitly define polarity.
+- Use coverage fields to qualify evidence that is not available in every assessed market.
+- A null normalized value is not zero and must not be interpreted quantitatively.
 
 Description: {DIMENSION_DESCRIPTIONS.get(dimension, '')}
 
@@ -1123,12 +1223,32 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
         if not weak_dims:
             continue
 
+        evidence_dimensions = {dimension for dimension, _score in weak_dims[:4]}
+        typed_market_evidence = {
+            "subsections": {
+                dimension: [
+                    _metric_prompt_view(metric)
+                    for metric in (
+                        market.get("subsections", {}).get(dimension, []) or []
+                    )
+                ]
+                for dimension in evidence_dimensions
+            },
+            "drivers": {
+                dimension: [
+                    _metric_prompt_view(metric)
+                    for metric in (market.get("drivers", {}).get(dimension, []) or [])
+                ]
+                for dimension in evidence_dimensions
+            },
+        }
+
         prompt = f"""Generate targeted recommendations for {market_name} market ({region}).
 
 MARKET DATA:
 - Overall MFI: {market.get('overall_mfi')}/10 ({market.get('risk_level')})
 - Weak dimensions: {json.dumps([{'dim': d, 'score': float(s)} for d, s in weak_dims[:4]])}
-- Sub-scores: {json.dumps(market.get('sub_scores', {}))}
+- Typed explanatory evidence: {json.dumps(typed_market_evidence)}
 
 RULES:
 - Language: English only
@@ -1136,6 +1256,8 @@ RULES:
 - Focus on the 2-3 weakest dimensions
 - Provide specific, actionable interventions
 - Link interventions to specific issues identified
+- Do not average or invert evidence values; use each metric's unit, orientation,
+  scope, applicability, validation, and coverage as supplied.
 
 Output JSON:
 {{

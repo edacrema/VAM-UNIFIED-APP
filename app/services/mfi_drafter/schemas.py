@@ -7,26 +7,24 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 
 from app.shared.report_blocks import ReportBlock
+from .methodology import (
+    ANALYSIS_SCHEMA_VERSION,
+    CSV_DIMENSION_TO_DISPLAY,
+    DISPLAY_DIMENSIONS,
+    METHODOLOGY_VERSION,
+    OFFICIAL_DIMENSION_SCORE_VARIABLES,
+    SCORE_AUTHORITY,
+)
 
 
 # ============================================================================
 # CONSTANTS
 # ============================================================================
 
-MFI_DIMENSIONS = [
-    "Assortment",
-    "Availability",
-    "Price",
-    "Resilience",
-    "Competition",
-    "Infrastructure",
-    "Service",
-    "Food Quality",
-    "Access & Protection"
-]
+MFI_DIMENSIONS = list(DISPLAY_DIMENSIONS)
 
 RISK_COLORS = {
     "Very High Risk": "#d62728",
@@ -36,27 +34,13 @@ RISK_COLORS = {
 }
 
 DIMENSION_NAME_MAP = {
-    "Quality": "Food Quality",
-    "AccessProtection": "Access & Protection",
-    "Assortment": "Assortment",
-    "Availability": "Availability",
-    "Price": "Price",
-    "Resilience": "Resilience",
-    "Competition": "Competition",
-    "Infrastructure": "Infrastructure",
-    "Service": "Service",
+    key: value
+    for key, value in CSV_DIMENSION_TO_DISPLAY.items()
+    if key != "MFI"
 }
 
 SCORE_VARIABLE_MAP = {
-    "Assortment": "AssortmentScoreMFI",
-    "Availability": "AvailabilityScoreMFI",
-    "Price": "PriceScoreMFI",
-    "Resilience": "ResilienceScoreMFI",
-    "Competition": "CompetitionScoreMFI",
-    "Infrastructure": "InfrastructureScoreMFI",
-    "Service": "ServiceScoreMFI",
-    "Quality": "QualityScoreMFI",
-    "AccessProtection": "AccessProtectionScoreMFI",
+    **dict(OFFICIAL_DIMENSION_SCORE_VARIABLES),
     "MFI": "MFIScoreMFI",
 }
 
@@ -101,7 +85,8 @@ class MFIMarketData:
     region: str
     overall_mfi: float
     dimension_scores: Dict[str, float]
-    sub_scores: Dict[str, Dict[str, Any]]
+    subsections: Dict[str, List[Dict[str, Any]]]
+    drivers: Dict[str, List[Dict[str, Any]]]
     risk_level: str
     traders_surveyed: int
     latitude: Optional[float] = None
@@ -163,6 +148,105 @@ class SurveyMetadata:
 
 
 # ============================================================================
+# MFI 2.0 METHODOLOGY EVIDENCE
+# ============================================================================
+
+class MFIMetric(BaseModel):
+    """One exact processed-DataBridge metric for one assessed market."""
+
+    metric_id: str
+    dimension: str
+    display_name: str
+    variable_name: str
+    source_level_id: int
+    source_level_name: str
+    role: Literal[
+        "official_score",
+        "official_subsection",
+        "dimension_validation_component",
+        "question_driver",
+        "category_driver",
+        "item_driver",
+    ]
+    raw_value: Optional[float] = None
+    raw_min: float
+    raw_max: float
+    normalized_value: Optional[float] = None
+    orientation: Literal["higher_is_better", "higher_is_worse", "descriptive"]
+    unit: Literal["score", "proportion"]
+    evidence_scope: Literal["assessed_market", "surveyed_traders_in_market"]
+    observed_raw_values: List[Optional[float]] = Field(default_factory=list)
+    market_coverage: int = 0
+    market_coverage_total: int = 0
+    missing_count: int = 0
+    applicability_status: Literal[
+        "available",
+        "missing",
+        "not_applicable",
+        "not_represented",
+    ] = "available"
+    validation_status: Literal[
+        "valid",
+        "missing",
+        "out_of_range",
+        "duplicate",
+        "formula_mismatch",
+    ] = "valid"
+    methodology_note: str
+    product_group: Optional[str] = None
+    question_group: Optional[str] = None
+    item_name: Optional[str] = None
+    severity_weight: Optional[int] = None
+    traders_sample_size: Optional[int] = None
+
+
+class MFIMetricSummary(BaseModel):
+    """Deterministic unweighted summary across available assessed markets."""
+
+    metric_id: str
+    dimension: str
+    display_name: str
+    role: str
+    mean_raw_value: Optional[float] = None
+    mean_normalized_value: Optional[float] = None
+    aggregation_numerator: Optional[float] = None
+    aggregation_denominator: int = 0
+    available_market_count: int = 0
+    total_assessed_market_count: int = 0
+    missing_count: int = 0
+    unit: str
+    orientation: str
+    evidence_scope: str
+    contributing_metric_ids: List[str] = Field(default_factory=list)
+    methodology_note: str = ""
+
+
+class MFIMethodologyWarning(BaseModel):
+    """Structured, user-visible methodology or coverage warning."""
+
+    code: str
+    severity: Literal["warning", "error"] = "warning"
+    message: str
+    market_name: Optional[str] = None
+    dimension: Optional[str] = None
+    metric_ids: List[str] = Field(default_factory=list)
+    expected_value: Optional[float] = None
+    actual_value: Optional[float] = None
+    delta: Optional[float] = None
+    tolerance: Optional[float] = None
+
+
+class MFIExcludedMarketRecord(BaseModel):
+    """A processed market record excluded from the Full MFI assessment."""
+
+    market_name: str
+    detected_record_type: Literal["mfir_only"]
+    reason: str
+    available_level1_variables: List[str] = Field(default_factory=list)
+    missing_level1_variables: List[str] = Field(default_factory=list)
+
+
+# ============================================================================
 # PYDANTIC MODELS (API)
 # ============================================================================
 
@@ -187,6 +271,12 @@ class GenerateMFIReportOutput(BaseModel):
     country: str
     data_collection_start: str
     data_collection_end: str
+
+    analysis_schema_version: Literal["2.0"] = ANALYSIS_SCHEMA_VERSION
+    methodology_version: Literal["databridge-current"] = METHODOLOGY_VERSION
+    score_authority: Literal["databridge_level_1", "synthetic_mock"] = SCORE_AUTHORITY
+    excluded_market_records: List[MFIExcludedMarketRecord] = Field(default_factory=list)
+    methodology_warnings: List[MFIMethodologyWarning] = Field(default_factory=list)
     
     # Survey info
     survey_metadata: Dict[str, Any]
@@ -200,18 +290,18 @@ class GenerateMFIReportOutput(BaseModel):
     # Generated content
     executive_summary: str
     dimension_findings: Dict[str, Dict[str, str]]
-    market_recommendations: Dict[str, Dict[str, Any]] = {}
+    market_recommendations: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     country_context: Optional[str] = None
 
-    document_references: List[Dict[str, Any]] = []
+    document_references: List[Dict[str, Any]] = Field(default_factory=list)
 
-    report_blocks: List[ReportBlock] = []
+    report_blocks: List[ReportBlock] = Field(default_factory=list)
     
     # Visualizations (Base64)
     visualizations: Dict[str, str]
     
     # Control
-    warnings: List[str] = []
+    warnings: List[str] = Field(default_factory=list)
     llm_calls: int = 0
     correction_attempts: int = 0
     success: bool = True
@@ -223,7 +313,7 @@ class MFIReportStatusOutput(BaseModel):
     status: Literal["pending", "running", "completed", "failed"]
     current_node: Optional[str] = None
     progress_pct: int = 0
-    warnings: List[str] = []
-    metadata: Dict[str, Any] = {}
+    warnings: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
     traceback: Optional[str] = None

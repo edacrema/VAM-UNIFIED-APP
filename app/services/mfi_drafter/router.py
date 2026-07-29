@@ -13,6 +13,7 @@ import numpy as np
 
 from .graph import run_mfi_report_generation
 from .data_loader import load_mfi_from_csv, validate_csv_structure
+from .compatibility import with_legacy_sub_score_aliases
 from .schemas import (
     GenerateMFIReportInput,
     GenerateMFIReportOutput,
@@ -139,10 +140,15 @@ def _build_mfi_output(
         country=country,
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
+        analysis_schema_version=result.get("analysis_schema_version", "2.0"),
+        methodology_version=result.get("methodology_version", "databridge-current"),
+        score_authority=result.get("score_authority", "synthetic_mock"),
+        excluded_market_records=result.get("excluded_market_records", []),
+        methodology_warnings=result.get("methodology_warnings", []),
         survey_metadata=result.get("survey_metadata", {}),
         national_mfi=national_mfi,
         risk_distribution=risk_dist,
-        markets_data=result.get("markets_data", []),
+        markets_data=with_legacy_sub_score_aliases(result.get("markets_data", [])),
         dimension_scores=result.get("dimension_scores", []),
         executive_summary=result.get("executive_summary", ""),
         dimension_findings=normalized_dimension_findings,
@@ -214,51 +220,11 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             markets=input_data.markets,
         )
         
-        # Calculate national MFI
-        market_mfis = [
-            float(m.get("overall_mfi", 0) or 0)
-            for m in (result.get("markets_data", []) or [])
-            if isinstance(m, dict)
-        ]
-        national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
-        
-        # Calculate risk distribution
-        risk_dist = {}
-        for m in result.get("markets_data", []):
-            risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
-        
-        normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
-
-        output = GenerateMFIReportOutput(
-            run_id=result.get("run_id", "unknown"),
+        output = _build_mfi_output(
+            result=result,
             country=input_data.country,
             data_collection_start=input_data.data_collection_start,
             data_collection_end=input_data.data_collection_end,
-            survey_metadata=result.get("survey_metadata", {}),
-            national_mfi=national_mfi,
-            risk_distribution=risk_dist,
-            markets_data=result.get("markets_data", []),
-            dimension_scores=result.get("dimension_scores", []),
-            executive_summary=result.get("executive_summary", ""),
-            dimension_findings=normalized_dimension_findings,
-            market_recommendations=result.get("market_recommendations", {}) or {},
-            country_context=result.get("country_context"),
-            document_references=result.get("document_references", []),
-            report_blocks=build_mfi_report_blocks(
-                {
-                    **(result or {}),
-                    "country": input_data.country,
-                    "data_collection_start": input_data.data_collection_start,
-                    "data_collection_end": input_data.data_collection_end,
-                    "dimension_findings": normalized_dimension_findings,
-                    "market_recommendations": result.get("market_recommendations", {}) or {},
-                }
-            ),
-            visualizations=result.get("visualizations", {}),
-            warnings=result.get("warnings", []),
-            llm_calls=result.get("llm_calls", 0),
-            correction_attempts=result.get("correction_attempts", 0),
-            success=True
         )
         
         logger.info(f"MFI report generation completed: {output.run_id}")
@@ -566,43 +532,11 @@ async def get_report_result(run_id: str):
         )
 
     result = run.result or {}
-    normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
-    result_for_blocks = dict(result)
-    result_for_blocks["dimension_findings"] = normalized_dimension_findings
-    result_for_blocks["market_recommendations"] = result.get("market_recommendations", {}) or {}
-
-    market_mfis = [
-        float(m.get("overall_mfi", 0) or 0)
-        for m in (result.get("markets_data", []) or [])
-        if isinstance(m, dict)
-    ]
-    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
-    
-    risk_dist = {}
-    for m in result.get("markets_data", []):
-        risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
-    
-    return GenerateMFIReportOutput(
-        run_id=run_id,
+    return _build_mfi_output(
+        result={**result, "run_id": run_id},
         country=result.get("country", "Unknown"),
         data_collection_start=result.get("data_collection_start", "Unknown"),
         data_collection_end=result.get("data_collection_end", "Unknown"),
-        survey_metadata=result.get("survey_metadata", {}),
-        national_mfi=national_mfi,
-        risk_distribution=risk_dist,
-        markets_data=result.get("markets_data", []),
-        dimension_scores=result.get("dimension_scores", []),
-        executive_summary=result.get("executive_summary", ""),
-        dimension_findings=normalized_dimension_findings,
-        market_recommendations=result.get("market_recommendations", {}) or {},
-        country_context=result.get("country_context"),
-        document_references=result.get("document_references", []),
-        report_blocks=build_mfi_report_blocks(result_for_blocks),
-        visualizations=result.get("visualizations", {}),
-        warnings=result.get("warnings", []),
-        llm_calls=result.get("llm_calls", 0),
-        correction_attempts=result.get("correction_attempts", 0),
-        success=True
     )
 
 
