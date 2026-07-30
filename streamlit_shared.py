@@ -1011,6 +1011,30 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
                 st.write(block)
             continue
 
+        if btype == "evidence_note":
+            text = str(block.get("text") or "").strip()
+            if text:
+                st.caption(f"Evidence: {text}")
+            continue
+
+        if btype == "limitation_box":
+            text = str(block.get("text") or "").strip()
+            if text:
+                st.warning(text)
+            continue
+
+        if btype == "methodology_note":
+            text = str(block.get("text") or "").strip()
+            if text:
+                st.info(text)
+            continue
+
+        if btype == "qa_warning":
+            text = str(block.get("text") or "").strip()
+            if text:
+                st.error(text)
+            continue
+
         if btype == "table":
             meta = block.get("meta")
             if isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
@@ -1063,6 +1087,29 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
                         key=f"report_table_download_{idx}",
                     )
                     continue
+            if isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
+                rows = meta.get("rows") or []
+                flat_rows = [
+                    row.get("values", {})
+                    for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("values"), dict)
+                ]
+                if flat_rows:
+                    title = str(meta.get("title") or "").strip()
+                    if title:
+                        st.markdown(f"**{title}**")
+                    columns = [
+                        str(column)
+                        for column in meta.get("columns", [])
+                        if str(column).strip()
+                    ]
+                    dataframe = pd.DataFrame(flat_rows)
+                    if columns:
+                        dataframe = dataframe[
+                            [column for column in columns if column in dataframe.columns]
+                        ]
+                    st.dataframe(dataframe, width="stretch", hide_index=True)
+                continue
 
             if isinstance(meta, dict):
                 st.json(meta)

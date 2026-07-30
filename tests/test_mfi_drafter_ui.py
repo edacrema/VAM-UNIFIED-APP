@@ -169,3 +169,53 @@ def test_methodology_warning_is_prominent_in_result_view(monkeypatch):
         "Excluded MFIr-only records: Hinche, Jacmel" in caption.value
         for caption in app.caption
     )
+
+
+def test_phase3_mean_priorities_limitations_and_qa_are_visible(monkeypatch):
+    backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        result={
+            "run_id": "mfi-run-1",
+            "country": "South Sudan",
+            "mean_mfi_across_assessed_markets": 6.234,
+            "llm_calls": 1,
+            "report_blocks": [],
+            "assessment_profile": {
+                "assessed_market_count": 12,
+                "priority_dimension_names": ["Service", "Infrastructure"],
+                "limitations": [
+                    {"message": "Regional coverage is incomplete."}
+                ],
+            },
+            "qa_review": {
+                "status": "completed_with_warnings",
+                "flags": [
+                    {
+                        "severity": "high",
+                        "message": "One claim remains unverified.",
+                    }
+                ],
+            },
+        },
+    )
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Generate report").click().run(timeout=20)
+
+    assert not app.exception
+    assert any(
+        metric.label == "Mean MFI across assessed markets"
+        and metric.value == "6.23/10"
+        for metric in app.metric
+    )
+    assert any(
+        "Priority dimensions: Service, Infrastructure" in info.value
+        for info in app.info
+    )
+    assert any(
+        "Regional coverage is incomplete" in warning.value
+        for warning in app.warning
+    )
+    assert any(
+        "unresolved material issues" in error.value for error in app.error
+    )

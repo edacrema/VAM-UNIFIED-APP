@@ -43,14 +43,15 @@ def _add_text_lines(doc: Document, text: str) -> None:
         doc.add_paragraph(line)
 
 
-def _get_risk_color_rgb(score: float) -> tuple[int, int, int]:
-    if score < 4.0:
-        return (214, 39, 40)
-    if score < 5.5:
-        return (255, 127, 14)
-    if score < 7.0:
-        return (255, 187, 120)
-    return (44, 160, 44)
+def _get_continuous_score_rgb(score: float) -> tuple[int, int, int]:
+    """Map a 0-10 score continuously from near-white to WFP blue."""
+    ratio = max(0.0, min(float(score), 10.0)) / 10.0
+    start = (239, 246, 255)
+    end = (0, 114, 188)
+    return tuple(
+        round(start[index] + (end[index] - start[index]) * ratio)
+        for index in range(3)
+    )
 
 
 def _set_cell_background(cell: Any, rgb_tuple: tuple[int, int, int]) -> None:
@@ -108,13 +109,18 @@ def _add_overview_table_to_document(doc: Document, *, meta: Dict[str, Any]) -> N
         for dim_idx, dim in enumerate(dims):
             cell = row.cells[dim_idx + 2]
             try:
-                score = float(dim_scores.get(dim, 0) or 0)
-            except Exception:
-                score = 0.0
-            cell.text = f"{score:.1f}"
-            _set_cell_background(cell, _get_risk_color_rgb(score))
-
-            text_color = RGBColor(255, 255, 255) if score < 4.0 or score >= 7.0 else RGBColor(0, 0, 0)
+                raw_score = dim_scores.get(dim)
+                score = float(raw_score) if raw_score is not None else None
+            except (TypeError, ValueError):
+                score = None
+            cell.text = f"{score:.2f}" if score is not None else "—"
+            if score is not None:
+                _set_cell_background(cell, _get_continuous_score_rgb(score))
+            text_color = (
+                RGBColor(255, 255, 255)
+                if score is not None and score >= 6.5
+                else RGBColor(0, 0, 0)
+            )
             for paragraph in cell.paragraphs:
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 for run in paragraph.runs:
@@ -123,12 +129,18 @@ def _add_overview_table_to_document(doc: Document, *, meta: Dict[str, Any]) -> N
 
         mfi_cell = row.cells[-1]
         try:
-            mfi_score = float(market.get("overall_mfi", 0) or 0)
-        except Exception:
-            mfi_score = 0.0
-        mfi_cell.text = f"{mfi_score:.1f}"
-        _set_cell_background(mfi_cell, _get_risk_color_rgb(mfi_score))
-        mfi_text_color = RGBColor(255, 255, 255) if mfi_score < 4.0 or mfi_score >= 7.0 else RGBColor(0, 0, 0)
+            raw_mfi = market.get("overall_mfi")
+            mfi_score = float(raw_mfi) if raw_mfi is not None else None
+        except (TypeError, ValueError):
+            mfi_score = None
+        mfi_cell.text = f"{mfi_score:.2f}" if mfi_score is not None else "—"
+        if mfi_score is not None:
+            _set_cell_background(mfi_cell, _get_continuous_score_rgb(mfi_score))
+        mfi_text_color = (
+            RGBColor(255, 255, 255)
+            if mfi_score is not None and mfi_score >= 6.5
+            else RGBColor(0, 0, 0)
+        )
         for paragraph in mfi_cell.paragraphs:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             for run in paragraph.runs:
@@ -195,6 +207,85 @@ def _add_basket_definitions_table_to_document(doc: Document, *, meta: Dict[str, 
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.font.size = Pt(8)
+    doc.add_paragraph()
+
+
+def _display_table_value(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+def _add_mfi_deterministic_table(doc: Document, *, meta: Dict[str, Any]) -> None:
+    rows = meta.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return
+    values = [
+        row.get("values", {})
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("values"), dict)
+    ]
+    if not values:
+        return
+    requested = [
+        str(column) for column in meta.get("columns", []) if str(column).strip()
+    ]
+    columns = requested or list(
+        dict.fromkeys(key for row in values for key in row.keys())
+    )
+    if not columns:
+        return
+    title = str(meta.get("title") or "").strip()
+    if title:
+        doc.add_heading(title, level=4)
+    table = doc.add_table(rows=len(values) + 1, cols=len(columns))
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for index, column in enumerate(columns):
+        cell = table.rows[0].cells[index]
+        cell.text = column.replace("_", " ").title()
+        _set_cell_background(cell, (0, 114, 188))
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+                run.font.size = Pt(7)
+                run.font.color.rgb = RGBColor(255, 255, 255)
+    for row_index, row in enumerate(values, start=1):
+        for column_index, column in enumerate(columns):
+            cell = table.rows[row_index].cells[column_index]
+            cell.text = _display_table_value(row.get(column))
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(7)
+    doc.add_paragraph()
+
+
+def _add_notice_box(
+    doc: Document,
+    text: str,
+    *,
+    label: str,
+    fill: str,
+    color: tuple[int, int, int],
+) -> None:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return
+    table = doc.add_table(rows=1, cols=1)
+    table.style = "Table Grid"
+    cell = table.rows[0].cells[0]
+    paragraph = cell.paragraphs[0]
+    label_run = paragraph.add_run(f"{label}: ")
+    label_run.bold = True
+    label_run.font.color.rgb = RGBColor(*color)
+    text_run = paragraph.add_run(cleaned)
+    text_run.font.size = Pt(9)
+    shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill}"/>')
+    cell._tc.get_or_add_tcPr().append(shading)
     doc.add_paragraph()
 
 
@@ -288,10 +379,50 @@ def build_docx_bytes_from_report_blocks(
                 _add_overview_table_to_document(doc, meta=meta)
             elif isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
                 _add_basket_definitions_table_to_document(doc, meta=meta)
+            elif isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
+                _add_mfi_deterministic_table(doc, meta=meta)
             continue
 
         if block.type == "definition_box":
             _add_definition_box(doc, block.text or "")
+            continue
+
+        if block.type == "evidence_note":
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(f"Evidence: {block.text or ''}")
+            run.italic = True
+            run.font.size = Pt(8)
+            run.font.color.rgb = RGBColor(80, 80, 80)
+            continue
+
+        if block.type == "limitation_box":
+            _add_notice_box(
+                doc,
+                block.text or "",
+                label="Data limitation",
+                fill="FFF4CC",
+                color=(145, 94, 0),
+            )
+            continue
+
+        if block.type == "methodology_note":
+            _add_notice_box(
+                doc,
+                block.text or "",
+                label="Methodology",
+                fill="E6F3FF",
+                color=(0, 114, 188),
+            )
+            continue
+
+        if block.type == "qa_warning":
+            _add_notice_box(
+                doc,
+                block.text or "",
+                label="QA warning",
+                fill="FDE8E8",
+                color=(176, 0, 32),
+            )
             continue
 
     out = io.BytesIO()

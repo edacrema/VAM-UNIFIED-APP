@@ -14,6 +14,7 @@ from typing import Iterable, Literal, Mapping, Optional
 
 METHODOLOGY_VERSION = "databridge-current"
 ANALYSIS_SCHEMA_VERSION = "2.0"
+NARRATIVE_SCHEMA_VERSION = "2.0"
 SCORE_AUTHORITY = "databridge_level_1"
 SCORE_VALIDATION_ABS_TOLERANCE = 1e-6
 CURRENT_DATABRIDGE_ALPHA = 0.5
@@ -81,6 +82,70 @@ DISPLAY_DIMENSIONS = (
     "Service",
     "Food Quality",
     "Access & Protection",
+)
+
+DIMENSION_DESCRIPTIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "Assortment": (
+            "Assortment measures whether assessed markets carry the eight "
+            "essential-goods groups and the depth of choice within those groups, "
+            "represented by the maximum SKU-depth category."
+        ),
+        "Availability": (
+            "Availability measures whether essential food and non-food categories "
+            "are generally represented and whether traders report scarcity or "
+            "running out of stock."
+        ),
+        "Price": (
+            "Price measures recent price increases and short-term price "
+            "predictability. It does not by itself measure affordability, "
+            "inflation, or household purchasing power."
+        ),
+        "Resilience": (
+            "Resilience measures stock duration, replenishment lead time, supplier "
+            "geographic concentration, supplier diversity, and dependence on a "
+            "single supplier."
+        ),
+        "Competition": (
+            "Competition measures the presence of competing traders and the "
+            "absence of a single trader controlling supply in the assessed market."
+        ),
+        "Infrastructure": (
+            "Infrastructure measures market-site condition and the presence of "
+            "facilities such as storage, sanitation, electricity, water, waste "
+            "management, and access infrastructure."
+        ),
+        "Service": (
+            "Service measures observable retail practices: product display, "
+            "visible prices, remote purchasing, accepted payment methods, waiting "
+            "time, and automatic receipts."
+        ),
+        "Food Quality": (
+            "Food Quality measures the share of applicable food-handling and "
+            "protection conditions satisfied in each assessed market. Applicability "
+            "and the dynamic maximum must remain explicit."
+        ),
+        "Access & Protection": (
+            "Access & Protection measures road remoteness, seasonal and "
+            "disaster-related access, social barriers, physical threats, and "
+            "general security affecting access to assessed markets."
+        ),
+    }
+)
+
+NARRATIVE_PROMPT_CONSTRAINTS = (
+    "Use only values and identifiers in the supplied deterministic claim catalog.",
+    "Do not calculate, average, normalize, invert, rank, or transform values.",
+    "Every quantitative statement must cite one or more supplied metric IDs.",
+    "Do not present assessed-market summaries as nationally representative.",
+    "Do not use undocumented MFI risk classes or critical-market terminology.",
+    "Do not infer causality from contextual documents.",
+    "Do not infer absolute affordability or inflation from the Price dimension.",
+    "Do not describe supply-chain complexity itself as harmful.",
+    "Do not mention courtesy or consumer satisfaction under Service.",
+    "Do not mention operating hours under Access & Protection.",
+    "Do not equate a failed Food Quality condition with a share of goods affected.",
+    "Do not determine transfer modality from MFI evidence alone.",
 )
 
 

@@ -91,39 +91,10 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "priority_market_names": profile.get("priority_market_names", []),
         "analysis_limitations": profile.get("limitations", []),
         "methodology_warnings": state.get("methodology_warnings", []),
+        "narrative_schema_version": state.get("narrative_schema_version", "2.0"),
+        "claim_validation": state.get("claim_validation", {}),
+        "qa_review": state.get("qa_review", {}),
     }
-
-def _normalize_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for item in value:
-            if item is None:
-                continue
-            s = item if isinstance(item, str) else str(item)
-            s = s.strip()
-            if s:
-                parts.append(s)
-        return "\n".join(parts)
-    return str(value)
-
-def _normalize_dimension_findings(findings: Any) -> Dict[str, Dict[str, str]]:
-    if not isinstance(findings, dict):
-        return {}
-    normalized: Dict[str, Dict[str, str]] = {}
-    for dim, payload in findings.items():
-        if not isinstance(payload, dict):
-            continue
-        normalized[str(dim)] = {
-            "key_findings": _normalize_text(payload.get("key_findings")),
-            "score_interpretation": _normalize_text(payload.get("score_interpretation")),
-            "recommendations": _normalize_text(payload.get("recommendations")),
-        }
-    return normalized
-
 
 def _build_mfi_output(
     *,
@@ -133,8 +104,6 @@ def _build_mfi_output(
     data_collection_end: str,
 ) -> GenerateMFIReportOutput:
     response_fields = canonical_and_legacy_response_fields(result)
-
-    normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
 
     return GenerateMFIReportOutput(
         run_id=result.get("run_id", "unknown"),
@@ -155,10 +124,20 @@ def _build_mfi_output(
             "mean_mfi_across_assessed_markets"
         ],
         assessment_profile=response_fields["assessment_profile"],
-        executive_summary=result.get("executive_summary", ""),
-        dimension_findings=normalized_dimension_findings,
-        market_recommendations=result.get("market_recommendations", {}) or {},
-        country_context=result.get("country_context"),
+        narrative_schema_version=result.get("narrative_schema_version", "2.0"),
+        market_score_distribution=response_fields["market_score_distribution"],
+        context_evidence=result.get("context_evidence", []),
+        dimension_narratives=result.get("dimension_narratives", {}),
+        market_narratives=result.get("market_narratives", {}),
+        executive_summary_narrative=result.get(
+            "executive_summary_narrative", {}
+        ),
+        claim_validation=result.get("claim_validation", {}),
+        qa_review=result.get("qa_review", {}),
+        executive_summary=response_fields["executive_summary"],
+        dimension_findings=response_fields["dimension_findings"],
+        market_recommendations=response_fields["market_recommendations"],
+        country_context=response_fields["country_context"],
         document_references=result.get("document_references", []),
         report_blocks=build_mfi_report_blocks(
             {
@@ -166,8 +145,6 @@ def _build_mfi_output(
                 "country": country,
                 "data_collection_start": data_collection_start,
                 "data_collection_end": data_collection_end,
-                "dimension_findings": normalized_dimension_findings,
-                "market_recommendations": result.get("market_recommendations", {}) or {},
             }
         ),
         visualizations=result.get("visualizations", {}),
@@ -333,8 +310,11 @@ async def generate_mfi_report_from_csv_async(
         "mfi_graph_designer": 55,
         "dimension_drafter": 72,
         "market_recommendations_drafter": 82,
-        "executive_summary_drafter": 92,
-        "red_team": 97,
+        "executive_summary_drafter": 88,
+        "deterministic_claim_validator": 92,
+        "red_team": 96,
+        "targeted_correction": 94,
+        "finalize_qa": 99,
     }
 
     def run_in_background():
@@ -461,8 +441,11 @@ async def generate_mfi_report_async(
         "mfi_graph_designer": 55,
         "dimension_drafter": 72,
         "market_recommendations_drafter": 82,
-        "executive_summary_drafter": 92,
-        "red_team": 97,
+        "executive_summary_drafter": 88,
+        "deterministic_claim_validator": 92,
+        "red_team": 96,
+        "targeted_correction": 94,
+        "finalize_qa": 99,
     }
     
     def run_in_background():
@@ -576,12 +559,8 @@ async def export_mfi_docx(
         raise HTTPException(status_code=409, detail=f"Run not completed. Current status: {run.status}")
 
     result = run.result or {}
-    result_for_blocks = dict(result)
-    result_for_blocks["dimension_findings"] = _normalize_dimension_findings(result.get("dimension_findings"))
-    result_for_blocks["market_recommendations"] = result.get("market_recommendations", {}) or {}
-
     try:
-        report_blocks = build_mfi_report_blocks(result_for_blocks)
+        report_blocks = build_mfi_report_blocks(result)
         docx_bytes = build_docx_bytes_from_report_blocks(
             report_blocks,
             visualizations=result.get("visualizations", {}),
@@ -644,8 +623,16 @@ def get_service_info():
                 "Versioned deterministic profiles, rankings, limitations, "
                 "ledger, and tables"
             ),
-            "national_mfi": "National MFI score (0-10)",
-            "risk_distribution": "Distribution of markets by risk level",
+            "narrative_schema_version": "Version of the structured narrative contract",
+            "market_score_distribution": "Neutral ordered assessed-market scores",
+            "context_evidence": "Classified, source-linked contextual statements",
+            "dimension_narratives": "Metric-cited structured dimension narratives",
+            "market_narratives": "Metric-cited structured market narratives",
+            "executive_summary_narrative": "Metric-cited structured executive summary",
+            "claim_validation": "Deterministic narrative claim validation",
+            "qa_review": "Combined deterministic and Red-Team QA status",
+            "national_mfi": "Deprecated Phase 4 compatibility alias",
+            "risk_distribution": "Deprecated Phase 4 compatibility alias",
             "markets_data": "Detailed data for each market",
             "dimension_scores": "Score for each MFI dimension",
             "executive_summary": "Generated executive summary",
@@ -664,10 +651,12 @@ def get_service_info():
             {"id": "dimension_drafter", "name": "Dimension Drafter", "description": "Drafts findings per dimension"},
             {"id": "market_recommendations_drafter", "name": "Market Recommendations", "description": "Drafts recommendations by market"},
             {"id": "executive_summary_drafter", "name": "Executive Summary", "description": "Drafts executive summary"},
-            {"id": "red_team", "name": "Red Team QA", "description": "Quality assurance"}
+            {"id": "deterministic_claim_validator", "name": "Claim Validator", "description": "Validates every claim against the closed catalog"},
+            {"id": "red_team", "name": "Red Team QA", "description": "Semantic quality assurance"},
+            {"id": "targeted_correction", "name": "Targeted Correction", "description": "Repairs only affected narrative fields"},
+            {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes warnings and claim status"}
         ],
-        "mfi_dimensions": MFI_DIMENSIONS,
-        "risk_levels": ["Low Risk", "Medium Risk", "High Risk", "Very High Risk"]
+        "mfi_dimensions": MFI_DIMENSIONS
     }
 
 
@@ -688,12 +677,7 @@ def get_mfi_dimensions():
                 "name": dim,
                 "description": DIMENSION_DESCRIPTIONS.get(dim, ""),
                 "score_range": "0-10",
-                "thresholds": {
-                    "low_risk": "≥7.0",
-                    "medium_risk": "5.5-6.9",
-                    "high_risk": "4.0-5.4",
-                    "very_high_risk": "<4.0"
-                }
+                "orientation": "higher_is_better",
             }
             for dim in MFI_DIMENSIONS
         ]

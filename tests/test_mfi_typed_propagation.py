@@ -197,6 +197,9 @@ def test_analysis_metadata_is_exposed_by_router_and_dispatcher_helpers():
     state = {
         "assessment_profile": profile,
         "methodology_warnings": [{"code": "mfir_records_excluded"}],
+        "narrative_schema_version": "2.0",
+        "claim_validation": {"status": "passed"},
+        "qa_review": {"status": "passed"},
     }
 
     router_metadata = router._analysis_run_metadata(state)
@@ -212,3 +215,6 @@ def test_analysis_metadata_is_exposed_by_router_and_dispatcher_helpers():
     assert router_metadata["methodology_warnings"][0]["code"] == (
         "mfir_records_excluded"
     )
+    assert router_metadata["narrative_schema_version"] == "2.0"
+    assert router_metadata["claim_validation"]["status"] == "passed"
+    assert router_metadata["qa_review"]["status"] == "passed"

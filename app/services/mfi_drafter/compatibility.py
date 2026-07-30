@@ -9,6 +9,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Iterable, Optional
 
+from .narrative import legacy_narrative_aliases
+from .schemas import get_risk_level
+
 
 def canonical_and_legacy_response_fields(
     result: dict[str, Any],
@@ -30,22 +33,54 @@ def canonical_and_legacy_response_fields(
         ).model_dump()
     canonical_mean = float(profile["mean_mfi_across_assessed_markets"])
 
+    serialized_markets = with_legacy_sub_score_aliases(
+        result.get("markets_data", []) or []
+    )
     risk_distribution: dict[str, int] = {}
-    for market in result.get("markets_data", []) or []:
+    for market in serialized_markets:
         if not isinstance(market, dict):
             continue
         risk = str(market.get("risk_level") or "Unknown")
         risk_distribution[risk] = risk_distribution.get(risk, 0) + 1
+    dimension_scores = _legacy_dimension_scores(profile)
+    narrative_aliases = legacy_narrative_aliases(
+        dimension_narratives=result.get("dimension_narratives", {}) or {},
+        market_narratives=result.get("market_narratives", {}) or {},
+        executive_narrative=result.get("executive_summary_narrative", {}) or {},
+    )
+    market_score_distribution = deepcopy(
+        result.get("market_score_distribution") or []
+    )
+    if not market_score_distribution:
+        market_score_distribution = [
+            {
+                "market_name": market.get("market_name"),
+                "overall_mfi": market.get("overall_mfi"),
+                "score_rank": market.get("score_rank"),
+                "selection_order": market.get("selection_order"),
+                "is_priority_market": market.get("is_priority_market", False),
+            }
+            for market in profile.get("markets", [])
+            if isinstance(market, dict)
+        ]
+    country_context = "\n".join(
+        str(statement.get("text"))
+        for statement in result.get("context_evidence", []) or []
+        if isinstance(statement, dict)
+        and statement.get("text")
+        and statement.get("classification") != "unrelated"
+    ) or None
 
     return {
         "mean_mfi_across_assessed_markets": canonical_mean,
         "assessment_profile": deepcopy(profile),
+        "market_score_distribution": market_score_distribution,
         "national_mfi": round(canonical_mean, 1),
         "risk_distribution": risk_distribution,
-        "markets_data": with_legacy_sub_score_aliases(
-            result.get("markets_data", []) or []
-        ),
-        "dimension_scores": deepcopy(result.get("dimension_scores", []) or []),
+        "markets_data": serialized_markets,
+        "dimension_scores": dimension_scores,
+        "country_context": country_context,
+        **narrative_aliases,
     }
 
 
@@ -55,8 +90,40 @@ def with_legacy_sub_score_aliases(
     """Return detached market payloads with the deprecated alias populated."""
     serialized = deepcopy(list(markets_data))
     for market in serialized:
+        score = market.get("overall_mfi")
+        market["risk_level"] = (
+            get_risk_level(float(score)) if score is not None else "Unknown"
+        )
         market["sub_scores"] = _legacy_alias_for_market(market)
     return serialized
+
+
+def _legacy_dimension_scores(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Generate old dimension aggregations solely at response serialization."""
+    rows: list[dict[str, Any]] = []
+    for dimension in profile.get("dimensions", []) or []:
+        if not isinstance(dimension, dict):
+            continue
+        localized = dimension.get("localized_patterns") or {}
+        rows.append(
+            {
+                "dimension": dimension.get("dimension"),
+                "national_score": (dimension.get("statistics") or {}).get("mean"),
+                "regional_scores": {
+                    str(summary.get("region")): (
+                        summary.get("statistics") or {}
+                    ).get("mean")
+                    for summary in dimension.get("regional_summaries", []) or []
+                    if isinstance(summary, dict) and summary.get("region")
+                },
+                "market_scores": {
+                    str(item.get("name")): item.get("value")
+                    for item in localized.get("ordered_markets", []) or []
+                    if isinstance(item, dict) and item.get("name")
+                },
+            }
+        )
+    return rows
 
 
 def _legacy_alias_for_market(market: dict[str, Any]) -> dict[str, dict[str, Any]]:

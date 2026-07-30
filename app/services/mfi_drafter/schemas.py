@@ -15,6 +15,7 @@ from .methodology import (
     CSV_DIMENSION_TO_DISPLAY,
     DISPLAY_DIMENSIONS,
     METHODOLOGY_VERSION,
+    NARRATIVE_SCHEMA_VERSION,
     OFFICIAL_DIMENSION_SCORE_VARIABLES,
     SCORE_AUTHORITY,
 )
@@ -491,6 +492,206 @@ class MFIAssessmentProfile(BaseModel):
 
 
 # ============================================================================
+# MFI 2.0 STRUCTURED NARRATIVE AND QA
+# ============================================================================
+
+class MFIContextEvidenceStatement(BaseModel):
+    """One source-linked contextual statement classified before drafting."""
+
+    statement_id: str
+    text: str
+    classification: Literal[
+        "corroborating",
+        "potentially_explanatory",
+        "unrelated",
+    ]
+    document_ids: List[str] = Field(default_factory=list)
+    validation_status: Literal["pending", "verified", "unverified"] = "pending"
+    validation_flags: List[str] = Field(default_factory=list)
+
+
+class MFIClaimCatalogEntry(BaseModel):
+    """Closed deterministic value that narrative claims may cite."""
+
+    metric_id: str
+    label: str
+    numeric_value: float
+    formatted_value: str
+    allowed_renderings: List[str] = Field(default_factory=list)
+    statistic: str
+    unit: str
+    orientation: str
+    scope: str
+    dimension: Optional[str] = None
+    market_name: Optional[str] = None
+    region: Optional[str] = None
+    coverage_label: Optional[str] = None
+    source_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFINarrativeClaim(BaseModel):
+    """One independently cited and validated narrative statement."""
+
+    claim_id: str
+    text: str
+    claim_kind: Literal[
+        "summary",
+        "finding",
+        "geographic_pattern",
+        "limitation",
+        "recommendation",
+        "context",
+        "modality_consideration",
+    ]
+    metric_ids: List[str] = Field(default_factory=list)
+    document_ids: List[str] = Field(default_factory=list)
+    scope: Literal[
+        "assessment",
+        "region",
+        "market",
+        "surveyed_traders",
+        "context",
+    ] = "assessment"
+    polarity: Literal[
+        "favorable",
+        "unfavorable",
+        "neutral",
+        "descriptive",
+    ] = "neutral"
+    validation_status: Literal["pending", "verified", "unverified"] = "pending"
+    validation_flags: List[str] = Field(default_factory=list)
+
+
+class MFISubdimensionNarrative(BaseModel):
+    """Priority-dimension interpretation linked to official evidence."""
+
+    name: str
+    subsection_metric_id: Optional[str] = None
+    score_0_10: Optional[float] = None
+    interpretation: MFINarrativeClaim
+    driver_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIDimensionNarrative(BaseModel):
+    """Canonical structured narrative for one MFI dimension."""
+
+    dimension: str
+    is_priority: bool
+    summary: MFINarrativeClaim
+    key_findings: List[MFINarrativeClaim] = Field(default_factory=list)
+    subdimension_analysis: List[MFISubdimensionNarrative] = Field(
+        default_factory=list
+    )
+    geographic_patterns: List[MFINarrativeClaim] = Field(default_factory=list)
+    data_limitations: List[MFINarrativeClaim] = Field(default_factory=list)
+    recommendations: List[MFINarrativeClaim] = Field(default_factory=list)
+
+
+class MFIMarketNarrative(BaseModel):
+    """Canonical recommendation narrative for one selected market."""
+
+    market_name: str
+    region: Optional[str] = None
+    overall_mfi: float
+    score_rank: int
+    weak_dimensions: List[str] = Field(default_factory=list)
+    priority_issues: List[MFINarrativeClaim] = Field(default_factory=list)
+    recommended_interventions: List[MFINarrativeClaim] = Field(
+        default_factory=list
+    )
+    modality_consideration: Optional[MFINarrativeClaim] = None
+
+
+class MFIExecutiveNarrative(BaseModel):
+    """Canonical structured executive summary."""
+
+    motivation: Optional[MFINarrativeClaim] = None
+    key_findings: List[MFINarrativeClaim] = Field(default_factory=list)
+    recommendations: List[MFINarrativeClaim] = Field(default_factory=list)
+    limitations: List[MFINarrativeClaim] = Field(default_factory=list)
+
+
+class MFINarrativeQAFlag(BaseModel):
+    """Stable deterministic, Red-Team, or system narrative flag."""
+
+    flag_id: str
+    source: Literal["deterministic", "red_team", "system"]
+    code: str
+    severity: Literal["high", "medium", "low"]
+    artifact_type: Literal[
+        "context",
+        "dimension",
+        "market",
+        "executive_summary",
+        "global",
+    ]
+    artifact_id: Optional[str] = None
+    field_name: Optional[str] = None
+    claim_id: Optional[str] = None
+    message: str
+    recommendation: str = ""
+    metric_ids: List[str] = Field(default_factory=list)
+    document_ids: List[str] = Field(default_factory=list)
+    expected_value: Optional[str] = None
+    actual_value: Optional[str] = None
+    repairable: bool = True
+
+
+class MFIClaimValidationResult(BaseModel):
+    """Deterministic validation result for all structured claims."""
+
+    status: Literal[
+        "not_recorded",
+        "passed",
+        "passed_with_warnings",
+        "failed",
+    ] = "not_recorded"
+    validated_claim_count: int = 0
+    verified_claim_count: int = 0
+    unverified_claim_count: int = 0
+    flags: List[MFINarrativeQAFlag] = Field(default_factory=list)
+
+
+class MFICorrectionTarget(BaseModel):
+    """Exact narrative field selected for a targeted repair."""
+
+    artifact_type: Literal[
+        "context",
+        "dimension",
+        "market",
+        "executive_summary",
+        "global",
+    ]
+    artifact_id: Optional[str] = None
+    field_name: Optional[str] = None
+    claim_ids: List[str] = Field(default_factory=list)
+    flag_ids: List[str] = Field(default_factory=list)
+
+
+class MFIQAReview(BaseModel):
+    """Final combined deterministic and LLM QA status."""
+
+    status: Literal[
+        "not_recorded",
+        "passed",
+        "passed_with_advisories",
+        "completed_with_warnings",
+    ] = "not_recorded"
+    correction_attempts: int = 0
+    flags: List[MFINarrativeQAFlag] = Field(default_factory=list)
+
+
+class MFIMarketScoreDistributionEntry(BaseModel):
+    """Neutral ordered market-score value for public consumers and charts."""
+
+    market_name: str
+    overall_mfi: float
+    score_rank: int
+    selection_order: int
+    is_priority_market: bool
+
+
+# ============================================================================
 # PYDANTIC MODELS (API)
 # ============================================================================
 
@@ -519,6 +720,7 @@ class GenerateMFIReportOutput(BaseModel):
     analysis_schema_version: Literal["2.0"] = ANALYSIS_SCHEMA_VERSION
     methodology_version: Literal["databridge-current"] = METHODOLOGY_VERSION
     score_authority: Literal["databridge_level_1", "synthetic_mock"] = SCORE_AUTHORITY
+    narrative_schema_version: Literal["2.0"] = NARRATIVE_SCHEMA_VERSION
     excluded_market_records: List[MFIExcludedMarketRecord] = Field(default_factory=list)
     methodology_warnings: List[MFIMethodologyWarning] = Field(default_factory=list)
     
@@ -532,6 +734,23 @@ class GenerateMFIReportOutput(BaseModel):
     dimension_scores: List[Dict[str, Any]]
     mean_mfi_across_assessed_markets: float
     assessment_profile: MFIAssessmentProfile
+    market_score_distribution: List[MFIMarketScoreDistributionEntry] = Field(
+        default_factory=list
+    )
+
+    # Canonical structured narratives and verification.
+    context_evidence: List[MFIContextEvidenceStatement] = Field(default_factory=list)
+    dimension_narratives: Dict[str, MFIDimensionNarrative] = Field(
+        default_factory=dict
+    )
+    market_narratives: Dict[str, MFIMarketNarrative] = Field(default_factory=dict)
+    executive_summary_narrative: MFIExecutiveNarrative = Field(
+        default_factory=MFIExecutiveNarrative
+    )
+    claim_validation: MFIClaimValidationResult = Field(
+        default_factory=MFIClaimValidationResult
+    )
+    qa_review: MFIQAReview = Field(default_factory=MFIQAReview)
     
     # Generated content
     executive_summary: str

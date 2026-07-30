@@ -108,8 +108,30 @@ if isinstance(result, dict):
     display_run_id = str(run_id or result.get("run_id") or "")
     methodology_warnings = result.get("methodology_warnings") or []
     excluded_records = result.get("excluded_market_records") or []
+    assessment_profile = result.get("assessment_profile") or {}
+    limitations = assessment_profile.get("limitations") or []
+    qa_review = result.get("qa_review") or {}
 
-    if methodology_warnings or excluded_records:
+    overview_columns = st.columns(3)
+    mean_score = result.get("mean_mfi_across_assessed_markets")
+    overview_columns[0].metric(
+        "Mean MFI across assessed markets",
+        f"{float(mean_score):.2f}/10" if mean_score is not None else "—",
+    )
+    priority_dimensions = assessment_profile.get("priority_dimension_names") or []
+    overview_columns[1].metric(
+        "Priority dimensions",
+        str(len(priority_dimensions)),
+        help=", ".join(str(item) for item in priority_dimensions),
+    )
+    overview_columns[2].metric(
+        "Narrative QA",
+        str(qa_review.get("status") or "not recorded").replace("_", " ").title(),
+    )
+    if priority_dimensions:
+        st.info("Priority dimensions: " + ", ".join(priority_dimensions))
+
+    if methodology_warnings or excluded_records or limitations:
         st.subheader("Methodology and coverage notices")
         for warning in methodology_warnings:
             message = warning.get("message") if isinstance(warning, dict) else warning
@@ -123,6 +145,24 @@ if isinstance(result, dict):
             ]
             if excluded_names:
                 st.caption("Excluded MFIr-only records: " + ", ".join(excluded_names))
+        for limitation in limitations:
+            message = (
+                limitation.get("message")
+                if isinstance(limitation, dict)
+                else limitation
+            )
+            if message:
+                st.warning(str(message))
+    material_qa_flags = [
+        flag
+        for flag in qa_review.get("flags", []) or []
+        if isinstance(flag, dict) and flag.get("severity") in {"high", "medium"}
+    ]
+    if material_qa_flags:
+        st.error(
+            "Narrative QA completed with unresolved material issues. "
+            "Affected claims are marked unverified in the report."
+        )
 
     def _preview() -> None:
         render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
@@ -131,18 +171,21 @@ if isinstance(result, dict):
         cols = st.columns(4)
         cols[0].metric("Run ID", display_run_id)
         cols[1].metric("Country", str(result.get("country") or ""))
-        cols[2].metric("National MFI", str(result.get("national_mfi") or ""))
+        cols[2].metric(
+            "Assessed markets",
+            str(assessment_profile.get("assessed_market_count") or 0),
+        )
         cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
         if result.get("warnings"):
             st.markdown("**Generation notices**")
             for warning in result.get("warnings") or []:
                 st.warning(str(warning))
-        if result.get("risk_distribution") is not None:
-            st.markdown("**Risk distribution**")
-            st.json(result.get("risk_distribution"))
-        if result.get("markets_data") is not None:
-            st.markdown("**Markets data**")
-            st.json(result.get("markets_data"))
+        st.markdown("**Deterministic assessment profile**")
+        st.json(assessment_profile)
+        st.markdown("**Claim validation**")
+        st.json(result.get("claim_validation") or {})
+        st.markdown("**QA review**")
+        st.json(qa_review)
 
     if run_id:
         render_report_delivery(

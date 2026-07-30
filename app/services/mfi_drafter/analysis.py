@@ -203,6 +203,17 @@ def build_assessment_profile(
         else:
             missing_region_markets.append(str(market["market_name"]))
     if missing_region_markets:
+        add_ledger(
+            "assessment.limitation.missing_region.count",
+            label="Assessed markets without a region identifier",
+            value=len(missing_region_markets),
+            statistic="count",
+            unit="count",
+            orientation="descriptive",
+            evidence_scope="included_assessed_markets",
+            coverage=full_coverage,
+            source_metric_ids=[],
+        )
         limitations.append(
             MFILimitation(
                 code="incomplete_regional_coverage",
@@ -262,6 +273,21 @@ def build_assessment_profile(
     for dimension in DISPLAY_DIMENSIONS:
         unavailable = unavailable_by_dimension.get(dimension)
         if unavailable:
+            add_ledger(
+                (
+                    "assessment.limitation.unavailable_evidence."
+                    f"{_slug(dimension)}.count"
+                ),
+                label=f"{dimension} unavailable explanatory metrics",
+                value=len(unavailable),
+                statistic="count",
+                unit="count",
+                orientation="descriptive",
+                evidence_scope="included_assessed_markets",
+                dimension=dimension,
+                coverage=full_coverage,
+                source_metric_ids=sorted(unavailable),
+            )
             limitations.append(
                 MFILimitation(
                     code="unavailable_explanatory_evidence",
@@ -293,6 +319,12 @@ def build_assessment_profile(
         markets,
         assessed_count,
         analysis_config,
+        add_ledger,
+    )
+    _add_priority_market_evidence_ledger(
+        markets,
+        market_profiles,
+        assessed_count,
         add_ledger,
     )
     priority_market_names = [
@@ -355,6 +387,17 @@ def build_assessment_profile(
 
     excluded_count = _excluded_count(context)
     if excluded_count:
+        add_ledger(
+            "assessment.excluded_market_records.count",
+            label="Excluded MFIr-only market records",
+            value=excluded_count,
+            statistic="count",
+            unit="count",
+            orientation="descriptive",
+            evidence_scope="assessment_input_records",
+            coverage=None,
+            source_metric_ids=[],
+        )
         limitations.append(
             MFILimitation(
                 code="mfir_records_excluded",
@@ -558,8 +601,16 @@ def _add_statistic_ledger(
             label=f"{label}: {statistic}",
             value=value,
             statistic=statistic,
-            unit="count" if statistic == "denominator" else unit,
-            orientation=orientation,
+            unit=(
+                "count"
+                if statistic == "denominator"
+                else "proportion"
+                if statistic == "coverage"
+                else unit
+            ),
+            orientation=(
+                "descriptive" if statistic == "coverage" else orientation
+            ),
             evidence_scope=evidence_scope,
             dimension=dimension,
             market_name=market_name,
@@ -1240,6 +1291,122 @@ def _build_market_profiles(
                 )
             )
     return profiles, rows
+
+
+def _add_priority_market_evidence_ledger(
+    markets: Sequence[Mapping[str, Any]],
+    market_profiles: Sequence[MFIMarketProfile],
+    assessed_count: int,
+    add_ledger: Any,
+) -> None:
+    """Add auditable local evidence only for selected markets' weak dimensions."""
+    market_by_name = {
+        str(market["market_name"]): market for market in markets
+    }
+    for profile in market_profiles:
+        if not profile.is_priority_market:
+            continue
+        market = market_by_name[profile.market_name]
+        market_token = _context_token(profile.market_name)
+        weak_dimensions = {item.dimension for item in profile.weak_dimensions}
+        for group_name in ("subsections", "drivers"):
+            grouped = market.get(group_name)
+            if not isinstance(grouped, Mapping):
+                continue
+            for dimension in DISPLAY_DIMENSIONS:
+                if dimension not in weak_dimensions:
+                    continue
+                metrics = grouped.get(dimension)
+                if not isinstance(metrics, Sequence):
+                    continue
+                for raw_metric in metrics:
+                    if not isinstance(raw_metric, Mapping):
+                        continue
+                    if (
+                        raw_metric.get("applicability_status") != "available"
+                        or raw_metric.get("validation_status") != "valid"
+                    ):
+                        continue
+                    metric_id = str(raw_metric.get("metric_id") or "")
+                    if not metric_id:
+                        continue
+                    available = int(raw_metric.get("market_coverage") or 0)
+                    total = int(
+                        raw_metric.get("market_coverage_total")
+                        or assessed_count
+                    )
+                    coverage = _coverage(available, total)
+                    prefix = f"market.{market_token}.metric.{metric_id}"
+                    common = {
+                        "orientation": str(
+                            raw_metric.get("orientation") or "descriptive"
+                        ),
+                        "evidence_scope": str(
+                            raw_metric.get("evidence_scope")
+                            or "assessed_market"
+                        ),
+                        "dimension": dimension,
+                        "market_name": profile.market_name,
+                        "region": profile.region,
+                        "coverage": coverage,
+                        "source_metric_ids": [metric_id],
+                    }
+                    raw_value = raw_metric.get("raw_value")
+                    if raw_value is not None:
+                        add_ledger(
+                            f"{prefix}.raw",
+                            label=(
+                                f"{raw_metric.get('display_name', metric_id)} "
+                                f"in {profile.market_name}: raw value"
+                            ),
+                            value=float(raw_value),
+                            statistic="market_explanatory_raw_value",
+                            unit=str(raw_metric.get("unit") or ""),
+                            **common,
+                        )
+                    normalized = raw_metric.get("normalized_value")
+                    if normalized is not None:
+                        add_ledger(
+                            f"{prefix}.normalized",
+                            label=(
+                                f"{raw_metric.get('display_name', metric_id)} "
+                                f"in {profile.market_name}: normalized value"
+                            ),
+                            value=float(normalized),
+                            statistic="market_explanatory_normalized_value",
+                            unit="score",
+                            **common,
+                        )
+                    unfavorable = _unfavorable_rate(
+                        _optional_float(raw_value),
+                        common["orientation"],
+                    )
+                    if (
+                        unfavorable is not None
+                        and str(raw_metric.get("unit") or "") == "proportion"
+                    ):
+                        add_ledger(
+                            f"{prefix}.unfavorable_rate",
+                            label=(
+                                f"{raw_metric.get('display_name', metric_id)} "
+                                f"in {profile.market_name}: unfavorable rate"
+                            ),
+                            value=unfavorable,
+                            statistic="derived_market_unfavorable_rate",
+                            unit="proportion",
+                            **{**common, "orientation": "higher_is_worse"},
+                        )
+                    add_ledger(
+                        f"{prefix}.coverage",
+                        label=(
+                            f"{raw_metric.get('display_name', metric_id)}: "
+                            "assessed-market coverage"
+                        ),
+                        value=coverage.coverage_ratio,
+                        statistic="coverage_ratio",
+                        unit="proportion",
+                        **common,
+                    )
 
 
 def _build_localized_patterns(

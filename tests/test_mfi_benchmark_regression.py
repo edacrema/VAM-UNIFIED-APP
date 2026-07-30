@@ -10,6 +10,13 @@ import pytest
 from app.services.mfi_drafter.analysis import build_assessment_profile
 from app.services.mfi_drafter.data_loader import load_mfi_from_csv
 from app.services.mfi_drafter.methodology import OFFICIAL_SCORE_DEFINITIONS
+from app.services.mfi_drafter.narrative import (
+    build_claim_catalog,
+    fallback_dimension_narrative,
+    fallback_executive_narrative,
+    fallback_market_narrative,
+    validate_structured_narratives,
+)
 
 
 BENCHMARK_DIRECTORY = Path(__file__).resolve().parents[1] / "MFI Test Databases"
@@ -56,6 +63,34 @@ def _profile(path_string: str):
         result["metric_summaries"],
         result,
     )
+
+
+@lru_cache(maxsize=2)
+def _phase3_fallback(path_string: str):
+    profile = _profile(path_string).model_dump()
+    catalog = build_claim_catalog(profile)
+    dimensions = {
+        item["dimension"]: fallback_dimension_narrative(
+            item, assessment_profile=profile
+        )
+        for item in profile["dimensions"]
+    }
+    markets = {
+        item["market_name"]: fallback_market_narrative(item)
+        for item in profile["markets"]
+        if item["is_priority_market"]
+    }
+    executive = fallback_executive_narrative(profile)
+    validation = validate_structured_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog=catalog,
+        assessment_profile=profile,
+        documents=[],
+    )[0]
+    return profile, dimensions, validation
 
 
 @pytest.mark.parametrize(("path", "expected_full", "expected_mfir"), BENCHMARKS)
@@ -226,3 +261,33 @@ def test_local_benchmark_relevant_items_meet_coverage_and_contrast(
         assert metric.unfavorable_rate - category.unfavorable_rate >= (
             0.10 - 1e-6
         )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_priorities"),
+    [
+        (BENCHMARKS[0][0], ["Service", "Infrastructure", "Food Quality"]),
+        (
+            BENCHMARKS[1][0],
+            ["Food Quality", "Infrastructure", "Service", "Price"],
+        ),
+    ],
+)
+def test_local_benchmark_phase3_fallback_is_evidence_backed(
+    path, expected_priorities
+):
+    profile, narratives, validation = _phase3_fallback(str(path))
+
+    assert profile["priority_dimension_names"] == expected_priorities
+    assert validation["status"] == "passed"
+    for dimension in expected_priorities:
+        narrative = narratives[dimension]
+        assert narrative["subdimension_analysis"]
+        driver_ids = {
+            metric_id
+            for item in narrative["subdimension_analysis"]
+            for metric_id in item["driver_metric_ids"]
+        }
+        assert 2 <= len(driver_ids) <= 4
+        assert narrative["geographic_patterns"]
+        assert narrative["recommendations"]

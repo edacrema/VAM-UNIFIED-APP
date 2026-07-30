@@ -6,10 +6,25 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel
 
 from app.services.market_monitor.i18n import format_decimal_value, format_month_label, t
+from app.services.mfi_drafter.methodology import (
+    DIMENSION_DESCRIPTIONS,
+    METHODOLOGY_VERSION,
+)
 
 
 class ReportBlock(BaseModel):
-    type: Literal["heading", "paragraph", "figure", "references", "table", "definition_box"]
+    type: Literal[
+        "heading",
+        "paragraph",
+        "figure",
+        "references",
+        "table",
+        "definition_box",
+        "evidence_note",
+        "limitation_box",
+        "methodology_note",
+        "qa_warning",
+    ]
     text: Optional[str] = None
     level: Optional[int] = None
     figure_id: Optional[str] = None
@@ -33,53 +48,7 @@ _MFI_DIMENSIONS = [
 ]
 
 
-_MFI_DIMENSION_DEFINITIONS: Dict[str, str] = {
-    "Assortment": """The assortment of essential goods measures market breadth and depth.
-It answers two key questions: (1) Can beneficiaries find all essential food and non-food items?
-(2) Do they have a wide range of choices within each category?
-Essential needs include cereals, pulses, oils, and basic NFIs. A high score indicates markets
-can support diverse household needs; a low score suggests limited product variety.""",
-    "Availability": """Availability measures consistent supply of essential commodities.
-It answers: (1) Are essential goods consistently in stock? (2) How frequent are stockouts?
-The dimension tracks scarcity reports and runout frequency across food and NFI categories.
-High scores indicate reliable supply; low scores signal supply chain disruptions or
-seasonal shortages requiring intervention.""",
-    "Price": """Price stability measures affordability and predictability of essential goods.
-It answers: (1) Have prices increased significantly? (2) Are prices stable over time?
-This dimension tracks both price levels and volatility across commodity categories.
-High scores indicate stable, accessible pricing; low scores suggest inflation pressures
-or market manipulation affecting household purchasing power.""",
-    "Resilience": """Resilience measures supply chain robustness and adaptive capacity.
-It answers: (1) Can markets respond to demand shocks? (2) How vulnerable are supply networks?
-The dimension evaluates node density, complexity, and criticality of supply chains.
-High scores indicate robust, diversified supply networks; low scores suggest fragile
-systems vulnerable to disruptions.""",
-    "Competition": """Competition measures market structure and trader dynamics.
-It answers: (1) Are there enough traders to ensure fair pricing? (2) Is there monopoly risk?
-The dimension tracks market concentration and number of active competitors.
-High scores indicate healthy competition; low scores suggest market power concentration
-that may disadvantage consumers.""",
-    "Infrastructure": """Infrastructure measures physical market conditions and facilities.
-It answers: (1) What is the condition of market structures? (2) Are essential facilities available?
-The dimension evaluates structural condition, sanitation, electricity, and water access.
-High scores indicate well-maintained facilities; low scores suggest infrastructure
-investments are needed.""",
-    "Service": """Service quality measures the retail experience for consumers.
-It answers: (1) How efficient is the checkout process? (2) Is the shopping experience positive?
-The dimension tracks service speed, courtesy, and overall consumer satisfaction.
-High scores indicate professional retail operations; low scores suggest service
-improvements are needed.""",
-    "Food Quality": """Food quality measures safety and handling standards.
-It answers: (1) Are food items properly stored and handled? (2) Do products meet safety standards?
-The dimension evaluates packaging integrity, storage conditions, and hygiene practices.
-High scores indicate safe food handling; low scores suggest food safety risks
-requiring monitoring.""",
-    "Access & Protection": """Access and protection measures physical and social accessibility.
-It answers: (1) Can all population groups access the market? (2) Are there safety concerns?
-The dimension tracks geographic accessibility, operating hours, and protection issues.
-High scores indicate inclusive, safe markets; low scores suggest access barriers
-or protection concerns.""",
-}
+_MFI_DIMENSION_DEFINITIONS: Dict[str, str] = dict(DIMENSION_DESCRIPTIONS)
 
 
 _INSERT_FIGURE_RE = re.compile(r"\[INSERT GRAPH:\s*([A-Za-z0-9_\-]+)\s*\]", flags=re.IGNORECASE)
@@ -547,177 +516,441 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     return blocks
 
 
-def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
-    country = (result.get("country") or "").strip()
-    title = f"MFI Report - {country}" if country else "MFI Report"
+def _mfi_evidence_note(
+    claim: Dict[str, Any],
+    catalog: Dict[str, Any],
+    documents: Dict[str, Dict[str, Any]],
+) -> str:
+    parts: List[str] = []
+    for metric_id in claim.get("metric_ids", []) or []:
+        entry = catalog.get(str(metric_id))
+        if not isinstance(entry, dict):
+            continue
+        note = f"{entry.get('label')}: {entry.get('formatted_value')}"
+        if entry.get("scope"):
+            note += f"; scope: {str(entry['scope']).replace('_', ' ')}"
+        if entry.get("coverage_label"):
+            note += f"; coverage: {entry['coverage_label']}"
+        parts.append(note)
+    for document_id in claim.get("document_ids", []) or []:
+        document = documents.get(str(document_id))
+        if not isinstance(document, dict):
+            continue
+        label = document.get("title") or document.get("source") or document_id
+        date = document.get("date")
+        parts.append(f"Context source: {label}" + (f" ({date})" if date else ""))
+    return " | ".join(parts)
 
-    country_context = result.get("country_context")
-    executive_summary = result.get("executive_summary")
-    dimension_findings = result.get("dimension_findings") or {}
-    market_recommendations = result.get("market_recommendations") or {}
-    markets_data = result.get("markets_data") or []
 
-    document_references = result.get("document_references") or []
-
-    blocks: List[ReportBlock] = [ReportBlock(type="heading", text=title, level=1)]
-
-    if isinstance(country_context, str) and country_context.strip():
-        context_text = country_context.strip()
-        lc = context_text.lower()
-        looks_like_disclaimer = (
-            "cannot be extracted" in lc
-            or "can not be extracted" in lc
-            or "unable to extract" in lc
-            or "unable to" in lc and "extract" in lc
-            or "do not contain specific information" in lc
-            or "does not contain specific information" in lc
-            or ("do not contain" in lc and "specific information" in lc)
-            or "not enough information" in lc
-            or "insufficient information" in lc
-        )
-        if looks_like_disclaimer:
-            context_text = ""
-
-    if isinstance(country_context, str) and country_context.strip() and context_text:
-        blocks.append(ReportBlock(type="heading", text="Context", level=2))
-        blocks.extend(_text_to_paragraph_blocks(context_text))
-
-    blocks.append(ReportBlock(type="figure", figure_id="mfi_radar", caption="MFI dimension scores"))
-
+def _append_mfi_claim(
+    blocks: List[ReportBlock],
+    claim: Any,
+    *,
+    catalog: Dict[str, Any],
+    documents: Dict[str, Dict[str, Any]],
+) -> None:
+    if not isinstance(claim, dict) or not str(claim.get("text") or "").strip():
+        return
     blocks.append(
         ReportBlock(
-            type="figure",
-            figure_id="overview_table",
-            caption="Market Functionality Index overview by market and dimension",
-            width=7.0,
+            type="paragraph",
+            text=str(claim["text"]).strip(),
+            meta={
+                "claim_id": claim.get("claim_id"),
+                "validation_status": claim.get("validation_status"),
+                "metric_ids": list(claim.get("metric_ids", []) or []),
+                "document_ids": list(claim.get("document_ids", []) or []),
+            },
         )
     )
-
-    if isinstance(markets_data, list) and markets_data:
-        table_rows: List[Dict[str, Any]] = []
-        for m in markets_data:
-            if not isinstance(m, dict):
-                continue
-            dim_scores = m.get("dimension_scores")
-            if not isinstance(dim_scores, dict):
-                dim_scores = {}
-            table_rows.append(
-                {
-                    "market_name": str(m.get("market_name", "") or "").strip(),
-                    "region": str(m.get("region", m.get("admin1", "")) or "").strip(),
-                    "overall_mfi": m.get("overall_mfi", 0),
-                    "dimension_scores": dim_scores,
-                }
-            )
-
-        blocks.append(ReportBlock(type="heading", text="Market Scores Table (Editable)", level=3))
+    note = _mfi_evidence_note(claim, catalog, documents)
+    if note:
         blocks.append(
             ReportBlock(
-                type="table",
+                type="evidence_note",
+                text=note,
                 meta={
-                    "table_kind": "mfi_overview",
-                    "dimensions": list(_MFI_DIMENSIONS),
-                    "rows": table_rows,
+                    "claim_id": claim.get("claim_id"),
+                    "metric_ids": list(claim.get("metric_ids", []) or []),
+                    "document_ids": list(claim.get("document_ids", []) or []),
                 },
             )
         )
 
-    if isinstance(executive_summary, str) and executive_summary.strip():
-        blocks.append(ReportBlock(type="heading", text="Executive Summary", level=2))
-        blocks.extend(_text_to_paragraph_blocks(executive_summary))
 
-    blocks.append(
-        ReportBlock(type="figure", figure_id="risk_distribution", caption="Market risk distribution")
+def _mfi_table_block(
+    title: str,
+    rows: Any,
+    *,
+    columns: Optional[List[str]] = None,
+) -> Optional[ReportBlock]:
+    if not isinstance(rows, list) or not rows:
+        return None
+    return ReportBlock(
+        type="table",
+        meta={
+            "table_kind": "mfi_deterministic",
+            "title": title,
+            "columns": columns or [],
+            "rows": rows,
+        },
     )
 
+
+def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
+    """Build the Phase 3 report solely from canonical profile and narratives."""
+    country = str(result.get("country") or "").strip()
+    title = f"MFI Report - {country}" if country else "MFI Report"
+    profile = result.get("assessment_profile") or {}
+    tables = profile.get("tables") or {}
+    catalog = result.get("claim_catalog") or {}
+    context_evidence = result.get("context_evidence") or []
+    dimension_narratives = result.get("dimension_narratives") or {}
+    market_narratives = result.get("market_narratives") or {}
+    executive = result.get("executive_summary_narrative") or {}
+    references = result.get("document_references") or []
+    documents = {
+        str(item.get("doc_id")): item
+        for item in [
+            *(result.get("contextual_documents") or []),
+            *references,
+        ]
+        if isinstance(item, dict) and item.get("doc_id")
+    }
+    visualizations = result.get("visualizations") or {}
+
+    blocks: List[ReportBlock] = [
+        ReportBlock(type="heading", text=title, level=1),
+        ReportBlock(type="heading", text="Assessment metadata and coverage", level=2),
+    ]
+    collection_period = (
+        f"{result.get('data_collection_start', '')} to "
+        f"{result.get('data_collection_end', '')}"
+    ).strip()
     blocks.append(
         ReportBlock(
-            type="figure",
-            figure_id="geographic_map",
-            caption="MFI scores - geographic distribution",
-            width=7.0,
+            type="paragraph",
+            text=f"Collection period: {collection_period}.",
         )
     )
+    _append_mfi_claim(
+        blocks,
+        {
+            "claim_id": "report.assessment.coverage",
+            "text": "Included assessed-market count and score coverage are reported below.",
+            "metric_ids": [
+                "assessment.mfi.denominator",
+                "assessment.mfi.coverage",
+            ],
+            "document_ids": [],
+            "validation_status": "verified",
+        },
+        catalog=catalog,
+        documents=documents,
+    )
+    methodology_warnings = result.get("methodology_warnings") or []
+    excluded = result.get("excluded_market_records") or []
+    if methodology_warnings or excluded:
+        blocks.append(
+            ReportBlock(
+                type="limitation_box",
+                text=(
+                    f"Methodology warnings: {len(methodology_warnings)}. "
+                    f"Excluded records: {len(excluded)}."
+                ),
+                meta={
+                    "methodology_warnings": methodology_warnings,
+                    "excluded_market_records": excluded,
+                },
+            )
+        )
 
-    if isinstance(dimension_findings, dict) and dimension_findings:
-        blocks.append(ReportBlock(type="heading", text="Dimension Findings", level=2))
-        for dim in _MFI_DIMENSIONS:
-            finding = dimension_findings.get(dim)
-            if not isinstance(finding, dict):
-                continue
-            blocks.append(ReportBlock(type="heading", text=dim, level=3))
+    blocks.append(ReportBlock(type="heading", text="Context and sources", level=2))
+    for statement in context_evidence:
+        if (
+            isinstance(statement, dict)
+            and statement.get("classification") != "unrelated"
+        ):
+            _append_mfi_claim(
+                blocks,
+                {
+                    "claim_id": statement.get("statement_id"),
+                    "text": statement.get("text"),
+                    "metric_ids": [],
+                    "document_ids": statement.get("document_ids", []),
+                    "validation_status": statement.get("validation_status"),
+                },
+                catalog=catalog,
+                documents=documents,
+            )
+    if references:
+        blocks.append(ReportBlock(type="references", references=references))
 
-            definition = _MFI_DIMENSION_DEFINITIONS.get(dim)
-            if isinstance(definition, str) and definition.strip():
-                blocks.append(ReportBlock(type="definition_box", text=definition.strip()))
+    blocks.append(
+        ReportBlock(type="heading", text="Assessed-market MFI profile", level=2)
+    )
+    mean_entry = catalog.get("assessment.mfi.mean") or {}
+    _append_mfi_claim(
+        blocks,
+        {
+            "claim_id": "report.assessment.mean",
+            "text": (
+                "Mean MFI across assessed markets: "
+                f"{mean_entry.get('formatted_value', 'not available')}."
+            ),
+            "metric_ids": ["assessment.mfi.mean"],
+            "document_ids": [],
+            "validation_status": "verified",
+        },
+        catalog=catalog,
+        documents=documents,
+    )
+    if visualizations.get("mfi_radar"):
+        blocks.append(
+            ReportBlock(
+                type="figure",
+                figure_id="mfi_radar",
+                caption="Average MFI dimension profile across assessed markets",
+            )
+        )
+    if visualizations.get("market_score_ranking"):
+        blocks.append(
+            ReportBlock(
+                type="figure",
+                figure_id="market_score_ranking",
+                caption="Ordered assessed-market MFI scores; selected markets highlighted",
+            )
+        )
+    if visualizations.get("overview_table"):
+        blocks.append(
+            ReportBlock(
+                type="figure",
+                figure_id="overview_table",
+                caption="Continuous 0-10 dimension profile by assessed market",
+                width=7.0,
+            )
+        )
+    for title_text, table_key in (
+        ("Dimension summary", "dimension_rows"),
+        ("Regional dimension summary", "regional_rows"),
+    ):
+        table = _mfi_table_block(title_text, tables.get(table_key))
+        if table:
+            blocks.append(table)
+    if visualizations.get("geographic_map"):
+        blocks.append(
+            ReportBlock(
+                type="figure",
+                figure_id="geographic_map",
+                caption="Stored assessed-market MFI scores by location",
+                width=7.0,
+            )
+        )
 
-            safe_dim_name = dim.lower().replace(" ", "_").replace("&", "and")
-            safe_dim_name = re.sub(r"[^a-z0-9_]+", "_", safe_dim_name).strip("_")
+    blocks.append(ReportBlock(type="heading", text="Executive summary", level=2))
+    _append_mfi_claim(
+        blocks, executive.get("motivation"), catalog=catalog, documents=documents
+    )
+    for field in ("key_findings", "recommendations", "limitations"):
+        if executive.get(field):
+            blocks.append(
+                ReportBlock(type="heading", text=field.replace("_", " ").title(), level=3)
+            )
+        for claim in executive.get(field, []) or []:
+            _append_mfi_claim(
+                blocks, claim, catalog=catalog, documents=documents
+            )
+
+    blocks.append(ReportBlock(type="heading", text="MFI dimensions", level=2))
+    for dimension in _MFI_DIMENSIONS:
+        narrative = dimension_narratives.get(dimension)
+        if not isinstance(narrative, dict):
+            continue
+        blocks.append(ReportBlock(type="heading", text=dimension, level=3))
+        definition = _MFI_DIMENSION_DEFINITIONS.get(dimension)
+        if definition:
+            blocks.append(ReportBlock(type="definition_box", text=definition))
+        safe_name = re.sub(
+            r"[^a-z0-9_]+",
+            "_",
+            dimension.lower().replace(" ", "_").replace("&", "and"),
+        ).strip("_")
+        figure_id = f"dim_{safe_name}_bars"
+        if visualizations.get(figure_id):
             blocks.append(
                 ReportBlock(
                     type="figure",
-                    figure_id=f"dim_{safe_dim_name}_bars",
-                    caption=f"{dim} - score by market",
+                    figure_id=figure_id,
+                    caption=f"{dimension} by assessed market with regional means",
                 )
             )
+        _append_mfi_claim(
+            blocks, narrative.get("summary"), catalog=catalog, documents=documents
+        )
+        for field in (
+            "key_findings",
+            "geographic_patterns",
+            "data_limitations",
+            "recommendations",
+        ):
+            for claim in narrative.get(field, []) or []:
+                _append_mfi_claim(
+                    blocks, claim, catalog=catalog, documents=documents
+                )
 
-            key_findings = finding.get("key_findings")
-            if isinstance(key_findings, str) and key_findings.strip():
-                blocks.extend(_text_to_paragraph_blocks(f"Key findings\n{key_findings}"))
-
-            score_interp = finding.get("score_interpretation")
-            if isinstance(score_interp, str) and score_interp.strip():
-                blocks.extend(_text_to_paragraph_blocks(f"Score interpretation\n{score_interp}"))
-
-            recs = finding.get("recommendations")
-            if isinstance(recs, str) and recs.strip():
-                blocks.extend(_text_to_paragraph_blocks(f"Recommendations\n{recs}"))
-
-    if isinstance(market_recommendations, dict) and market_recommendations:
-        blocks.append(ReportBlock(type="heading", text="Recommendations by Market", level=2))
-
-        items: List[tuple[str, Dict[str, Any]]] = []
-        for market_name, payload in market_recommendations.items():
-            if not isinstance(payload, dict):
+    blocks.append(
+        ReportBlock(type="heading", text="Expanded priority-dimension evidence", level=2)
+    )
+    priority_dimensions = profile.get("priority_dimension_names", []) or []
+    for dimension in priority_dimensions:
+        narrative = dimension_narratives.get(dimension) or {}
+        blocks.append(
+            ReportBlock(
+                type="heading",
+                text=f"{dimension} expanded evidence",
+                level=3,
+            )
+        )
+        for subdimension in narrative.get("subdimension_analysis", []) or []:
+            if not isinstance(subdimension, dict):
                 continue
-            items.append((str(market_name), payload))
+            blocks.append(
+                ReportBlock(
+                    type="heading",
+                    text=str(subdimension.get("name") or "Evidence"),
+                    level=4,
+                )
+            )
+            _append_mfi_claim(
+                blocks,
+                subdimension.get("interpretation"),
+                catalog=catalog,
+                documents=documents,
+            )
+        for table_key, label in (
+            ("subsection_rows", "Official subsection evidence"),
+            ("driver_rows", "Ranked explanatory evidence"),
+            ("relevant_item_rows", "Relevant item evidence"),
+        ):
+            if dimension == "Food Quality" and table_key == "subsection_rows":
+                continue
+            rows = [
+                row
+                for row in tables.get(table_key, []) or []
+                if isinstance(row, dict)
+                and (row.get("values") or {}).get("dimension") == dimension
+            ]
+            table = _mfi_table_block(f"{dimension}: {label}", rows)
+            if table:
+                blocks.append(table)
+        safe_name = re.sub(
+            r"[^a-z0-9_]+",
+            "_",
+            str(dimension).lower().replace(" ", "_").replace("&", "and"),
+        ).strip("_")
+        for suffix, caption in (
+            ("subsections", "Official subsection evidence"),
+            ("drivers", "Ranked explanatory evidence"),
+            ("items", "Relevant item evidence"),
+        ):
+            figure_id = f"priority_{safe_name}_{suffix}"
+            if visualizations.get(figure_id):
+                blocks.append(
+                    ReportBlock(
+                        type="figure",
+                        figure_id=figure_id,
+                        caption=f"{dimension}: {caption}",
+                    )
+                )
 
-        items = sorted(items, key=lambda x: float(x[1].get("mfi_score", 0) or 0))
+    blocks.append(
+        ReportBlock(
+            type="heading",
+            text="Lowest-scoring assessed markets selected for review",
+            level=2,
+        )
+    )
+    priority_market_table = _mfi_table_block(
+        "Selected assessed markets", tables.get("priority_market_rows")
+    )
+    if priority_market_table:
+        blocks.append(priority_market_table)
+    market_order = {
+        str(item.get("market_name")): int(item.get("selection_order", 10**9))
+        for item in profile.get("markets", []) or []
+        if isinstance(item, dict)
+    }
+    for market_name, narrative in sorted(
+        market_narratives.items(),
+        key=lambda item: (market_order.get(str(item[0]), 10**9), str(item[0]).casefold()),
+    ):
+        if not isinstance(narrative, dict):
+            continue
+        heading = str(market_name)
+        if narrative.get("region"):
+            heading += f" ({narrative['region']})"
+        blocks.append(ReportBlock(type="heading", text=heading, level=3))
+        for field in ("priority_issues", "recommended_interventions"):
+            for claim in narrative.get(field, []) or []:
+                _append_mfi_claim(
+                    blocks, claim, catalog=catalog, documents=documents
+                )
+        _append_mfi_claim(
+            blocks,
+            narrative.get("modality_consideration"),
+            catalog=catalog,
+            documents=documents,
+        )
 
-        for market_name, payload in items:
-            region = str(payload.get("region", "") or "").strip()
-            risk_level = str(payload.get("risk_level", "") or "").strip()
-            try:
-                mfi_score = float(payload.get("mfi_score", 0) or 0)
-            except Exception:
-                mfi_score = 0.0
-
-            heading = market_name
-            if region:
-                heading = f"{heading} ({region})"
-            if risk_level:
-                heading = f"{heading} - {risk_level}"
-            heading = f"{heading} (MFI: {mfi_score:.1f})"
-
-            blocks.append(ReportBlock(type="heading", text=heading, level=3))
-
-            priority_issues = payload.get("priority_issues") or []
-            if isinstance(priority_issues, list) and priority_issues:
-                issues_text = "\n".join([f"- {str(i).strip()}" for i in priority_issues if str(i).strip()])
-                if issues_text.strip():
-                    blocks.extend(_text_to_paragraph_blocks(f"Priority Issues\n{issues_text}"))
-
-            interventions = payload.get("recommended_interventions") or []
-            if isinstance(interventions, list) and interventions:
-                int_text = "\n".join([f"- {str(i).strip()}" for i in interventions if str(i).strip()])
-                if int_text.strip():
-                    blocks.extend(_text_to_paragraph_blocks(f"Recommended Interventions\n{int_text}"))
-
-            modality = payload.get("modality_considerations")
-            if isinstance(modality, str) and modality.strip():
-                blocks.extend(_text_to_paragraph_blocks(f"Modality Consideration\n{modality.strip()}"))
-
-    if document_references:
-        blocks.append(ReportBlock(type="references", references=document_references))
-
+    blocks.append(
+        ReportBlock(
+            type="heading",
+            text="Methodology, limitations, and QA notices",
+            level=2,
+        )
+    )
+    blocks.append(
+        ReportBlock(
+            type="methodology_note",
+            text=(
+                f"Methodology version: {result.get('methodology_version') or METHODOLOGY_VERSION}. "
+                f"Score authority: {result.get('score_authority', '')}. "
+                "Stored DataBridge Level-1 scores remain authoritative."
+            ),
+        )
+    )
+    for limitation in profile.get("limitations", []) or []:
+        if isinstance(limitation, dict) and limitation.get("message"):
+            blocks.append(
+                ReportBlock(
+                    type="limitation_box",
+                    text=str(limitation["message"]),
+                    meta={"code": limitation.get("code"), "metric_ids": limitation.get("metric_ids", [])},
+                )
+            )
+    qa_review = result.get("qa_review") or {}
+    material_flags = [
+        flag
+        for flag in qa_review.get("flags", []) or []
+        if isinstance(flag, dict) and flag.get("severity") in {"high", "medium"}
+    ]
+    if material_flags:
+        blocks.append(
+            ReportBlock(
+                type="qa_warning",
+                text=(
+                    "Narrative QA completed with unresolved material issues. "
+                    "Affected claims are marked unverified."
+                ),
+                meta={"qa_status": qa_review.get("status"), "flags": material_flags},
+            )
+        )
+    elif qa_review:
+        blocks.append(
+            ReportBlock(
+                type="methodology_note",
+                text=f"Narrative QA status: {qa_review.get('status', 'not recorded')}.",
+                meta={"qa_review": qa_review},
+            )
+        )
     return blocks

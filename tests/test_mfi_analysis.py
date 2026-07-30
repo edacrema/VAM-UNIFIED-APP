@@ -575,7 +575,7 @@ def test_analysis_node_makes_no_llm_call_and_market_selector_uses_profile(monkey
     recommendation_update = graph.node_market_recommendations_drafter(state)
 
     assert model.calls == 1
-    assert market["market_name"] in recommendation_update["market_recommendations"]
-    assert recommendation_update["market_recommendations"][market["market_name"]][
+    assert market["market_name"] in recommendation_update["market_narratives"]
+    assert recommendation_update["market_narratives"][market["market_name"]][
         "weak_dimensions"
     ] == list(DISPLAY_DIMENSIONS[:3])

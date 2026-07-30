@@ -15,10 +15,8 @@ from .methodology import (
     DRIVERS_BY_DIMENSION,
     METHODOLOGY_VERSION,
     MFIR_SCORE_VARIABLE,
-    OFFICIAL_DIMENSION_SCORE_VARIABLES,
     OFFICIAL_FULL_SCORE_VARIABLES,
     OFFICIAL_SCORE_DEFINITIONS,
-    OVERALL_SCORE_VARIABLE,
     SCORE_AUTHORITY,
     SCORE_VALIDATION_ABS_TOLERANCE,
     SUBSECTIONS_BY_DIMENSION,
@@ -32,7 +30,6 @@ from .schemas import (
     MFIMethodologyWarning,
     MFIMetric,
     MFIMetricSummary,
-    get_risk_level,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,7 +173,6 @@ def load_mfi_from_dataframe(
                 "dimension_scores": {
                     dimension: official_scores[dimension] for dimension in DISPLAY_DIMENSIONS
                 },
-                "risk_level": get_risk_level(overall),
                 "traders_surveyed": traders,
                 "latitude": latitude,
                 "longitude": longitude,
@@ -191,7 +187,6 @@ def load_mfi_from_dataframe(
         market["drivers"] = _group_evidence_by_dimension(groups["drivers"])
 
     regions = sorted({market["region"] for market in market_records if market["region"]})
-    dimension_aggregations = _build_dimension_aggregations(market_records, regions)
     country = country_override or market_records[0]["admin0"]
     warnings = [warning.message for warning in methodology_warnings]
 
@@ -203,7 +198,6 @@ def load_mfi_from_dataframe(
         "methodology_warnings": [warning.model_dump() for warning in methodology_warnings],
         "warnings": warnings,
         "markets_data": market_records,
-        "dimension_scores": dimension_aggregations,
         "metric_summaries": metric_summaries,
         "survey_metadata": {
             "country": country,
@@ -748,36 +742,6 @@ def _group_evidence_by_dimension(metrics: list[MFIMetric]) -> dict[str, list[dic
     for metric in metrics:
         grouped[metric.dimension].append(metric.model_dump())
     return grouped
-
-
-def _build_dimension_aggregations(
-    markets_data: list[dict[str, Any]], regions: list[str]
-) -> list[dict[str, Any]]:
-    aggregations: list[dict[str, Any]] = []
-    for dimension in DISPLAY_DIMENSIONS:
-        market_scores = {
-            market["market_name"]: market["dimension_scores"][dimension]
-            for market in markets_data
-        }
-        values = list(market_scores.values())
-        regional_scores = {
-            region: sum(
-                market["dimension_scores"][dimension]
-                for market in markets_data
-                if market["region"] == region
-            )
-            / sum(1 for market in markets_data if market["region"] == region)
-            for region in regions
-        }
-        aggregations.append(
-            {
-                "dimension": dimension,
-                "national_score": sum(values) / len(values),
-                "regional_scores": regional_scores,
-                "market_scores": market_scores,
-            }
-        )
-    return aggregations
 
 
 def _build_preview(df: pd.DataFrame) -> dict[str, Any]:

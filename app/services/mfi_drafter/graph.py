@@ -1,11 +1,10 @@
 """
 MFI Drafter - Graph
 ===================
-Workflow LangGraph per generazione Market Functionality Index Reports.
+LangGraph workflow for Market Functionality Index reports.
 
-Struttura del grafo:
-    mfi_data_agent → context_retrieval → context_extractor → mfi_graph_designer
-    → dimension_drafter → executive_summary_drafter → red_team → [loop/END]
+Graph: data → analysis → context → visuals → structured drafting →
+deterministic validation → Red-Team → targeted repair or final QA.
 """
 from __future__ import annotations
 
@@ -33,12 +32,35 @@ from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .analysis import build_assessment_profile
 from .schemas import (
-    MFI_DIMENSIONS, RISK_COLORS, get_risk_level, MFIMetric
+    MFI_DIMENSIONS, MFIMetric
 )
 from .methodology import (
     ANALYSIS_SCHEMA_VERSION,
+    DIMENSION_DESCRIPTIONS,
+    DRIVERS_BY_DIMENSION,
     METHODOLOGY_VERSION,
+    NARRATIVE_PROMPT_CONSTRAINTS,
+    NARRATIVE_SCHEMA_VERSION,
     SUBSECTIONS_BY_DIMENSION,
+)
+from .narrative import (
+    build_claim_catalog,
+    build_correction_targets,
+    build_qa_review,
+    compact_catalog,
+    dimension_catalog_ids,
+    executive_catalog_ids,
+    fallback_dimension_narrative,
+    fallback_executive_narrative,
+    fallback_market_narrative,
+    market_catalog_ids,
+    material_repairable_flags,
+    normalize_red_team_flags,
+    parse_context_evidence,
+    parse_dimension_narrative,
+    parse_executive_narrative,
+    parse_market_narrative,
+    validate_structured_narratives,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,36 +89,42 @@ class MFIReportState(TypedDict):
     # ===== BRANCH 1: MFI DATA =====
     raw_survey_data: Optional[str]
     markets_data: List[Dict[str, Any]]
-    dimension_scores: List[Dict[str, Any]]
     metric_summaries: Dict[str, List[Dict[str, Any]]]
     survey_metadata: Optional[Dict[str, Any]]
     analysis_schema_version: str
     methodology_version: str
     score_authority: str
+    narrative_schema_version: str
     excluded_market_records: List[Dict[str, Any]]
     methodology_warnings: List[Dict[str, Any]]
     mean_mfi_across_assessed_markets: Optional[float]
     assessment_profile: Optional[Dict[str, Any]]
+    claim_catalog: Dict[str, Dict[str, Any]]
+    market_score_distribution: List[Dict[str, Any]]
     
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
     document_references: List[Dict[str, Any]]
     seerist_documents: List[Dict[str, Any]]
     reliefweb_documents: List[Dict[str, Any]]
-    country_context: Optional[str]
+    context_evidence: List[Dict[str, Any]]
     context_counts: Dict[str, int]
     retriever_traces: List[Dict[str, Any]]
     
     # ===== VISUALIZATIONS =====
     visualizations: Dict[str, str]  # Base64
     
-    # ===== DRAFTED SECTIONS =====
-    executive_summary: Optional[str]
-    dimension_findings: Dict[str, Dict[str, str]]
-    market_recommendations: Dict[str, Dict[str, Any]]
+    # ===== STRUCTURED NARRATIVES =====
+    executive_summary_narrative: Dict[str, Any]
+    dimension_narratives: Dict[str, Dict[str, Any]]
+    market_narratives: Dict[str, Dict[str, Any]]
     
     # ===== QA & CONTROL =====
-    skeptic_flags: List[Dict[str, Any]]
+    claim_validation: Dict[str, Any]
+    deterministic_flags: List[Dict[str, Any]]
+    red_team_flags: List[Dict[str, Any]]
+    qa_review: Dict[str, Any]
+    correction_targets: List[Dict[str, Any]]
     warnings: Annotated[List[str], operator.add]
     run_id: str
     correction_attempts: int
@@ -121,7 +149,6 @@ def create_initial_state(
         use_csv_data=csv_data is not None,
         raw_survey_data=None,
         markets_data=[],
-        dimension_scores=[],
         metric_summaries=(csv_data or {}).get("metric_summaries", {}),
         survey_metadata=None,
         analysis_schema_version=(csv_data or {}).get(
@@ -131,22 +158,33 @@ def create_initial_state(
             "methodology_version", METHODOLOGY_VERSION
         ),
         score_authority=(csv_data or {}).get("score_authority", "synthetic_mock"),
+        narrative_schema_version=NARRATIVE_SCHEMA_VERSION,
         excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
         methodology_warnings=(csv_data or {}).get("methodology_warnings", []),
         mean_mfi_across_assessed_markets=None,
         assessment_profile=None,
+        claim_catalog={},
+        market_score_distribution=[],
         contextual_documents=[],
         document_references=[],
         seerist_documents=[],
         reliefweb_documents=[],
-        country_context=None,
+        context_evidence=[],
         context_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
         visualizations={},
-        executive_summary=None,
-        dimension_findings={},
-        market_recommendations={},
-        skeptic_flags=[],
+        executive_summary_narrative={},
+        dimension_narratives={},
+        market_narratives={},
+        claim_validation={"status": "not_recorded", "flags": []},
+        deterministic_flags=[],
+        red_team_flags=[],
+        qa_review={
+            "status": "not_recorded",
+            "correction_attempts": 0,
+            "flags": [],
+        },
+        correction_targets=[],
         warnings=[],
         run_id=f"mfi_{uuid.uuid4().hex[:8]}",
         correction_attempts=0,
@@ -308,52 +346,53 @@ def _generate_simple_geographic_map(
     visualizations: Dict[str, str],
 ) -> None:
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
 
     lats = [float(m["latitude"]) for m in markets_with_coords]
     lons = [float(m["longitude"]) for m in markets_with_coords]
-    mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
+    mfi_scores = [float(m["overall_mfi"]) for m in markets_with_coords]
     names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
+    priority_names = set(
+        (state.get("assessment_profile") or {}).get("priority_market_names", [])
+    )
+    point_sizes = [150 if name in priority_names else 80 for name in names]
+    line_widths = [1.5 if name in priority_names else 0.5 for name in names]
 
     fig, ax = plt.subplots(figsize=(12, 10))
     scatter = ax.scatter(
         lons,
         lats,
         c=mfi_scores,
-        cmap="RdYlGn",
-        s=100,
+        cmap="Blues",
+        s=point_sizes,
         vmin=0,
         vmax=10,
         edgecolors="black",
-        linewidths=0.5,
+        linewidths=line_widths,
     )
 
-    for lon, lat, score, name in zip(lons, lats, mfi_scores, names):
-        if not name:
-            continue
-        if score < 5.5:
-            ax.annotate(name, (lon, lat), fontsize=6, xytext=(3, 3), textcoords="offset points")
+    for lon, lat, name in zip(lons, lats, names):
+        if name in priority_names:
+            ax.annotate(
+                name,
+                (lon, lat),
+                fontsize=7,
+                fontweight="bold",
+                xytext=(3, 3),
+                textcoords="offset points",
+            )
 
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     country = str(state.get("country", "")).strip()
     suffix = f" ({country})" if country else ""
     ax.set_title(
-        f"MFI Scores - Geographic Distribution{suffix}",
+        f"Assessed-market MFI scores{suffix}",
         fontsize=12,
         fontweight="bold",
     )
 
     cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
-    cbar.set_label("MFI Score")
-
-    legend_elements = [
-        Patch(facecolor="#2ca02c", label="Low Risk (≥7)"),
-        Patch(facecolor="#ffbb78", label="Medium Risk (5.5-7)"),
-        Patch(facecolor="#ff7f0e", label="High Risk (4-5.5)"),
-        Patch(facecolor="#d62728", label="Very High Risk (<4)"),
-    ]
-    ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
+    cbar.set_label("Stored MFI score (0-10)")
 
     plt.tight_layout()
     visualizations["geographic_map"] = save_plot_to_base64()
@@ -444,6 +483,41 @@ def generate_mock_mfi_data(
                         severity_weight=definition.severity_weight,
                     ).model_dump()
                 )
+            for definition in DRIVERS_BY_DIMENSION[dim]:
+                raw_value = random.uniform(definition.raw_min, definition.raw_max)
+                normalized = definition.normalize(raw_value)
+                drivers[dim].append(
+                    MFIMetric(
+                        metric_id=definition.metric_id,
+                        dimension=definition.dimension,
+                        display_name=definition.display_name,
+                        variable_name=definition.variable_name,
+                        source_level_id=definition.source_level_id,
+                        source_level_name=definition.source_level_name,
+                        role=definition.role,
+                        raw_value=raw_value,
+                        raw_min=definition.raw_min,
+                        raw_max=definition.raw_max,
+                        normalized_value=normalized,
+                        orientation=definition.orientation,
+                        unit=definition.unit,
+                        evidence_scope=definition.evidence_scope,
+                        observed_raw_values=[raw_value],
+                        market_coverage=len(markets),
+                        market_coverage_total=len(markets),
+                        missing_count=0,
+                        applicability_status="available",
+                        validation_status="valid",
+                        methodology_note=(
+                            "Synthetic mock evidence for workflow demonstration only; "
+                            "not a DataBridge observation."
+                        ),
+                        product_group=definition.product_group,
+                        question_group=definition.question_group,
+                        item_name=definition.item_name,
+                        severity_weight=definition.severity_weight,
+                    ).model_dump()
+                )
 
         overall_mfi = round(np.mean(list(dimension_scores.values())), 1)
         markets_data.append({
@@ -456,29 +530,10 @@ def generate_mock_mfi_data(
             "dimension_scores": dimension_scores,
             "subsections": subsections,
             "drivers": drivers,
-            "risk_level": get_risk_level(overall_mfi),
             "traders_surveyed": random.randint(15, 30)
         })
     
-    # Aggregazione per dimensione
     regions = sorted({m["region"] for m in markets_data})
-    dimension_aggregations = []
-    for dim in MFI_DIMENSIONS:
-        national_score = round(np.mean([m["dimension_scores"][dim] for m in markets_data]), 1)
-        regional_scores = {}
-        for region in regions:
-            region_markets = [m for m in markets_data if m["region"] == region]
-            if region_markets:
-                regional_scores[region] = round(
-                    np.mean([m["dimension_scores"][dim] for m in region_markets]), 1
-                )
-        market_scores = {m["market_name"]: m["dimension_scores"][dim] for m in markets_data}
-        dimension_aggregations.append({
-            "dimension": dim,
-            "national_score": national_score,
-            "regional_scores": regional_scores,
-            "market_scores": market_scores
-        })
     
     survey_metadata = {
         "country": country,
@@ -496,7 +551,6 @@ def generate_mock_mfi_data(
         "methodology_warnings": [],
         "warnings": [],
         "markets_data": markets_data,
-        "dimension_scores": dimension_aggregations,
         "metric_summaries": _summarize_mock_evidence(markets_data),
         "survey_metadata": survey_metadata
     }
@@ -512,8 +566,9 @@ def _summarize_mock_evidence(
     for dimension in MFI_DIMENSIONS:
         by_metric: Dict[str, List[Dict[str, Any]]] = {}
         for market in markets_data:
-            for metric in market["subsections"].get(dimension, []):
-                by_metric.setdefault(metric["metric_id"], []).append(metric)
+            for group_name in ("subsections", "drivers"):
+                for metric in market[group_name].get(dimension, []):
+                    by_metric.setdefault(metric["metric_id"], []).append(metric)
         for metric_id, metrics in sorted(by_metric.items()):
             raw_values = [float(metric["raw_value"]) for metric in metrics]
             normalized = [
@@ -563,12 +618,6 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
             state["data_collection_end"],
         )
     
-    # Log risk distribution
-    risk_dist = {}
-    for m in data["markets_data"]:
-        risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
-    logger.info(f"Risk distribution: {risk_dist}")
-    
     return {
         "analysis_schema_version": data.get("analysis_schema_version", ANALYSIS_SCHEMA_VERSION),
         "methodology_version": data.get("methodology_version", METHODOLOGY_VERSION),
@@ -576,7 +625,6 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
         "excluded_market_records": data.get("excluded_market_records", []),
         "methodology_warnings": data.get("methodology_warnings", []),
         "markets_data": data["markets_data"],
-        "dimension_scores": data["dimension_scores"],
         "metric_summaries": data.get("metric_summaries", {}),
         "survey_metadata": data["survey_metadata"],
         "warnings": data.get("warnings", []),
@@ -599,11 +647,24 @@ def node_mfi_analysis(state: MFIReportState) -> dict:
             "excluded_market_records": state.get("excluded_market_records", []),
         },
     )
+    profile_payload = profile.model_dump()
+    market_score_distribution = [
+        {
+            "market_name": market.market_name,
+            "overall_mfi": market.overall_mfi,
+            "score_rank": market.score_rank,
+            "selection_order": market.selection_order,
+            "is_priority_market": market.is_priority_market,
+        }
+        for market in profile.markets
+    ]
     return {
         "mean_mfi_across_assessed_markets": (
             profile.mean_mfi_across_assessed_markets
         ),
-        "assessment_profile": profile.model_dump(),
+        "assessment_profile": profile_payload,
+        "claim_catalog": build_claim_catalog(profile_payload),
+        "market_score_distribution": market_score_distribution,
         "current_node": "mfi_analysis",
     }
 
@@ -705,74 +766,70 @@ def node_context_retrieval(state: MFIReportState) -> dict:
 # ============================================================================
 
 def node_context_extractor(state: MFIReportState) -> dict:
-    """Nodo: Estrae contesto con LLM."""
-    logger.info("[ContextExtractor] Extracting context")
-    
+    """Classify source-linked context before it can enter MFI narratives."""
+    logger.info("[ContextExtractor] Classifying contextual evidence")
     docs = state.get("contextual_documents", [])
-    
     if not docs:
         return {
-            "country_context": None,
+            "context_evidence": [],
             "current_node": "context_extractor",
         }
-    
-    llm = get_model()
-    doc_text = "\n".join([f"[{d['source']}]: {d['content'][:400]}..." for d in docs[:5]])
-    
-    prompt = f"""Extract a brief country context (3-4 sentences) relevant for MFI report from these sources about {state['country']}.
 
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- If the sources do not contain relevant information about the economic situation, food security, or market-affecting factors, return an empty string for country_context.
-- Do not include disclaimers like 'cannot be extracted' or 'insufficient information'.
+    source_payload = [
+        {
+            "document_id": document.get("doc_id"),
+            "source": document.get("source"),
+            "date": document.get("date"),
+            "title": document.get("title"),
+            "content": str(document.get("content") or "")[:800],
+        }
+        for document in docs[:8]
+        if isinstance(document, dict) and document.get("doc_id")
+    ]
+    prompt = f"""Classify source-linked context for the {state['country']} MFI report.
 
-Focus on: economic situation, food security, market-affecting factors.
+Return only statements directly supported by the supplied documents.
+Classifications:
+- corroborating: independently supports an observed MFI pattern;
+- potentially_explanatory: may help interpret a pattern but does not establish causality;
+- unrelated: not useful for interpreting the MFI evidence.
 
-SOURCES:
-{doc_text}
+Rules:
+- English only.
+- Cite only supplied document_id values.
+- Never say that contextual events caused an MFI result.
+- Do not invent MFI values or use undocumented risk categories.
 
-Return JSON: {{"country_context": "Your 3-4 sentence context..."}}"""
-    
+DOCUMENTS:
+{json.dumps(source_payload)}
+
+Output JSON:
+{{"statements": [
+  {{"statement_id": "context-1", "text": "...",
+    "classification": "corroborating|potentially_explanatory|unrelated",
+    "document_ids": ["supplied-id"]}}
+]}}"""
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = get_model().invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
-        context = result.get("country_context", "") if result else ""
+        context_evidence, parse_flags = parse_context_evidence(
+            result,
+            documents=docs,
+        )
         llm_calls = 1
     except Exception as e:
         logger.error(f"Context extraction failed: {e}")
-        context = ""
+        context_evidence = []
+        parse_flags = []
         llm_calls = 0
-
-    context = (context or "").strip()
-
-    if context:
-        lc = context.lower()
-        looks_like_disclaimer = (
-            "cannot be extracted" in lc
-            or "can not be extracted" in lc
-            or "unable to extract" in lc
-            or "unable to" in lc and "extract" in lc
-            or "do not contain specific information" in lc
-            or "does not contain specific information" in lc
-            or ("do not contain" in lc and "specific information" in lc)
-            or "not enough information" in lc
-            or "insufficient information" in lc
-        )
-        if looks_like_disclaimer:
-            context = ""
-
-    if not context:
-        return {
-            "country_context": None,
-            "llm_calls": state.get("llm_calls", 0) + llm_calls,
-            "current_node": "context_extractor",
-        }
-    
-    return {
-        "country_context": context,
+    updates = {
+        "context_evidence": context_evidence,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
-        "current_node": "context_extractor"
+        "current_node": "context_extractor",
     }
+    if parse_flags:
+        updates["deterministic_flags"] = parse_flags
+    return updates
 
 
 def node_mfi_graph_designer(state: MFIReportState) -> dict:
@@ -785,20 +842,20 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import matplotlib.colors as mcolors
-
-        dim_scores = state.get("dimension_scores") or []
-        score_map: Dict[str, float] = {}
-        for d in dim_scores:
-            if isinstance(d, dict) and d.get("dimension") is not None:
-                try:
-                    score_map[str(d.get("dimension"))] = float(d.get("national_score", 0.0))
-                except Exception:
-                    score_map[str(d.get("dimension"))] = 0.0
+        profile = state.get("assessment_profile") or {}
+        dimensions = [
+            item for item in profile.get("dimensions", []) if isinstance(item, dict)
+        ]
+        score_map = {
+            str(item["dimension"]): float(item["statistics"]["mean"])
+            for item in dimensions
+            if item.get("dimension") and item.get("statistics", {}).get("mean") is not None
+        }
 
         dims = list(MFI_DIMENSIONS)
-        values = [float(score_map.get(dim, 0.0)) for dim in dims]
-        if any(values):
+        values = [score_map[dim] for dim in dims if dim in score_map]
+        radar_dims = [dim for dim in dims if dim in score_map]
+        if len(values) == len(dims):
             angles = [n / float(len(dims)) * 2 * pi for n in range(len(dims))]
             values_loop = values + values[:1]
             angles_loop = angles + angles[:1]
@@ -806,36 +863,53 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"polar": True})
             ax.set_theta_offset(pi / 2)
             ax.set_theta_direction(-1)
-            plt.xticks(angles, dims, size=8)
+            plt.xticks(angles, radar_dims, size=8)
             ax.set_ylim(0, 10)
             ax.plot(angles_loop, values_loop, color=WFP_BLUE, linewidth=2)
             ax.fill(angles_loop, values_loop, color=WFP_BLUE, alpha=0.25)
+            ax.set_title(
+                "Average MFI dimension profile across assessed markets",
+                pad=24,
+                fontsize=11,
+                fontweight="bold",
+            )
             plt.tight_layout()
             visualizations["mfi_radar"] = save_plot_to_base64()
 
-        risk_dist: Dict[str, int] = {}
-        for m in state.get("markets_data", []) or []:
-            if not isinstance(m, dict):
-                continue
-            risk = m.get("risk_level")
-            if not risk:
-                continue
-            risk_dist[str(risk)] = risk_dist.get(str(risk), 0) + 1
-
-        if risk_dist:
-            labels = ["Low Risk", "Medium Risk", "High Risk", "Very High Risk"]
-            counts = [risk_dist.get(lbl, 0) for lbl in labels]
-            colors = [RISK_COLORS.get(lbl, "#999999") for lbl in labels]
-            xs = list(range(len(labels)))
-
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.bar(xs, counts, color=colors)
-            ax.set_xticks(xs)
-            ax.set_xticklabels(labels, rotation=20, ha="right")
-            ax.set_ylabel("Number of markets")
-            ax.set_title("Risk distribution")
+        market_profiles = [
+            item for item in profile.get("markets", []) if isinstance(item, dict)
+        ]
+        selected_markets = set(profile.get("priority_market_names", []))
+        ordered_markets = sorted(
+            market_profiles,
+            key=lambda item: (
+                float(item["overall_mfi"]),
+                str(item.get("market_name", "")).casefold(),
+            ),
+        )
+        if ordered_markets:
+            names = [str(item["market_name"]) for item in ordered_markets]
+            scores = [float(item["overall_mfi"]) for item in ordered_markets]
+            colors = [
+                "#F68B1F" if name in selected_markets else WFP_BLUE for name in names
+            ]
+            sizes = [70 if name in selected_markets else 38 for name in names]
+            fig_height = max(5, len(names) * 0.25)
+            fig, ax = plt.subplots(figsize=(10, fig_height))
+            y_pos = np.arange(len(names))
+            ax.scatter(scores, y_pos, c=colors, s=sizes, edgecolors="white")
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(names, fontsize=8)
+            ax.set_xlim(0, 10)
+            ax.set_xlabel("Stored MFI score (0-10)")
+            ax.set_title(
+                "Ordered assessed-market MFI scores",
+                fontsize=11,
+                fontweight="bold",
+            )
+            ax.grid(axis="x", alpha=0.2)
             plt.tight_layout()
-            visualizations["risk_distribution"] = save_plot_to_base64()
+            visualizations["market_score_ranking"] = save_plot_to_base64()
 
         markets_data = [
             m for m in (state.get("markets_data", []) or [])
@@ -852,21 +926,21 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
                 row = []
                 for dim in dims:
                     try:
-                        row.append(float(dim_scores.get(dim, 0) or 0))
+                        value = dim_scores.get(dim)
+                        row.append(float(value) if value is not None else np.nan)
                     except Exception:
-                        row.append(0.0)
+                        row.append(np.nan)
                 data_matrix.append(row)
 
             data_matrix_np = np.array(data_matrix, dtype=float)
-
-            heat_colors = ["#d62728", "#ff7f0e", "#ffbb78", "#98df8a", "#2ca02c"]
-            cmap = mcolors.LinearSegmentedColormap.from_list("mfi_risk", heat_colors)
 
             fig_height = max(8, len(market_names) * 0.35)
             fig_width = max(12, len(dims) * 1.2)
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
-            im = ax.imshow(data_matrix_np, cmap=cmap, aspect="auto", vmin=0, vmax=10)
+            im = ax.imshow(
+                data_matrix_np, cmap="Blues", aspect="auto", vmin=0, vmax=10
+            )
 
             ax.set_xticks(np.arange(len(dims)))
             ax.set_yticks(np.arange(len(market_names)))
@@ -876,11 +950,13 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             for i in range(len(market_names)):
                 for j in range(len(dims)):
                     score = float(data_matrix_np[i, j])
-                    text_color = "white" if score < 4 or score > 8 else "black"
+                    if np.isnan(score):
+                        continue
+                    text_color = "white" if score > 7 else "black"
                     ax.text(
                         j,
                         i,
-                        f"{score:.1f}",
+                        f"{score:.2f}",
                         ha="center",
                         va="center",
                         color=text_color,
@@ -892,7 +968,7 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             cbar.set_label("MFI Score (0-10)", rotation=270, labelpad=15)
 
             ax.set_title(
-                "Market Functionality Index - Overview by Market and Dimension",
+                "Assessed-market MFI profile by dimension",
                 fontsize=12,
                 fontweight="bold",
                 pad=10,
@@ -901,53 +977,83 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             plt.tight_layout()
             visualizations["overview_table"] = save_plot_to_base64()
 
-        dim_scores = state.get("dimension_scores") or []
-
-        for dim_data in dim_scores:
-            if not isinstance(dim_data, dict):
-                continue
-
-            dim_name = dim_data.get("dimension")
-            market_scores = dim_data.get("market_scores") or {}
-
-            if not dim_name or not isinstance(market_scores, dict) or not market_scores:
-                continue
-
-            sorted_markets = sorted(
-                [(str(k), float(v)) for k, v in market_scores.items() if v is not None],
-                key=lambda x: x[1],
+        market_regions = {
+            str(market.get("market_name", "")): str(
+                market.get("region") or market.get("admin1") or ""
             )
-            markets = [m[0] for m in sorted_markets]
-            scores = [m[1] for m in sorted_markets]
-
-            bar_colors: list[str] = []
-            for s in scores:
-                if s < 4:
-                    bar_colors.append("#d62728")
-                elif s < 5.5:
-                    bar_colors.append("#ff7f0e")
-                elif s < 7:
-                    bar_colors.append("#ffbb78")
-                else:
-                    bar_colors.append("#2ca02c")
-
+            for market in markets_data
+        }
+        for dim_data in dimensions:
+            dim_name = str(dim_data.get("dimension", ""))
+            ordered = (
+                dim_data.get("localized_patterns", {}).get("ordered_markets", [])
+            )
+            sorted_markets = [
+                (str(item["name"]), float(item["value"]))
+                for item in ordered
+                if isinstance(item, dict)
+                and item.get("name")
+                and item.get("value") is not None
+            ]
+            if not dim_name or not sorted_markets:
+                continue
+            markets = [item[0] for item in sorted_markets]
+            scores = [item[1] for item in sorted_markets]
+            regional_means = {
+                str(item["region"]): float(item["statistics"]["mean"])
+                for item in dim_data.get("regional_summaries", [])
+                if isinstance(item, dict)
+                and item.get("region")
+                and item.get("statistics", {}).get("mean") is not None
+            }
             fig_height = max(6, len(markets) * 0.3)
             fig, ax = plt.subplots(figsize=(10, fig_height))
 
             y_pos = np.arange(len(markets))
-            ax.barh(y_pos, scores, color=bar_colors, edgecolor="white", linewidth=0.5)
+            ax.barh(
+                y_pos,
+                scores,
+                color=WFP_BLUE,
+                alpha=0.75,
+                edgecolor="white",
+                linewidth=0.5,
+            )
+            marker_added = False
+            for index, market_name in enumerate(markets):
+                region = market_regions.get(market_name)
+                region_mean = regional_means.get(region or "")
+                if region_mean is None:
+                    continue
+                ax.scatter(
+                    region_mean,
+                    index,
+                    marker="D",
+                    s=28,
+                    color="#F68B1F",
+                    edgecolor="black",
+                    linewidth=0.3,
+                    label="Regional mean" if not marker_added else None,
+                    zorder=4,
+                )
+                marker_added = True
 
             ax.set_yticks(y_pos)
             ax.set_yticklabels(markets, fontsize=8)
-            ax.set_xlabel("Score (0-10)")
+            ax.set_xlabel("Stored dimension score (0-10)")
             ax.set_xlim(0, 10)
-            ax.set_title(f"{dim_name} - Score by Market", fontsize=11, fontweight="bold")
-
-            ax.axvline(x=5.5, color="gray", linestyle="--", linewidth=1, alpha=0.7)
-            ax.text(5.6, max(0, len(markets) - 1), "Medium Risk\nThreshold", fontsize=7, color="gray")
+            coverage = dim_data.get("statistics", {}).get("coverage", {})
+            ax.set_title(
+                f"{dim_name} by assessed market\n"
+                f"Coverage: {coverage.get('available_count', 0)}/"
+                f"{coverage.get('total_count', 0)} markets",
+                fontsize=11,
+                fontweight="bold",
+            )
+            if marker_added:
+                ax.legend(loc="lower right", fontsize=8)
 
             for i, score in enumerate(scores):
-                ax.text(score + 0.1, i, f"{score:.1f}", va="center", fontsize=7)
+                ax.text(score + 0.1, i, f"{score:.2f}", va="center", fontsize=7)
 
             plt.tight_layout()
 
@@ -955,107 +1061,145 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             safe_dim_name = re.sub(r"[^a-z0-9_]+", "_", safe_dim_name).strip("_")
             visualizations[f"dim_{safe_dim_name}_bars"] = save_plot_to_base64()
 
+        priority_dimensions = {
+            str(item) for item in profile.get("priority_dimension_names", [])
+        }
+        for dim_data in dimensions:
+            dim_name = str(dim_data.get("dimension", ""))
+            if dim_name not in priority_dimensions:
+                continue
+            safe_dim_name = re.sub(
+                r"[^a-z0-9_]+",
+                "_",
+                dim_name.lower().replace(" ", "_").replace("&", "and"),
+            ).strip("_")
+
+            if dim_name != "Food Quality":
+                subsection_values = [
+                    (
+                        str(metric.get("display_name", metric.get("metric_id", ""))),
+                        float(metric["mean_normalized_value"]),
+                    )
+                    for metric in dim_data.get("subsections", [])
+                    if isinstance(metric, dict)
+                    and metric.get("mean_normalized_value") is not None
+                ]
+                subsection_values.sort(key=lambda item: (item[1], item[0].casefold()))
+                if subsection_values:
+                    labels = [item[0] for item in subsection_values]
+                    values = [item[1] for item in subsection_values]
+                    fig, ax = plt.subplots(figsize=(9, max(3, len(labels) * 0.55)))
+                    y_pos = np.arange(len(labels))
+                    ax.barh(y_pos, values, color=WFP_BLUE)
+                    ax.set_yticks(y_pos)
+                    ax.set_yticklabels(labels, fontsize=8)
+                    ax.set_xlim(0, 10)
+                    ax.set_xlabel("Normalized subsection score (0-10)")
+                    ax.set_title(
+                        f"{dim_name}: official subsection evidence",
+                        fontweight="bold",
+                    )
+                    for index, value in enumerate(values):
+                        ax.text(value + 0.08, index, f"{value:.2f}", va="center")
+                    plt.tight_layout()
+                    visualizations[
+                        f"priority_{safe_dim_name}_subsections"
+                    ] = save_plot_to_base64()
+
+            ranked_drivers = [
+                metric
+                for metric in dim_data.get("drivers", [])
+                if isinstance(metric, dict)
+                and metric.get("item_name") is None
+                and metric.get("unfavorable_rate") is not None
+                and metric.get("weakness_rank") is not None
+            ]
+            ranked_drivers.sort(
+                key=lambda metric: (
+                    int(metric["weakness_rank"]),
+                    str(metric.get("metric_id", "")),
+                )
+            )
+            ranked_drivers = ranked_drivers[:8]
+            if ranked_drivers:
+                labels = [
+                    str(metric.get("display_name", metric.get("metric_id", "")))
+                    for metric in ranked_drivers
+                ]
+                values = [
+                    float(metric["unfavorable_rate"]) * 100
+                    for metric in ranked_drivers
+                ]
+                fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.5)))
+                y_pos = np.arange(len(labels))
+                ax.barh(y_pos, values, color="#F68B1F")
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels(labels, fontsize=8)
+                ax.invert_yaxis()
+                ax.set_xlim(0, 100)
+                ax.set_xlabel("Unfavorable rate (%)")
+                ax.set_title(
+                    f"{dim_name}: ranked explanatory evidence",
+                    fontweight="bold",
+                )
+                for index, value in enumerate(values):
+                    ax.text(value + 0.8, index, f"{value:.1f}%", va="center")
+                plt.tight_layout()
+                visualizations[
+                    f"priority_{safe_dim_name}_drivers"
+                ] = save_plot_to_base64()
+
+            relevant_items = [
+                metric
+                for metric in dim_data.get("drivers", [])
+                if isinstance(metric, dict)
+                and metric.get("item_relevant") is True
+                and metric.get("unfavorable_rate") is not None
+            ]
+            relevant_items.sort(
+                key=lambda metric: (
+                    -float(metric["unfavorable_rate"]),
+                    str(metric.get("metric_id", "")),
+                )
+            )
+            if relevant_items:
+                labels = [
+                    str(metric.get("display_name", metric.get("metric_id", "")))
+                    for metric in relevant_items
+                ]
+                values = [
+                    float(metric["unfavorable_rate"]) * 100
+                    for metric in relevant_items
+                ]
+                fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.5)))
+                y_pos = np.arange(len(labels))
+                ax.barh(y_pos, values, color="#8A2BE2")
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels(labels, fontsize=8)
+                ax.invert_yaxis()
+                ax.set_xlim(0, 100)
+                ax.set_xlabel("Unfavorable rate (%)")
+                ax.set_title(
+                    f"{dim_name}: relevant item evidence",
+                    fontweight="bold",
+                )
+                plt.tight_layout()
+                visualizations[
+                    f"priority_{safe_dim_name}_items"
+                ] = save_plot_to_base64()
+
         markets_with_coords = [
             m
             for m in markets_data
-            if m.get("latitude") is not None and m.get("longitude") is not None
+            if m.get("latitude") is not None
+            and m.get("longitude") is not None
+            and m.get("overall_mfi") is not None
         ]
 
         if markets_with_coords:
-            try:
-                import cartopy.crs as ccrs
-                import cartopy.feature as cfeature
-                from matplotlib.patches import Patch
-
-                lats = [float(m["latitude"]) for m in markets_with_coords]
-                lons = [float(m["longitude"]) for m in markets_with_coords]
-                mfi_scores = [float(m.get("overall_mfi", 0) or 0) for m in markets_with_coords]
-                names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
-
-                lat_min, lat_max = min(lats) - 0.5, max(lats) + 0.5
-                lon_min, lon_max = min(lons) - 0.5, max(lons) + 0.5
-
-                def get_risk_color(score: float) -> str:
-                    if score < 4.0:
-                        return "#d62728"
-                    if score < 5.5:
-                        return "#ff7f0e"
-                    if score < 7.0:
-                        return "#ffbb78"
-                    return "#2ca02c"
-
-                colors = [get_risk_color(s) for s in mfi_scores]
-
-                fig = plt.figure(figsize=(12, 10))
-                ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-                ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
-
-                ax.add_feature(cfeature.LAND, facecolor="#f5f5f5")
-                ax.add_feature(cfeature.OCEAN, facecolor="#e6f3ff")
-                ax.add_feature(cfeature.BORDERS, linestyle="-", linewidth=0.5, edgecolor="gray")
-                ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
-
-                try:
-                    ax.add_feature(cfeature.STATES, linestyle=":", linewidth=0.3, edgecolor="gray")
-                except Exception:
-                    pass
-
-                for lon, lat, score, name, color in zip(lons, lats, mfi_scores, names, colors):
-                    size = 150 if score < 5.5 else 80
-                    edge_width = 2 if score < 4.0 else 1
-                    ax.scatter(
-                        lon,
-                        lat,
-                        c=color,
-                        s=size,
-                        edgecolors="black",
-                        linewidths=edge_width,
-                        transform=ccrs.PlateCarree(),
-                        zorder=5,
-                    )
-                    if name and score < 5.5:
-                        ax.annotate(
-                            name,
-                            xy=(lon, lat),
-                            xytext=(5, 5),
-                            textcoords="offset points",
-                            fontsize=7,
-                            fontweight="bold",
-                            color="black",
-                            transform=ccrs.PlateCarree(),
-                            zorder=6,
-                        )
-
-                gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
-                gl.top_labels = False
-                gl.right_labels = False
-                gl.xlabel_style = {"size": 8}
-                gl.ylabel_style = {"size": 8}
-
-                country = str(state.get("country", "")).strip()
-                ax.set_title(
-                    f"Market Functionality Index - {country}\nGeographic Distribution by Risk Level",
-                    fontsize=12,
-                    fontweight="bold",
-                    pad=10,
-                )
-
-                legend_elements = [
-                    Patch(facecolor="#2ca02c", edgecolor="black", label="Low Risk (≥7.0)"),
-                    Patch(facecolor="#ffbb78", edgecolor="black", label="Medium Risk (5.5-6.9)"),
-                    Patch(facecolor="#ff7f0e", edgecolor="black", label="High Risk (4.0-5.4)"),
-                    Patch(facecolor="#d62728", edgecolor="black", label="Very High Risk (<4.0)"),
-                ]
-                ax.legend(handles=legend_elements, loc="lower right", fontsize=9, framealpha=0.9)
-
-                plt.tight_layout()
-                visualizations["geographic_map"] = save_plot_to_base64()
-            except ImportError:
-                logger.warning("Cartopy not available, falling back to simple scatter plot")
-                _generate_simple_geographic_map(state, markets_with_coords, visualizations)
-            except Exception as e:
-                logger.error(f"Error generating cartopy map: {e}")
-                _generate_simple_geographic_map(state, markets_with_coords, visualizations)
+            _generate_simple_geographic_map(
+                state, markets_with_coords, visualizations
+            )
     except Exception as e:
         logger.error(f"Error generating visualizations: {e}")
 
@@ -1069,284 +1213,251 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
 # NODE: DIMENSION DRAFTER
 # ============================================================================
 
-DIMENSION_DESCRIPTIONS = {
-    "Assortment": """The assortment of essential goods measures market breadth and depth.
-It answers two key questions: (1) Can beneficiaries find all essential food and non-food items?
-(2) Do they have a wide range of choices within each category?
-Essential needs include cereals, pulses, oils, and basic NFIs. A high score indicates markets
-can support diverse household needs; a low score suggests limited product variety.""",
-
-    "Availability": """Availability measures consistent supply of essential commodities.
-It answers: (1) Are essential goods consistently in stock? (2) How frequent are stockouts?
-The dimension tracks scarcity reports and runout frequency across food and NFI categories.
-High scores indicate reliable supply; low scores signal supply chain disruptions or
-seasonal shortages requiring intervention.""",
-
-    "Price": """Price stability measures affordability and predictability of essential goods.
-It answers: (1) Have prices increased significantly? (2) Are prices stable over time?
-This dimension tracks both price levels and volatility across commodity categories.
-High scores indicate stable, accessible pricing; low scores suggest inflation pressures
-or market manipulation affecting household purchasing power.""",
-
-    "Resilience": """Resilience measures supply chain robustness and adaptive capacity.
-It answers: (1) Can markets respond to demand shocks? (2) How vulnerable are supply networks?
-The dimension evaluates node density, complexity, and criticality of supply chains.
-High scores indicate robust, diversified supply networks; low scores suggest fragile
-systems vulnerable to disruptions.""",
-
-    "Competition": """Competition measures market structure and trader dynamics.
-It answers: (1) Are there enough traders to ensure fair pricing? (2) Is there monopoly risk?
-The dimension tracks market concentration and number of active competitors.
-High scores indicate healthy competition; low scores suggest market power concentration
-that may disadvantage consumers.""",
-
-    "Infrastructure": """Infrastructure measures physical market conditions and facilities.
-It answers: (1) What is the condition of market structures? (2) Are essential facilities available?
-The dimension evaluates structural condition, sanitation, electricity, and water access.
-High scores indicate well-maintained facilities; low scores suggest infrastructure
-investments are needed.""",
-
-    "Service": """Service quality measures the retail experience for consumers.
-It answers: (1) How efficient is the checkout process? (2) Is the shopping experience positive?
-The dimension tracks service speed, courtesy, and overall consumer satisfaction.
-High scores indicate professional retail operations; low scores suggest service
-improvements are needed.""",
-
-    "Food Quality": """Food quality measures safety and handling standards.
-It answers: (1) Are food items properly stored and handled? (2) Do products meet safety standards?
-The dimension evaluates packaging integrity, storage conditions, and hygiene practices.
-High scores indicate safe food handling; low scores suggest food safety risks
-requiring monitoring.""",
-
-    "Access & Protection": """Access and protection measures physical and social accessibility.
-It answers: (1) Can all population groups access the market? (2) Are there safety concerns?
-The dimension tracks geographic accessibility, operating hours, and protection issues.
-High scores indicate inclusive, safe markets; low scores suggest access barriers
-or protection concerns.""",
-}
-
-
 def node_dimension_drafter(state: MFIReportState) -> dict:
-    """Nodo: Genera findings per ogni dimensione."""
-    logger.info("[DimensionDrafter] Generating dimension findings")
-    
-    if not state.get("dimension_scores"):
+    """Draft or repair metric-cited narratives for all nine dimensions."""
+    logger.info("[DimensionDrafter] Generating structured dimension narratives")
+    profile = state.get("assessment_profile") or {}
+    dimensions = [
+        item for item in profile.get("dimensions", []) if isinstance(item, dict)
+    ]
+    if not dimensions:
         return {"current_node": "dimension_drafter"}
-    
+
     llm = get_model()
-    dimension_findings = state.get("dimension_findings", {})
+    narratives = dict(state.get("dimension_narratives") or {})
+    catalog = state.get("claim_catalog") or {}
+    targets = state.get("correction_targets") or []
+    repairing = bool(targets)
     llm_calls = 0
-    
-    for dim_data in state["dimension_scores"]:
-        dimension = dim_data["dimension"]
-        logger.info(f"Processing dimension: {dimension}")
-        
+
+    for dimension_profile in dimensions:
+        dimension = str(dimension_profile["dimension"])
+        relevant_targets = [
+            target
+            for target in targets
+            if target.get("artifact_type") in {"dimension", "global"}
+            and (
+                target.get("artifact_type") == "global"
+                or target.get("artifact_id") in {None, dimension}
+            )
+        ]
+        if repairing and not relevant_targets:
+            continue
+        allowed_ids = dimension_catalog_ids(dimension_profile)
+        prompt_catalog = compact_catalog(catalog, allowed_ids)
+        previous = narratives.get(dimension)
+        flagged_fields = sorted(
+            {
+                str(target["field_name"])
+                for target in relevant_targets
+                if target.get("field_name")
+            }
+        )
+        logger.info("Processing dimension: %s", dimension)
+        prompt = f"""Draft the {dimension} section of an MFI assessment report.
+
+Use English only. Return valid JSON only. Every numeric statement must use an
+exact `formatted_value` from CLAIM_CATALOG and cite its `metric_id`. Do not
+calculate, round, invert, or combine values. Every claim object must contain:
+`text`, `metric_ids`, `document_ids`, `scope`, and `polarity`.
+
+METHODOLOGY DESCRIPTION:
+{DIMENSION_DESCRIPTIONS.get(dimension, '')}
+
+CONSTRAINTS:
+{json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
+
+DIMENSION_PROFILE:
+{json.dumps(dimension_profile)}
+
+CLAIM_CATALOG:
+{json.dumps(prompt_catalog)}
+
+This dimension is priority={bool(dimension_profile.get('is_priority'))}.
+Every dimension must cover its mean, profile rank, variation, findings, and
+recommendations. A priority dimension must also include weakest official
+subsections (Food Quality: applicable question drivers), 2-4 explanatory
+drivers, relevant items when supplied, localized patterns, and limitations.
+Recommendations must cite evidence used by a finding. Context cannot assert
+causality. Do not make unilateral modality conclusions.
+
+Return:
+{{
+  "summary": CLAIM,
+  "key_findings": [CLAIM],
+  "subdimension_analysis": [
+    {{
+      "name": "...",
+      "subsection_metric_id": "ledger id or null",
+      "score_0_10": 0.0,
+      "interpretation": CLAIM,
+      "driver_metric_ids": ["ledger ids"]
+    }}
+  ],
+  "geographic_patterns": [CLAIM],
+  "data_limitations": [CLAIM],
+  "recommendations": [CLAIM]
+}}
+where CLAIM is:
+{{
+  "claim_id": "stable id",
+  "text": "...",
+  "claim_kind": "summary|finding|geographic_pattern|limitation|recommendation",
+  "metric_ids": ["ledger ids"],
+  "document_ids": [],
+  "scope": "assessment|region|market|surveyed_traders|context",
+  "polarity": "favorable|unfavorable|neutral|descriptive"
+}}
+"""
+        if repairing:
+            prompt += f"""
+TARGETED REPAIR:
+Regenerate only these fields: {json.dumps(flagged_fields or ['all affected fields'])}.
+Preserve the meaning and content of every unlisted field. Previous artifact:
+{json.dumps(previous)}
+Relevant targets:
+{json.dumps(relevant_targets)}
+"""
         try:
-            typed_evidence = [
-                _metric_prompt_view(metric)
-                for metric in state.get("metric_summaries", {}).get(dimension, [])
-            ]
-            
-            prompt = f"""Generate findings for the **{dimension}** MFI dimension.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
-- For bullets, use plain text lines starting with '- '.
-
-Data:
-- National Score: {dim_data['national_score']}/10
-- Regional: {json.dumps(dim_data['regional_scores'])}
-- Markets: {json.dumps(dim_data['market_scores'])}
-- Typed explanatory evidence summaries: {json.dumps(typed_evidence)}
-
-Typed evidence interpretation rules (MANDATORY):
-- Evidence is already aggregated as a deterministic, unweighted mean across available markets.
-- Do not average, invert, complement, or otherwise transform a supplied value.
-- Read `unit`, `orientation`, and `evidence_scope` for every metric.
-- `higher_is_better` and `higher_is_worse` explicitly define polarity.
-- Use coverage fields to qualify evidence that is not available in every assessed market.
-- A null normalized value is not zero and must not be interpreted quantitatively.
-
-Description: {DIMENSION_DESCRIPTIONS.get(dimension, '')}
-
-Generate:
-1. KEY FINDINGS: 2-3 bullet points
-2. SCORE INTERPRETATION: 1-2 sentences
-3. RECOMMENDATIONS: 1-2 actionable items
-
-Output JSON:
-{{"key_findings": "...", "score_interpretation": "...", "recommendations": "..."}}"""
-            
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
             llm_calls += 1
-            
-            if result:
-                dimension_findings[dimension] = {
-                    "key_findings": _normalize_llm_text(result.get("key_findings"), bulletify=True),
-                    "score_interpretation": _normalize_llm_text(result.get("score_interpretation")),
-                    "recommendations": _normalize_llm_text(result.get("recommendations"), bulletify=True),
-                }
-            else:
-                dimension_findings[dimension] = {
-                    "key_findings": f"Score: {dim_data['national_score']}/10",
-                    "score_interpretation": "Review manually.",
-                    "recommendations": "Monitor."
-                }
-        except Exception as e:
-            logger.error(f"Dimension {dimension} error: {e}")
-            dimension_findings[dimension] = {
-                "key_findings": "Error generating findings",
-                "score_interpretation": "",
-                "recommendations": ""
-            }
-    
+            drafted = parse_dimension_narrative(
+                result,
+                dimension_profile=dimension_profile,
+                assessment_profile=profile,
+            )
+        except Exception as exc:
+            logger.error("Dimension %s drafting error: %s", dimension, exc)
+            drafted = fallback_dimension_narrative(
+                dimension_profile,
+                assessment_profile=profile,
+            )
+        if repairing and previous and flagged_fields:
+            merged = dict(previous)
+            for field_name in flagged_fields:
+                if field_name in drafted:
+                    merged[field_name] = drafted[field_name]
+            narratives[dimension] = merged
+        else:
+            narratives[dimension] = drafted
+
     return {
-        "dimension_findings": dimension_findings,
+        "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
-        "current_node": "dimension_drafter"
+        "current_node": "dimension_drafter",
     }
 
 
 def node_market_recommendations_drafter(state: MFIReportState) -> dict:
-    """Nodo: Genera raccomandazioni per mercato invece che per dimensione."""
-    logger.info("[MarketRecDrafter] Generating market-level recommendations")
-
-    markets_data = state.get("markets_data", [])
-    if not markets_data:
-        return {
-            "market_recommendations": {},
-            "current_node": "market_recommendations_drafter",
-        }
-
+    """Draft targeted narratives from only each market's scoped evidence."""
+    logger.info("[MarketRecDrafter] Generating structured market narratives")
+    profile = state.get("assessment_profile") or {}
+    priority_names = set(profile.get("priority_market_names", []) or [])
+    priority_profiles = [
+        item
+        for item in profile.get("markets", [])
+        if isinstance(item, dict) and item.get("market_name") in priority_names
+    ]
+    if not priority_profiles:
+        return {"market_narratives": {}, "current_node": "market_recommendations_drafter"}
     llm = get_model()
-    market_recommendations: Dict[str, Dict[str, Any]] = {}
+    narratives = dict(state.get("market_narratives") or {})
+    catalog = state.get("claim_catalog") or {}
+    targets = state.get("correction_targets") or []
+    repairing = bool(targets)
     llm_calls = 0
 
-    assessment_profile = state.get("assessment_profile") or {}
-    priority_market_names = assessment_profile.get("priority_market_names") or []
-    profile_markets = {
-        str(profile.get("market_name")): profile
-        for profile in assessment_profile.get("markets", [])
-        if isinstance(profile, dict) and profile.get("market_name")
-    }
-    markets_by_name = {
-        str(market.get("market_name")): market
-        for market in markets_data
-        if isinstance(market, dict) and market.get("market_name")
-    }
-    critical_markets = [
-        markets_by_name[market_name]
-        for market_name in priority_market_names
-        if market_name in markets_by_name
-    ]
-
-    for market in critical_markets:
-        market_name = str(market.get("market_name", "")).strip()
-        if not market_name:
-            continue
-
-        region = str(market.get("region", market.get("admin1", "")) or "").strip()
-
-        market_profile = profile_markets.get(market_name, {})
-        weak_dims = [
-            (str(item["dimension"]), float(item["score"]))
-            for item in market_profile.get("weak_dimensions", [])
-            if isinstance(item, dict)
-            and item.get("dimension") is not None
-            and item.get("score") is not None
+    for market_profile in priority_profiles:
+        market_name = str(market_profile["market_name"])
+        relevant_targets = [
+            target
+            for target in targets
+            if target.get("artifact_type") in {"market", "global"}
+            and (
+                target.get("artifact_type") == "global"
+                or target.get("artifact_id") in {None, market_name}
+            )
         ]
-
-        if not weak_dims:
+        if repairing and not relevant_targets:
             continue
+        allowed_ids = market_catalog_ids(market_profile, catalog)
+        prompt_catalog = compact_catalog(catalog, allowed_ids)
+        previous = narratives.get(market_name)
+        flagged_fields = sorted(
+            {
+                str(target["field_name"])
+                for target in relevant_targets
+                if target.get("field_name")
+            }
+        )
+        prompt = f"""Draft a targeted MFI narrative for {market_name}.
 
-        evidence_dimensions = {dimension for dimension, _score in weak_dims}
-        typed_market_evidence = {
-            "subsections": {
-                dimension: [
-                    _metric_prompt_view(metric)
-                    for metric in (
-                        market.get("subsections", {}).get(dimension, []) or []
-                    )
-                ]
-                for dimension in evidence_dimensions
-            },
-            "drivers": {
-                dimension: [
-                    _metric_prompt_view(metric)
-                    for metric in (market.get("drivers", {}).get(dimension, []) or [])
-                ]
-                for dimension in evidence_dimensions
-            },
-        }
+Use English only and valid JSON only. The prompt contains only this market's
+weak dimensions and matching market-scoped evidence. Every number must exactly
+match a `formatted_value` in CLAIM_CATALOG and cite the associated `metric_id`.
+Do not calculate or infer values. Every claim must declare metric_ids,
+document_ids, scope, and polarity. Recommendations must cite evidence used by a
+priority issue. Modality language must remain conditional and must not make a
+unilateral transfer-modality conclusion.
 
-        prompt = f"""Generate targeted recommendations for {market_name} market ({region}).
+MARKET_PROFILE:
+{json.dumps(market_profile)}
 
-MARKET DATA:
-- Overall MFI: {market.get('overall_mfi')}/10
-- Assessment score rank: {market_profile.get('score_rank')}
-- Weak dimensions: {json.dumps([{'dim': d, 'score': float(s)} for d, s in weak_dims])}
-- Typed explanatory evidence: {json.dumps(typed_market_evidence)}
+CLAIM_CATALOG:
+{json.dumps(prompt_catalog)}
 
-RULES:
-- Language: English only
-- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
-- Focus on the 2-3 weakest dimensions
-- Provide specific, actionable interventions
-- Link interventions to specific issues identified
-- Do not average or invert evidence values; use each metric's unit, orientation,
-  scope, applicability, validation, and coverage as supplied.
+CONSTRAINTS:
+{json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
 
-Output JSON:
+Return:
 {{
-    \"priority_issues\": [\"issue1\", \"issue2\"],
-    \"recommended_interventions\": [\"intervention1\", \"intervention2\", \"intervention3\"],
-    \"modality_considerations\": \"Brief note on CBT feasibility given market conditions\"
-}}"""
-
+  "priority_issues": [CLAIM],
+  "recommended_interventions": [CLAIM],
+  "modality_consideration": CLAIM_OR_NULL
+}}
+where CLAIM is:
+{{
+  "claim_id": "stable id",
+  "text": "...",
+  "claim_kind": "finding|recommendation|modality_consideration",
+  "metric_ids": ["ledger ids"],
+  "document_ids": [],
+  "scope": "market",
+  "polarity": "favorable|unfavorable|neutral|descriptive"
+}}
+"""
+        if repairing:
+            prompt += f"""
+TARGETED REPAIR:
+Regenerate only these fields: {json.dumps(flagged_fields or ['all affected fields'])}.
+Preserve all unlisted fields. Previous artifact:
+{json.dumps(previous)}
+Relevant targets:
+{json.dumps(relevant_targets)}
+"""
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
             llm_calls += 1
-
-            if not isinstance(result, dict):
-                continue
-
-            priority_issues_raw = result.get("priority_issues", []) or []
-            if not isinstance(priority_issues_raw, list):
-                priority_issues_raw = []
-            priority_issues: list[str] = []
-            for item in priority_issues_raw:
-                s = _normalize_llm_text(item).strip()
-                if s:
-                    priority_issues.append(s)
-
-            interventions_raw = result.get("recommended_interventions", []) or []
-            if not isinstance(interventions_raw, list):
-                interventions_raw = []
-            recommended_interventions: list[str] = []
-            for item in interventions_raw:
-                s = _normalize_llm_text(item).strip()
-                if s:
-                    recommended_interventions.append(s)
-
-            modality_considerations = _normalize_llm_text(result.get("modality_considerations", "")).strip()
-
-            market_recommendations[market_name] = {
-                "region": region,
-                "mfi_score": float(market.get("overall_mfi", 0) or 0),
-                "risk_level": str(market.get("risk_level", "")).strip(),
-                "weak_dimensions": [d for d, _s in weak_dims],
-                "priority_issues": priority_issues,
-                "recommended_interventions": recommended_interventions,
-                "modality_considerations": modality_considerations,
-            }
-        except Exception as e:
-            logger.error(f"Market {market_name} recommendation error: {e}")
+            drafted = parse_market_narrative(
+                result,
+                market_profile=market_profile,
+            )
+        except Exception as exc:
+            logger.error("Market %s drafting error: %s", market_name, exc)
+            drafted = fallback_market_narrative(market_profile)
+        if repairing and previous and flagged_fields:
+            merged = dict(previous)
+            for field_name in flagged_fields:
+                if field_name in drafted:
+                    merged[field_name] = drafted[field_name]
+            narratives[market_name] = merged
+        else:
+            narratives[market_name] = drafted
 
     return {
-        "market_recommendations": market_recommendations,
+        "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "current_node": "market_recommendations_drafter",
     }
@@ -1357,79 +1468,111 @@ Output JSON:
 # ============================================================================
 
 def node_executive_summary_drafter(state: MFIReportState) -> dict:
-    """Nodo: Genera executive summary."""
-    logger.info("[ExecSummaryDrafter] Generating executive summary")
-    
-    if not state.get("dimension_scores"):
+    """Draft or repair the structured assessment executive summary."""
+    logger.info("[ExecSummaryDrafter] Generating structured executive summary")
+    profile = state.get("assessment_profile") or {}
+    if not profile:
         return {"current_node": "executive_summary_drafter"}
-    
+    targets = state.get("correction_targets") or []
+    repairing = bool(targets)
+    relevant_targets = [
+        target
+        for target in targets
+        if target.get("artifact_type") in {"executive_summary", "global"}
+    ]
+    if repairing and not relevant_targets:
+        return {"current_node": "executive_summary_drafter"}
     llm = get_model()
-    markets_data = state["markets_data"]
-    dimension_scores = state["dimension_scores"]
-    survey_meta = state.get("survey_metadata", {})
-    
-    # Calculate aggregates
-    risk_dist = {}
-    for m in markets_data:
-        risk_dist[m["risk_level"]] = risk_dist.get(m["risk_level"], 0) + 1
-    
-    sorted_dims = sorted(dimension_scores, key=lambda x: x["national_score"], reverse=True)
-    market_mfis = [float(m.get("overall_mfi", 0) or 0) for m in markets_data if isinstance(m, dict)]
-    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
-    
-    collection_period = f"{state['data_collection_start']} to {state['data_collection_end']}"
-    regions_covered = survey_meta.get("regions_covered", [])
-    prompt = f"""Generate Executive Summary for {state['country']} MFI Report ({collection_period}).
+    catalog = state.get("claim_catalog") or {}
+    allowed_ids = executive_catalog_ids(profile)
+    prompt_catalog = compact_catalog(catalog, allowed_ids)
+    context = [
+        statement
+        for statement in state.get("context_evidence", [])
+        if isinstance(statement, dict)
+        and statement.get("classification")
+        in {"corroborating", "potentially_explanatory"}
+    ]
+    priority_dimensions = [
+        narrative
+        for name, narrative in (state.get("dimension_narratives") or {}).items()
+        if name in set(profile.get("priority_dimension_names", []))
+    ]
+    previous = state.get("executive_summary_narrative") or None
+    flagged_fields = sorted(
+        {
+            str(target["field_name"])
+            for target in relevant_targets
+            if target.get("field_name")
+        }
+    )
+    prompt = f"""Draft the structured executive summary for an MFI assessment.
 
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-- Do not use HTML tags (no <ul>, <li>, <ol>, <br>, etc). Output plain text only.
-- For bullets, use plain text lines starting with '- '.
-- For numbered lists, use plain text lines starting with '1. ', '2. ', etc.
+Use English only and return valid JSON only. Every quantitative statement must
+use an exact `formatted_value` from CLAIM_CATALOG and cite its `metric_id`.
+Context claims must cite document IDs, retain their supplied classification,
+and must not assert causality. Do not calculate or infer values. Do not use
+national-score or risk-class terminology. Recommendations must cite a finding's
+evidence and modality language must remain conditional.
 
-Survey: {len(markets_data)} markets, {len(regions_covered)} admin1 areas, {survey_meta.get('total_traders', 'N/A')} traders
-Risk Distribution: {json.dumps(risk_dist)}
-Best: {sorted_dims[0]['dimension']} ({sorted_dims[0]['national_score']}), Worst: {sorted_dims[-1]['dimension']} ({sorted_dims[-1]['national_score']})
-National MFI: {national_mfi}
+ASSESSMENT_PROFILE:
+{json.dumps({
+    'assessed_market_count': profile.get('assessed_market_count'),
+    'priority_dimension_names': profile.get('priority_dimension_names'),
+    'priority_market_names': profile.get('priority_market_names'),
+    'limitations': profile.get('limitations'),
+})}
 
-Context: {state.get('country_context', '')}
+PRIORITY_DIMENSION_NARRATIVES:
+{json.dumps(priority_dimensions)}
 
-Generate:
-1. MOTIVATION: 1-2 sentences
-2. KEY FINDINGS: 4-5 bullets
-3. RECOMMENDATIONS: 2-3 items
+CLASSIFIED_CONTEXT:
+{json.dumps(context)}
 
-Output JSON:
-{{"motivation": "...", "key_findings": "...", "recommendations": "..."}}"""
-    
+CLAIM_CATALOG:
+{json.dumps(prompt_catalog)}
+
+CONSTRAINTS:
+{json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
+
+Return:
+{{
+  "motivation": CLAIM_OR_NULL,
+  "key_findings": [CLAIM],
+  "recommendations": [CLAIM],
+  "limitations": [CLAIM]
+}}
+where CLAIM contains `claim_id`, `text`, `claim_kind`, `metric_ids`,
+`document_ids`, `scope`, and `polarity`.
+"""
+    if repairing:
+        prompt += f"""
+TARGETED REPAIR:
+Regenerate only these fields: {json.dumps(flagged_fields or ['all affected fields'])}.
+Preserve all unlisted fields. Previous artifact:
+{json.dumps(previous)}
+Relevant targets:
+{json.dumps(relevant_targets)}
+"""
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
+        drafted = parse_executive_narrative(result, assessment_profile=profile)
         llm_calls = 1
-        
-        if result:
-            motivation = _normalize_llm_text(result.get("motivation"))
-            key_findings = _normalize_llm_text(result.get("key_findings"), bulletify=True)
-            recommendations = _normalize_llm_text(result.get("recommendations"), bulletify=True)
-            executive_summary = f"""**MOTIVATION**
-{motivation}
-
-**KEY FINDINGS**
-{key_findings}
-
-**RECOMMENDATIONS**
-{recommendations}"""
-        else:
-            executive_summary = f"MFI Assessment for {state['country']} - {collection_period}"
-    except Exception as e:
-        logger.error(f"Executive summary error: {e}")
-        executive_summary = f"MFI Assessment for {state['country']} - {collection_period}"
+    except Exception as exc:
+        logger.error("Executive summary error: %s", exc)
+        drafted = fallback_executive_narrative(profile)
         llm_calls = 0
-    
+    if repairing and previous and flagged_fields:
+        merged = dict(previous)
+        for field_name in flagged_fields:
+            if field_name in drafted:
+                merged[field_name] = drafted[field_name]
+        drafted = merged
     return {
-        "executive_summary": executive_summary,
+        "executive_summary_narrative": drafted,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
-        "current_node": "executive_summary_drafter"
+        "current_node": "executive_summary_drafter",
     }
 
 
@@ -1437,66 +1580,146 @@ Output JSON:
 # NODE: RED TEAM (QA)
 # ============================================================================
 
-def node_red_team(state: MFIReportState) -> dict:
-    """Nodo: Quality Assurance."""
-    logger.info("[RedTeam] Fact-checking MFI report")
-    
-    if not state.get("executive_summary"):
-        return {"skeptic_flags": [], "current_node": "red_team"}
-    
-    llm = get_model()
-    
-    markets_summary = [
-        {"name": m["market_name"], "mfi": m["overall_mfi"], "risk": m["risk_level"]} 
-        for m in state["markets_data"]
-    ]
-    
-    dim_findings_text = "\n".join([
-        f"{dim}: {f.get('key_findings', '')}" 
-        for dim, f in state.get("dimension_findings", {}).items()
-    ])
-    
-    prompt = f"""Fact-check this MFI report against the source data.
-
-STYLE AND OUTPUT RULES (MANDATORY):
-- Language: English only.
-
-GROUND TRUTH:
-Dimension Scores: {json.dumps([{'dimension': d['dimension'], 'score': d['national_score']} for d in state['dimension_scores']])}
-Markets: {json.dumps(markets_summary)}
-
-EXECUTIVE SUMMARY:
-{state['executive_summary']}
-
-DIMENSION FINDINGS:
-{dim_findings_text}
-
-Check for:
-1. Score mismatches
-2. Interpretation errors
-3. Missing critical content
-
-Return JSON: {{"flags": [
-    {{"section": "...", "claim": "...", "issue_type": "score_mismatch|interpretation_error|missing_content", "severity": "high|medium|low", "details": "...", "recommendation": "..."}}
-]}}
-
-If no errors, return {{"flags": []}}"""
-    
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
-        flags = result.get("flags", []) if result else []
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Red team error: {e}")
-        flags = []
-        llm_calls = 0
-    
+def node_deterministic_claim_validator(state: MFIReportState) -> dict:
+    """Validate every narrative claim against the closed evidence catalog."""
+    logger.info("[ClaimValidator] Validating structured claims")
+    (
+        validation,
+        dimensions,
+        markets,
+        executive,
+        context,
+        flag_payload,
+    ) = validate_structured_narratives(
+        context_evidence=state.get("context_evidence", []),
+        dimension_narratives=state.get("dimension_narratives", {}),
+        market_narratives=state.get("market_narratives", {}),
+        executive_narrative=state.get("executive_summary_narrative", {}),
+        claim_catalog=state.get("claim_catalog", {}),
+        assessment_profile=state.get("assessment_profile") or {},
+        documents=state.get("contextual_documents", []),
+    )
     return {
-        "skeptic_flags": flags,
-        "correction_attempts": state.get("correction_attempts", 0) + 1,
+        "claim_validation": validation,
+        "dimension_narratives": dimensions,
+        "market_narratives": markets,
+        "executive_summary_narrative": executive,
+        "context_evidence": context,
+        "deterministic_flags": flag_payload.get("flags", []),
+        "current_node": "deterministic_claim_validator",
+    }
+
+
+def _cited_catalog(
+    state: MFIReportState,
+) -> Dict[str, Dict[str, Any]]:
+    cited: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            metric_ids = value.get("metric_ids")
+            if isinstance(metric_ids, list):
+                cited.update(str(item) for item in metric_ids if item)
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(state.get("dimension_narratives", {}))
+    visit(state.get("market_narratives", {}))
+    visit(state.get("executive_summary_narrative", {}))
+    return compact_catalog(state.get("claim_catalog", {}), sorted(cited))
+
+
+def node_red_team(state: MFIReportState) -> dict:
+    """Run semantic LLM QA after deterministic claim validation."""
+    logger.info("[RedTeam] Reviewing structured MFI narratives")
+    if not state.get("executive_summary_narrative"):
+        return {"red_team_flags": [], "current_node": "red_team"}
+    prompt = f"""Red-Team this structured MFI assessment narrative.
+
+Use English only. Review the structured artifacts against the cited catalog,
+deterministic flags, context classifications, and limitations. Check semantic
+interpretation, polarity, scope, coverage qualification, recommendation
+linkage, unsupported causal or affordability claims, priority drill-downs,
+and unilateral modality conclusions. Do not invent new facts or recalculate
+values. Return valid JSON only.
+
+DIMENSION_NARRATIVES:
+{json.dumps(state.get('dimension_narratives', {}))}
+
+MARKET_NARRATIVES:
+{json.dumps(state.get('market_narratives', {}))}
+
+EXECUTIVE_SUMMARY:
+{json.dumps(state.get('executive_summary_narrative', {}))}
+
+CITED_CATALOG:
+{json.dumps(_cited_catalog(state))}
+
+CONTEXT_EVIDENCE:
+{json.dumps(state.get('context_evidence', []))}
+
+LIMITATIONS:
+{json.dumps((state.get('assessment_profile') or {}).get('limitations', []))}
+
+DETERMINISTIC_FLAGS:
+{json.dumps(state.get('deterministic_flags', []))}
+
+Return:
+{{"flags": [{{
+  "flag_id": "stable id",
+  "code": "...",
+  "severity": "high|medium|low",
+  "artifact_type": "context|dimension|market|executive_summary|global",
+  "artifact_id": "dimension or market name, or null",
+  "field_name": "exact output field, or null",
+  "claim_id": "exact claim id, or null",
+  "message": "...",
+  "recommendation": "...",
+  "metric_ids": [],
+  "document_ids": [],
+  "repairable": true
+}}]}}
+"""
+    try:
+        response = get_model().invoke([HumanMessage(content=prompt)])
+        payload = robust_json_parse(response)
+        flags = normalize_red_team_flags(payload)
+        llm_calls = 1
+    except Exception as exc:
+        logger.error("Red-Team review error: %s", exc)
+        flags = [
+            {
+                "flag_id": "system-red-team-execution-error",
+                "source": "system",
+                "code": "qa_execution_error",
+                "severity": "medium",
+                "artifact_type": "global",
+                "artifact_id": None,
+                "field_name": None,
+                "claim_id": None,
+                "message": "The LLM Red-Team review could not be completed.",
+                "recommendation": "Review the deterministic validation results.",
+                "metric_ids": [],
+                "document_ids": [],
+                "expected_value": None,
+                "actual_value": None,
+                "repairable": False,
+            }
+        ]
+        llm_calls = 0
+    qa_review = build_qa_review(
+        state.get("deterministic_flags", []),
+        flags,
+        correction_attempts=state.get("correction_attempts", 0),
+    )
+    return {
+        "red_team_flags": flags,
+        "qa_review": qa_review,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
-        "current_node": "red_team"
+        "current_node": "red_team",
     }
 
 
@@ -1507,14 +1730,160 @@ If no errors, return {{"flags": []}}"""
 MAX_CORRECTION_ATTEMPTS = 3
 
 def should_correct(state: MFIReportState) -> Literal["correct", "finish"]:
-    """Determina se servono correzioni."""
-    flags = state.get("skeptic_flags", [])
+    """Route material repairable issues through at most three targeted repairs."""
+    flags = [
+        *state.get("deterministic_flags", []),
+        *state.get("red_team_flags", []),
+    ]
     attempts = state.get("correction_attempts", 0)
-    
-    if flags and attempts < MAX_CORRECTION_ATTEMPTS:
-        logger.info(f"Corrections needed: {len(flags)} flags, attempt {attempts}")
+    material = material_repairable_flags(flags)
+    if material and attempts < MAX_CORRECTION_ATTEMPTS:
+        logger.info(
+            "Corrections needed: %s material flags, attempt %s",
+            len(material),
+            attempts + 1,
+        )
         return "correct"
     return "finish"
+
+
+def node_prepare_correction(state: MFIReportState) -> dict:
+    """Build exact artifact/field targets without changing unaffected content."""
+    flags = [
+        *state.get("deterministic_flags", []),
+        *state.get("red_team_flags", []),
+    ]
+    targets = build_correction_targets(flags)
+    updates: Dict[str, Any] = {
+        "correction_targets": targets,
+        "correction_attempts": state.get("correction_attempts", 0) + 1,
+        "current_node": "targeted_correction",
+    }
+    context_targets = [
+        target
+        for target in targets
+        if target.get("artifact_type") in {"context", "global"}
+    ]
+    documents = [
+        item
+        for item in state.get("contextual_documents", [])
+        if isinstance(item, dict) and item.get("doc_id")
+    ]
+    if not context_targets or not documents:
+        return updates
+    prompt = f"""Repair only the targeted contextual evidence statements.
+
+Use English only and return valid JSON only. Each statement must cite only a
+supplied document_id and use one classification: corroborating,
+potentially_explanatory, or unrelated. Do not assert causality or introduce MFI
+values. Preserve every statement that is not targeted.
+
+DOCUMENTS:
+{json.dumps(documents)}
+
+CURRENT_CONTEXT:
+{json.dumps(state.get('context_evidence', []))}
+
+TARGETS:
+{json.dumps(context_targets)}
+
+Return {{"statements": [{{"statement_id": "...", "text": "...",
+"classification": "...", "document_ids": ["..."]}}]}}.
+"""
+    try:
+        response = get_model().invoke([HumanMessage(content=prompt)])
+        payload = robust_json_parse(response)
+        repaired, _flags = parse_context_evidence(payload, documents=documents)
+        targeted_ids = {
+            str(target.get("artifact_id"))
+            for target in context_targets
+            if target.get("artifact_type") == "context"
+            and target.get("artifact_id")
+        }
+        has_global = any(
+            target.get("artifact_type") == "global" for target in context_targets
+        )
+        if has_global or not targeted_ids:
+            updates["context_evidence"] = repaired
+        else:
+            replacements = {
+                str(statement.get("statement_id")): statement
+                for statement in repaired
+                if statement.get("statement_id") in targeted_ids
+            }
+            updates["context_evidence"] = [
+                replacements.get(str(statement.get("statement_id")), statement)
+                for statement in state.get("context_evidence", [])
+                if isinstance(statement, dict)
+            ]
+        updates["llm_calls"] = state.get("llm_calls", 0) + 1
+    except Exception as exc:
+        logger.error("Targeted context correction failed: %s", exc)
+    return updates
+
+
+def _mark_unresolved_claims(value: Any, flag_ids_by_claim: Dict[str, List[str]]) -> Any:
+    if isinstance(value, dict):
+        result = {
+            key: _mark_unresolved_claims(nested, flag_ids_by_claim)
+            for key, nested in value.items()
+        }
+        claim_id = result.get("claim_id")
+        if claim_id in flag_ids_by_claim:
+            result["validation_status"] = "unverified"
+            result["validation_flags"] = sorted(
+                set(result.get("validation_flags", []))
+                | set(flag_ids_by_claim[claim_id])
+            )
+        return result
+    if isinstance(value, list):
+        return [_mark_unresolved_claims(item, flag_ids_by_claim) for item in value]
+    return value
+
+
+def node_finalize_qa(state: MFIReportState) -> dict:
+    """Finalize delivery, retaining visible warnings for unresolved material QA."""
+    combined = [
+        *state.get("deterministic_flags", []),
+        *state.get("red_team_flags", []),
+    ]
+    review = build_qa_review(
+        state.get("deterministic_flags", []),
+        state.get("red_team_flags", []),
+        correction_attempts=state.get("correction_attempts", 0),
+    )
+    material = [
+        flag
+        for flag in combined
+        if str(flag.get("severity")) in {"high", "medium"}
+    ]
+    flag_ids_by_claim: Dict[str, List[str]] = {}
+    for flag in material:
+        if flag.get("claim_id"):
+            flag_ids_by_claim.setdefault(str(flag["claim_id"]), []).append(
+                str(flag.get("flag_id"))
+            )
+    warnings: list[str] = []
+    if material:
+        warnings.append(
+            "Narrative QA completed with unresolved material issues. "
+            "Affected claims are marked unverified; consult the QA notices."
+        )
+    return {
+        "dimension_narratives": _mark_unresolved_claims(
+            state.get("dimension_narratives", {}), flag_ids_by_claim
+        ),
+        "market_narratives": _mark_unresolved_claims(
+            state.get("market_narratives", {}), flag_ids_by_claim
+        ),
+        "executive_summary_narrative": _mark_unresolved_claims(
+            state.get("executive_summary_narrative", {}), flag_ids_by_claim
+        ),
+        "qa_review": review,
+        "correction_targets": [],
+        "warnings": warnings,
+        "current_node": "finalize_qa",
+    }
 
 
 def build_graph(on_step: Optional[OnStepCallback] = None):
@@ -1555,7 +1924,19 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
         "executive_summary_drafter",
         wrap_node("executive_summary_drafter", node_executive_summary_drafter),
     )
+    graph.add_node(
+        "deterministic_claim_validator",
+        wrap_node(
+            "deterministic_claim_validator",
+            node_deterministic_claim_validator,
+        ),
+    )
     graph.add_node("red_team", wrap_node("red_team", node_red_team))
+    graph.add_node(
+        "targeted_correction",
+        wrap_node("targeted_correction", node_prepare_correction),
+    )
+    graph.add_node("finalize_qa", wrap_node("finalize_qa", node_finalize_qa))
     
     # Set entry point
     graph.set_entry_point("mfi_data_agent")
@@ -1568,17 +1949,20 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph.add_edge("mfi_graph_designer", "dimension_drafter")
     graph.add_edge("dimension_drafter", "market_recommendations_drafter")
     graph.add_edge("market_recommendations_drafter", "executive_summary_drafter")
-    graph.add_edge("executive_summary_drafter", "red_team")
+    graph.add_edge("executive_summary_drafter", "deterministic_claim_validator")
+    graph.add_edge("deterministic_claim_validator", "red_team")
     
     # QA Loop
     graph.add_conditional_edges(
         "red_team",
         should_correct,
         {
-            "correct": "dimension_drafter",
-            "finish": END
-        }
+            "correct": "targeted_correction",
+            "finish": "finalize_qa",
+        },
     )
+    graph.add_edge("targeted_correction", "dimension_drafter")
+    graph.add_edge("finalize_qa", END)
     
     return graph.compile()
 
