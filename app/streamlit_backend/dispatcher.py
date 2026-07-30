@@ -34,7 +34,6 @@ from app.shared.live_outputs import (
     create_document_previews_with_artifacts,
 )
 from app.shared.report_blocks import build_market_monitor_report_blocks, build_mfi_report_blocks
-from app.shared.databridges import get_databridges_client
 from app.shared.countries import supported_country_options
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
@@ -42,13 +41,14 @@ from app.services.mfi_drafter.data_loader import (
     load_mfi_from_csv,
     validate_csv_structure,
 )
-from app.services.mfi_drafter.compatibility import with_legacy_sub_score_aliases
+from app.services.mfi_drafter.compatibility import (
+    canonical_and_legacy_response_fields,
+)
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
 from app.services.market_monitor.graph import (
     AVAILABLE_MODULES,
-    CURRENCY_SYMBOLS,
     normalize_qa_review,
     run_report_generation,
 )
@@ -382,6 +382,20 @@ def _update_live_metadata(
     update_run(run_id, metadata=meta_update)
 
 
+def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    profile = state.get("assessment_profile")
+    if not isinstance(profile, dict):
+        return {}
+    return {
+        "analysis_version": profile.get("analysis_version"),
+        "analysis_schema_version": profile.get("analysis_schema_version"),
+        "priority_dimension_names": profile.get("priority_dimension_names", []),
+        "priority_market_names": profile.get("priority_market_names", []),
+        "analysis_limitations": profile.get("limitations", []),
+        "methodology_warnings": state.get("methodology_warnings", []),
+    }
+
+
 def _normalize_dimension_findings(findings: Any) -> Dict[str, Dict[str, str]]:
     if not isinstance(findings, dict):
         return {}
@@ -405,18 +419,7 @@ def _build_mfi_report_output(
     data_collection_start: str,
     data_collection_end: str,
 ) -> Dict[str, Any]:
-    market_mfis = [
-        float(m.get("overall_mfi", 0) or 0)
-        for m in (result.get("markets_data", []) or [])
-        if isinstance(m, dict)
-    ]
-    national_mfi = round(np.mean(market_mfis), 1) if market_mfis else 0.0
-
-    risk_dist: Dict[str, int] = {}
-    for m in result.get("markets_data", []) or []:
-        if not isinstance(m, dict):
-            continue
-        risk_dist[m.get("risk_level")] = risk_dist.get(m.get("risk_level"), 0) + 1
+    response_fields = canonical_and_legacy_response_fields(result)
 
     normalized_dimension_findings = _normalize_dimension_findings(result.get("dimension_findings"))
     result_for_blocks = dict(result)
@@ -437,12 +440,14 @@ def _build_mfi_report_output(
         "excluded_market_records": result.get("excluded_market_records", []),
         "methodology_warnings": result.get("methodology_warnings", []),
         "survey_metadata": result.get("survey_metadata", {}),
-        "national_mfi": national_mfi,
-        "risk_distribution": risk_dist,
-        "markets_data": with_legacy_sub_score_aliases(
-            result.get("markets_data", [])
-        ),
-        "dimension_scores": result.get("dimension_scores", []),
+        "national_mfi": response_fields["national_mfi"],
+        "risk_distribution": response_fields["risk_distribution"],
+        "markets_data": response_fields["markets_data"],
+        "dimension_scores": response_fields["dimension_scores"],
+        "mean_mfi_across_assessed_markets": response_fields[
+            "mean_mfi_across_assessed_markets"
+        ],
+        "assessment_profile": response_fields["assessment_profile"],
         "executive_summary": result.get("executive_summary", ""),
         "dimension_findings": normalized_dimension_findings,
         "market_recommendations": result.get("market_recommendations", {}) or {},
@@ -1228,6 +1233,7 @@ def _mfi_drafter_generate_from_csv_async(
 
     progress_map = {
         "mfi_data_agent": 10,
+        "mfi_analysis": 18,
         "context_retrieval": 25,
         "context_extractor": 40,
         "mfi_graph_designer": 55,
@@ -1249,6 +1255,7 @@ def _mfi_drafter_generate_from_csv_async(
                     update_run(run_id, current_node=node_name)
 
                 meta_update: Dict[str, Any] = {}
+                meta_update.update(_mfi_analysis_run_metadata(_state))
                 context_counts = _state.get("context_counts")
                 if isinstance(context_counts, dict):
                     meta_update["context_counts"] = context_counts
@@ -1339,6 +1346,7 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
 
     progress_map = {
         "mfi_data_agent": 10,
+        "mfi_analysis": 18,
         "context_retrieval": 25,
         "context_extractor": 40,
         "mfi_graph_designer": 55,
@@ -1360,6 +1368,7 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
                     update_run(run_id, current_node=node_name)
 
                 meta_update: Dict[str, Any] = {}
+                meta_update.update(_mfi_analysis_run_metadata(_state))
                 context_counts = _state.get("context_counts")
                 if isinstance(context_counts, dict):
                     meta_update["context_counts"] = context_counts
@@ -1556,6 +1565,13 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         },
         "outputs": {
             "run_id": "Unique generation identifier",
+            "mean_mfi_across_assessed_markets": (
+                "Unrounded unweighted mean across included Full MFI markets"
+            ),
+            "assessment_profile": (
+                "Versioned deterministic profiles, rankings, limitations, "
+                "ledger, and tables"
+            ),
             "national_mfi": "National MFI score (0-10)",
             "risk_distribution": "Distribution of markets by risk level",
             "markets_data": "Detailed data for each market",
@@ -1569,6 +1585,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         },
         "workflow_nodes": [
             {"id": "mfi_data_agent", "name": "MFI Data Agent", "description": "Retrieves/generates MFI data"},
+            {"id": "mfi_analysis", "name": "MFI Analysis", "description": "Builds the deterministic assessment profile"},
             {"id": "context_retrieval", "name": "Context Retrieval", "description": "Retrieves contextual news"},
             {"id": "context_extractor", "name": "Context Extractor", "description": "Extracts context with the LLM"},
             {"id": "mfi_graph_designer", "name": "Graph Designer", "description": "Generates visualizations"},

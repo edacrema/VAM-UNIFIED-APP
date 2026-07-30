@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from math import ceil
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from app.services.mfi_drafter.analysis import build_assessment_profile
 from app.services.mfi_drafter.data_loader import load_mfi_from_csv
 from app.services.mfi_drafter.methodology import OFFICIAL_SCORE_DEFINITIONS
 
@@ -44,6 +46,16 @@ def _loaded(path_string: str):
     frame["LevelID"] = pd.to_numeric(frame["LevelID"], errors="coerce")
     frame["OutputValue"] = pd.to_numeric(frame["OutputValue"], errors="coerce")
     return frame, load_mfi_from_csv(path)
+
+
+@lru_cache(maxsize=2)
+def _profile(path_string: str):
+    _frame, result = _loaded(path_string)
+    return build_assessment_profile(
+        result["markets_data"],
+        result["metric_summaries"],
+        result,
+    )
 
 
 @pytest.mark.parametrize(("path", "expected_full", "expected_mfir"), BENCHMARKS)
@@ -147,4 +159,70 @@ def test_local_benchmark_exact_category_quality_and_competition_semantics(
         assert all(
             metric["orientation"] == "higher_is_better"
             for metric in competition.values()
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_priorities"),
+    [
+        (
+            BENCHMARKS[0][0],
+            ["Service", "Infrastructure", "Food Quality"],
+        ),
+        (
+            BENCHMARKS[1][0],
+            ["Food Quality", "Infrastructure", "Service", "Price"],
+        ),
+    ],
+)
+def test_local_benchmark_phase2_priority_dimensions(path, expected_priorities):
+    profile = _profile(str(path))
+
+    assert profile.priority_dimension_names == expected_priorities
+    assert len(profile.priority_market_names) == 15
+    assert profile.mean_mfi_across_assessed_markets == (
+        sum(market.overall_mfi for market in profile.markets)
+        / profile.assessed_market_count
+    )
+
+
+def test_local_haiti_phase2_price_subsection_regression():
+    path = BENCHMARKS[1][0]
+    profile = _profile(str(path))
+    price = next(
+        dimension for dimension in profile.dimensions if dimension.dimension == "Price"
+    )
+    subsections = {metric.metric_id: metric for metric in price.subsections}
+
+    assert subsections["price.increase"].mean_normalized_value == pytest.approx(
+        9.240196 / 10 * 10,
+        abs=1e-6,
+    )
+    assert subsections["price.stability"].mean_normalized_value == pytest.approx(
+        1.691176 / 10 * 10,
+        abs=1e-6,
+    )
+
+
+@pytest.mark.parametrize(("path", "expected_full", "_expected_mfir"), BENCHMARKS)
+def test_local_benchmark_relevant_items_meet_coverage_and_contrast(
+    path, expected_full, _expected_mfir
+):
+    profile = _profile(str(path))
+    all_drivers = {
+        metric.metric_id: metric
+        for dimension in profile.dimensions
+        for metric in dimension.drivers
+    }
+    required_markets = max(3, ceil(0.25 * expected_full))
+
+    for metric in all_drivers.values():
+        if not metric.item_relevant:
+            continue
+        category = all_drivers[metric.matching_category_metric_id]
+        assert metric.coverage.available_market_count >= required_markets
+        assert metric.unfavorable_rate is not None
+        assert category.unfavorable_rate is not None
+        assert metric.unfavorable_rate - category.unfavorable_rate >= (
+            0.10 - 1e-6
         )

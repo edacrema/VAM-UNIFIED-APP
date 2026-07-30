@@ -24,6 +24,17 @@ __all__ = [
     "MFIMetricSummary",
     "MFIMethodologyWarning",
     "MFIExcludedMarketRecord",
+    "MFIAnalysisConfig",
+    "MFICoverageSummary",
+    "MFIStatisticalSummary",
+    "MFIAnalyzedMetric",
+    "MFILocalizedPatterns",
+    "MFIDimensionProfile",
+    "MFIMarketProfile",
+    "MFIMetricLedgerEntry",
+    "MFIDeterministicTables",
+    "MFIAssessmentProfile",
+    "build_assessment_profile",
 ]
 
 
@@ -39,6 +50,8 @@ def __getattr__(name: str):
         "DIMENSION_DESCRIPTIONS",
     }:
         return getattr(import_module(".graph", __name__), name)
+    if name == "build_assessment_profile":
+        return getattr(import_module(".analysis", __name__), name)
     if name in {
         "MFI_DIMENSIONS",
         "RISK_COLORS",
@@ -56,6 +69,16 @@ def __getattr__(name: str):
         "MFIMetricSummary",
         "MFIMethodologyWarning",
         "MFIExcludedMarketRecord",
+        "MFIAnalysisConfig",
+        "MFICoverageSummary",
+        "MFIStatisticalSummary",
+        "MFIAnalyzedMetric",
+        "MFILocalizedPatterns",
+        "MFIDimensionProfile",
+        "MFIMarketProfile",
+        "MFIMetricLedgerEntry",
+        "MFIDeterministicTables",
+        "MFIAssessmentProfile",
     }:
         return getattr(import_module(".schemas", __name__), name)
     raise AttributeError(name)

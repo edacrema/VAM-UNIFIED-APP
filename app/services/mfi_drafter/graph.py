@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 
 from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
+from .analysis import build_assessment_profile
 from .schemas import (
     MFI_DIMENSIONS, RISK_COLORS, get_risk_level, MFIMetric
 )
@@ -74,6 +75,8 @@ class MFIReportState(TypedDict):
     score_authority: str
     excluded_market_records: List[Dict[str, Any]]
     methodology_warnings: List[Dict[str, Any]]
+    mean_mfi_across_assessed_markets: Optional[float]
+    assessment_profile: Optional[Dict[str, Any]]
     
     # ===== BRANCH 2: CONTEXT =====
     contextual_documents: List[Dict[str, Any]]
@@ -130,6 +133,8 @@ def create_initial_state(
         score_authority=(csv_data or {}).get("score_authority", "synthetic_mock"),
         excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
         methodology_warnings=(csv_data or {}).get("methodology_warnings", []),
+        mean_mfi_across_assessed_markets=None,
+        assessment_profile=None,
         contextual_documents=[],
         document_references=[],
         seerist_documents=[],
@@ -577,6 +582,31 @@ def node_mfi_data_agent(state: MFIReportState) -> dict:
         "warnings": data.get("warnings", []),
         "current_node": "mfi_data_agent"
     }
+
+
+def node_mfi_analysis(state: MFIReportState) -> dict:
+    """Build the pure, deterministic Phase 2 assessment profile."""
+    logger.info("[MFIAnalysis] Building deterministic assessment profile")
+    profile = build_assessment_profile(
+        state.get("markets_data", []),
+        state.get("metric_summaries", {}),
+        {
+            "methodology_version": state.get(
+                "methodology_version", METHODOLOGY_VERSION
+            ),
+            "score_authority": state.get("score_authority", "synthetic_mock"),
+            "survey_metadata": state.get("survey_metadata") or {},
+            "excluded_market_records": state.get("excluded_market_records", []),
+        },
+    )
+    return {
+        "mean_mfi_across_assessed_markets": (
+            profile.mean_mfi_across_assessed_markets
+        ),
+        "assessment_profile": profile.model_dump(),
+        "current_node": "mfi_analysis",
+    }
+
 
 # NODE: CONTEXT RETRIEVAL (Mock)
 # ============================================================================
@@ -1194,17 +1224,23 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
     market_recommendations: Dict[str, Dict[str, Any]] = {}
     llm_calls = 0
 
+    assessment_profile = state.get("assessment_profile") or {}
+    priority_market_names = assessment_profile.get("priority_market_names") or []
+    profile_markets = {
+        str(profile.get("market_name")): profile
+        for profile in assessment_profile.get("markets", [])
+        if isinstance(profile, dict) and profile.get("market_name")
+    }
+    markets_by_name = {
+        str(market.get("market_name")): market
+        for market in markets_data
+        if isinstance(market, dict) and market.get("market_name")
+    }
     critical_markets = [
-        m
-        for m in markets_data
-        if isinstance(m, dict) and m.get("risk_level") in ["High Risk", "Very High Risk"]
+        markets_by_name[market_name]
+        for market_name in priority_market_names
+        if market_name in markets_by_name
     ]
-
-    if len(critical_markets) > 15:
-        critical_markets = sorted(
-            critical_markets,
-            key=lambda x: float(x.get("overall_mfi", 0) or 0),
-        )[:15]
 
     for market in critical_markets:
         market_name = str(market.get("market_name", "")).strip()
@@ -1213,17 +1249,19 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
 
         region = str(market.get("region", market.get("admin1", "")) or "").strip()
 
+        market_profile = profile_markets.get(market_name, {})
         weak_dims = [
-            (dim, score)
-            for dim, score in (market.get("dimension_scores") or {}).items()
-            if score is not None and float(score) < 6.0
+            (str(item["dimension"]), float(item["score"]))
+            for item in market_profile.get("weak_dimensions", [])
+            if isinstance(item, dict)
+            and item.get("dimension") is not None
+            and item.get("score") is not None
         ]
-        weak_dims = sorted(weak_dims, key=lambda x: float(x[1]))
 
         if not weak_dims:
             continue
 
-        evidence_dimensions = {dimension for dimension, _score in weak_dims[:4]}
+        evidence_dimensions = {dimension for dimension, _score in weak_dims}
         typed_market_evidence = {
             "subsections": {
                 dimension: [
@@ -1246,8 +1284,9 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
         prompt = f"""Generate targeted recommendations for {market_name} market ({region}).
 
 MARKET DATA:
-- Overall MFI: {market.get('overall_mfi')}/10 ({market.get('risk_level')})
-- Weak dimensions: {json.dumps([{'dim': d, 'score': float(s)} for d, s in weak_dims[:4]])}
+- Overall MFI: {market.get('overall_mfi')}/10
+- Assessment score rank: {market_profile.get('score_rank')}
+- Weak dimensions: {json.dumps([{'dim': d, 'score': float(s)} for d, s in weak_dims])}
 - Typed explanatory evidence: {json.dumps(typed_market_evidence)}
 
 RULES:
@@ -1298,7 +1337,7 @@ Output JSON:
                 "region": region,
                 "mfi_score": float(market.get("overall_mfi", 0) or 0),
                 "risk_level": str(market.get("risk_level", "")).strip(),
-                "weak_dimensions": [d for d, _s in weak_dims[:3]],
+                "weak_dimensions": [d for d, _s in weak_dims],
                 "priority_issues": priority_issues,
                 "recommended_interventions": recommended_interventions,
                 "modality_considerations": modality_considerations,
@@ -1503,6 +1542,7 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     
     # Add nodes
     graph.add_node("mfi_data_agent", wrap_node("mfi_data_agent", node_mfi_data_agent))
+    graph.add_node("mfi_analysis", wrap_node("mfi_analysis", node_mfi_analysis))
     graph.add_node("context_retrieval", wrap_node("context_retrieval", node_context_retrieval))
     graph.add_node("context_extractor", wrap_node("context_extractor", node_context_extractor))
     graph.add_node("mfi_graph_designer", wrap_node("mfi_graph_designer", node_mfi_graph_designer))
@@ -1521,7 +1561,8 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph.set_entry_point("mfi_data_agent")
     
     # Linear flow
-    graph.add_edge("mfi_data_agent", "context_retrieval")
+    graph.add_edge("mfi_data_agent", "mfi_analysis")
+    graph.add_edge("mfi_analysis", "context_retrieval")
     graph.add_edge("context_retrieval", "context_extractor")
     graph.add_edge("context_extractor", "mfi_graph_designer")
     graph.add_edge("mfi_graph_designer", "dimension_drafter")

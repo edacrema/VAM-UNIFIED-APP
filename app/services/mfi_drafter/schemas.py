@@ -5,7 +5,7 @@ Classi e modelli per la generazione di MFI Reports.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, asdict
 
@@ -247,6 +247,250 @@ class MFIExcludedMarketRecord(BaseModel):
 
 
 # ============================================================================
+# MFI 2.0 DETERMINISTIC ANALYSIS
+# ============================================================================
+
+class MFIAnalysisConfig(BaseModel):
+    """Injectable, validated configuration for the pure Phase 2 analysis."""
+
+    model_config = ConfigDict(frozen=True)
+
+    priority_dimension_min: int = 3
+    priority_dimension_max: int = 4
+    priority_market_max: int = 15
+    market_weak_dimension_count: int = 3
+    item_min_market_count: int = 3
+    item_min_market_ratio: float = 0.25
+    item_category_contrast: float = 0.10
+    item_max_per_group: int = 3
+    ranking_tie_tolerance: float = 1e-6
+    quartile_interpolation: Literal["linear"] = "linear"
+
+    @model_validator(mode="after")
+    def validate_analysis_config(self) -> "MFIAnalysisConfig":
+        if self.priority_dimension_min < 1:
+            raise ValueError("priority_dimension_min must be at least 1")
+        if self.priority_dimension_max < self.priority_dimension_min:
+            raise ValueError(
+                "priority_dimension_max must be greater than or equal to "
+                "priority_dimension_min"
+            )
+        if self.priority_dimension_max > len(MFI_DIMENSIONS):
+            raise ValueError("priority_dimension_max cannot exceed the dimension count")
+        if self.priority_market_max < 1:
+            raise ValueError("priority_market_max must be at least 1")
+        if not 1 <= self.market_weak_dimension_count <= len(MFI_DIMENSIONS):
+            raise ValueError("market_weak_dimension_count is outside the dimension count")
+        if self.item_min_market_count < 1:
+            raise ValueError("item_min_market_count must be at least 1")
+        if not 0.0 <= self.item_min_market_ratio <= 1.0:
+            raise ValueError("item_min_market_ratio must be between 0 and 1")
+        if not 0.0 <= self.item_category_contrast <= 1.0:
+            raise ValueError("item_category_contrast must be between 0 and 1")
+        if self.item_max_per_group < 1:
+            raise ValueError("item_max_per_group must be at least 1")
+        if self.ranking_tie_tolerance < 0.0:
+            raise ValueError("ranking_tie_tolerance cannot be negative")
+        return self
+
+
+class MFICoverageSummary(BaseModel):
+    """Assessment-level market coverage for one deterministic value."""
+
+    available_market_count: int
+    total_assessed_market_count: int
+    missing_count: int
+    coverage_ratio: float
+
+
+class MFIStatisticalSummary(BaseModel):
+    """Unrounded unweighted statistics over included assessed markets."""
+
+    mean: float
+    median: float
+    minimum: float
+    maximum: float
+    q1: float
+    q3: float
+    iqr: float
+    score_range: float
+    numerator: float
+    denominator: int
+    coverage: MFICoverageSummary
+
+
+class MFIRankedValue(BaseModel):
+    """One value in a deterministic, tolerance-aware ordered population."""
+
+    name: str
+    value: float
+    rank: int
+    selection_order: int
+    ledger_metric_id: str
+
+
+class MFIAnalyzedMetric(BaseModel):
+    """Assessment-level subsection or driver with deterministic ranking."""
+
+    metric_id: str
+    dimension: str
+    display_name: str
+    role: str
+    mean_raw_value: Optional[float] = None
+    mean_normalized_value: Optional[float] = None
+    unit: str
+    orientation: str
+    evidence_scope: str
+    coverage: MFICoverageSummary
+    unfavorable_rate: Optional[float] = None
+    weakness_rank: Optional[int] = None
+    group_rank: Optional[int] = None
+    product_group: Optional[str] = None
+    question_group: Optional[str] = None
+    item_name: Optional[str] = None
+    severity_weight: Optional[int] = None
+    item_relevant: bool = False
+    relevance_reasons: List[str] = Field(default_factory=list)
+    matching_category_metric_id: Optional[str] = None
+    source_metric_ids: List[str] = Field(default_factory=list)
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIRegionalDimensionSummary(BaseModel):
+    """One dimension's unweighted summary and rank inside one region."""
+
+    region: str
+    statistics: MFIStatisticalSummary
+    rank: int
+    selection_order: int
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFILocalizedPatterns(BaseModel):
+    """Deterministic location patterns for one dimension."""
+
+    regions_where_bottom_one: List[str] = Field(default_factory=list)
+    regions_where_bottom_two: List[str] = Field(default_factory=list)
+    markets_where_lowest: List[str] = Field(default_factory=list)
+    ordered_markets: List[MFIRankedValue] = Field(default_factory=list)
+    score_range: float
+    iqr: float
+
+
+class MFIDimensionProfile(BaseModel):
+    """Complete deterministic analytical profile for one official dimension."""
+
+    dimension: str
+    statistics: MFIStatisticalSummary
+    profile_rank: int
+    selection_order: int
+    is_priority: bool
+    priority_reasons: List[
+        Literal["bottom_rank", "below_profile_mean"]
+    ] = Field(default_factory=list)
+    subsections: List[MFIAnalyzedMetric] = Field(default_factory=list)
+    drivers: List[MFIAnalyzedMetric] = Field(default_factory=list)
+    regional_summaries: List[MFIRegionalDimensionSummary] = Field(default_factory=list)
+    localized_patterns: MFILocalizedPatterns
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIMarketDimensionProfile(BaseModel):
+    """One official dimension score and weakness status inside a market."""
+
+    dimension: str
+    score: float
+    rank: int
+    selection_order: int
+    is_weak: bool
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIMarketProfile(BaseModel):
+    """Stored overall score, relative rank, and weak dimensions for one market."""
+
+    market_name: str
+    region: Optional[str] = None
+    overall_mfi: float
+    score_rank: int
+    selection_order: int
+    is_priority_market: bool
+    selection_reasons: List[str] = Field(default_factory=list)
+    weak_dimensions: List[MFIMarketDimensionProfile] = Field(default_factory=list)
+    dimension_profile: List[MFIMarketDimensionProfile] = Field(default_factory=list)
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFILimitation(BaseModel):
+    """Stable, explicit limitation attached to the deterministic profile."""
+
+    code: str
+    severity: Literal["info", "warning"] = "warning"
+    message: str
+    market_name: Optional[str] = None
+    region: Optional[str] = None
+    dimension: Optional[str] = None
+    metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIMetricLedgerEntry(BaseModel):
+    """One uniquely addressable value supporting profiles and tables."""
+
+    ledger_id: str
+    label: str
+    value: float
+    statistic: str
+    unit: str
+    orientation: str
+    evidence_scope: str
+    dimension: Optional[str] = None
+    market_name: Optional[str] = None
+    region: Optional[str] = None
+    coverage: Optional[MFICoverageSummary] = None
+    source_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIDeterministicTableRow(BaseModel):
+    """A presentation-neutral table row backed entirely by ledger entries."""
+
+    row_id: str
+    values: Dict[str, Any] = Field(default_factory=dict)
+    ledger_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFIDeterministicTables(BaseModel):
+    """Versioned, deterministic tables ready for later presentation work."""
+
+    dimension_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+    regional_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+    subsection_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+    driver_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+    relevant_item_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+    priority_market_rows: List[MFIDeterministicTableRow] = Field(default_factory=list)
+
+
+class MFIAssessmentProfile(BaseModel):
+    """Complete public Phase 2 deterministic assessment profile."""
+
+    analysis_schema_version: Literal["2.0"] = ANALYSIS_SCHEMA_VERSION
+    analysis_version: str
+    methodology_version: str
+    score_authority: str
+    assessed_market_count: int
+    excluded_market_count: int = 0
+    mean_mfi_across_assessed_markets: float
+    overall_statistics: MFIStatisticalSummary
+    dimension_profile_mean: float
+    dimensions: List[MFIDimensionProfile]
+    markets: List[MFIMarketProfile]
+    priority_dimension_names: List[str]
+    priority_market_names: List[str]
+    limitations: List[MFILimitation] = Field(default_factory=list)
+    metric_ledger: Dict[str, MFIMetricLedgerEntry] = Field(default_factory=dict)
+    tables: MFIDeterministicTables
+
+
+# ============================================================================
 # PYDANTIC MODELS (API)
 # ============================================================================
 
@@ -286,6 +530,8 @@ class GenerateMFIReportOutput(BaseModel):
     risk_distribution: Dict[str, int]
     markets_data: List[Dict[str, Any]]
     dimension_scores: List[Dict[str, Any]]
+    mean_mfi_across_assessed_markets: float
+    assessment_profile: MFIAssessmentProfile
     
     # Generated content
     executive_summary: str

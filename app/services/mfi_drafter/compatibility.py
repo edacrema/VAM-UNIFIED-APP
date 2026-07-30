@@ -10,6 +10,45 @@ from copy import deepcopy
 from typing import Any, Iterable, Optional
 
 
+def canonical_and_legacy_response_fields(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Centralize canonical analysis output and one-cycle response aliases.
+
+    The graph normally supplies ``assessment_profile``.  Building it here as a
+    fallback keeps direct/in-process serialization paths deterministic without
+    allowing any legacy alias to feed analysis.
+    """
+    profile = result.get("assessment_profile")
+    if not isinstance(profile, dict):
+        from .analysis import build_assessment_profile
+
+        profile = build_assessment_profile(
+            result.get("markets_data", []) or [],
+            result.get("metric_summaries", {}) or {},
+            result,
+        ).model_dump()
+    canonical_mean = float(profile["mean_mfi_across_assessed_markets"])
+
+    risk_distribution: dict[str, int] = {}
+    for market in result.get("markets_data", []) or []:
+        if not isinstance(market, dict):
+            continue
+        risk = str(market.get("risk_level") or "Unknown")
+        risk_distribution[risk] = risk_distribution.get(risk, 0) + 1
+
+    return {
+        "mean_mfi_across_assessed_markets": canonical_mean,
+        "assessment_profile": deepcopy(profile),
+        "national_mfi": round(canonical_mean, 1),
+        "risk_distribution": risk_distribution,
+        "markets_data": with_legacy_sub_score_aliases(
+            result.get("markets_data", []) or []
+        ),
+        "dimension_scores": deepcopy(result.get("dimension_scores", []) or []),
+    }
+
+
 def with_legacy_sub_score_aliases(
     markets_data: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:

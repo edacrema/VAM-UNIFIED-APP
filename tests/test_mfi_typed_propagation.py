@@ -156,6 +156,10 @@ def test_router_adds_deprecated_alias_only_to_serialized_copy(monkeypatch):
 
     assert output.score_authority == "databridge_level_1"
     assert output.methodology_warnings[0].code == "mfir_records_excluded"
+    assert output.mean_mfi_across_assessed_markets == 5.0
+    assert output.assessment_profile.assessed_market_count == 1
+    assert output.assessment_profile.excluded_market_count == 1
+    assert output.assessment_profile.priority_market_names == ["Juba"]
     assert "sub_scores" in output.markets_data[0]
     assert "sub_scores" not in result["markets_data"][0]
 
@@ -174,5 +178,37 @@ def test_dispatcher_adds_deprecated_alias_only_to_serialized_copy(monkeypatch):
 
     assert output["score_authority"] == "databridge_level_1"
     assert output["methodology_warnings"][0]["code"] == "mfir_records_excluded"
+    assert output["mean_mfi_across_assessed_markets"] == 5.0
+    assert output["assessment_profile"]["assessed_market_count"] == 1
+    assert output["assessment_profile"]["excluded_market_count"] == 1
+    assert output["assessment_profile"]["priority_market_names"] == ["Juba"]
     assert "sub_scores" in output["markets_data"][0]
     assert "sub_scores" not in result["markets_data"][0]
+
+
+def test_analysis_metadata_is_exposed_by_router_and_dispatcher_helpers():
+    profile = {
+        "analysis_version": "mfi-analysis-phase2-v1",
+        "analysis_schema_version": "2.0",
+        "priority_dimension_names": ["Service"],
+        "priority_market_names": ["Juba"],
+        "limitations": [{"code": "assessment_scope_not_representative"}],
+    }
+    state = {
+        "assessment_profile": profile,
+        "methodology_warnings": [{"code": "mfir_records_excluded"}],
+    }
+
+    router_metadata = router._analysis_run_metadata(state)
+    dispatcher_metadata = dispatcher._mfi_analysis_run_metadata(state)
+
+    assert router_metadata == dispatcher_metadata
+    assert router_metadata["analysis_version"] == "mfi-analysis-phase2-v1"
+    assert router_metadata["priority_dimension_names"] == ["Service"]
+    assert router_metadata["priority_market_names"] == ["Juba"]
+    assert router_metadata["analysis_limitations"][0]["code"] == (
+        "assessment_scope_not_representative"
+    )
+    assert router_metadata["methodology_warnings"][0]["code"] == (
+        "mfir_records_excluded"
+    )
