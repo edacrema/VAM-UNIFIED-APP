@@ -34,6 +34,8 @@ __all__ = [
     "MFIMetricLedgerEntry",
     "MFIDeterministicTables",
     "MFIAssessmentProfile",
+    "MFIReleaseControl",
+    "MFIGenerationDiagnostics",
     "build_assessment_profile",
 ]
 
@@ -79,6 +81,8 @@ def __getattr__(name: str):
         "MFIMetricLedgerEntry",
         "MFIDeterministicTables",
         "MFIAssessmentProfile",
+        "MFIReleaseControl",
+        "MFIGenerationDiagnostics",
     }:
         return getattr(import_module(".schemas", __name__), name)
     raise AttributeError(name)

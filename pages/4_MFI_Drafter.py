@@ -34,6 +34,26 @@ st.caption(
     "The file must include valid country, StartDate, and EndDate metadata."
 )
 
+try:
+    service_info = request_json("GET", "/mfi-drafter/info", timeout=30)
+except Exception:
+    service_info = {}
+release_control = (
+    service_info.get("release_control")
+    if isinstance(service_info, dict)
+    else {}
+) or {}
+generation_enabled = bool(
+    isinstance(service_info, dict)
+    and service_info.get("generation_enabled")
+    and release_control.get("analysis_version") == "2"
+)
+if not generation_enabled:
+    st.warning(
+        "MFI Drafter 2.0 generation is not enabled in this deployment. "
+        "Existing completed reports and downloads remain available."
+    )
+
 
 @st.dialog("Required CSV data is missing")
 def _show_csv_validation_dialog(validation):
@@ -49,7 +69,12 @@ def _show_csv_validation_dialog(validation):
 
 with st.form("mfi_drafter_csv"):
     uploaded = st.file_uploader("Processed MFI CSV", type=["csv"], key="mfi_drafter_csv_file")
-    run_csv = st.form_submit_button("Generate report", type="primary", width="stretch")
+    run_csv = st.form_submit_button(
+        "Generate report",
+        type="primary",
+        width="stretch",
+        disabled=not generation_enabled,
+    )
 
 if run_csv:
     try:
@@ -176,6 +201,10 @@ if isinstance(result, dict):
             str(assessment_profile.get("assessed_market_count") or 0),
         )
         cols[3].metric("LLM Calls", str(result.get("llm_calls") or 0))
+        st.markdown("**Release control**")
+        st.json(result.get("release_control") or release_control)
+        st.markdown("**Generation diagnostics**")
+        st.json(result.get("generation_diagnostics") or {})
         if result.get("warnings"):
             st.markdown("**Generation notices**")
             for warning in result.get("warnings") or []:

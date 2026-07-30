@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wfp.org/schemas/mfi-drafter-phase4-case-config-1.0.json",
+  "title": "MFI Drafter Phase 4 Local Regression Case Configuration",
+  "description": "Country-neutral local inputs for Phase 4 regression evidence. Configurations and source assessment files are not application dependencies and should normally remain untracked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "cases": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "required_real_pilot_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3
+    }
+  },
+  "$defs": {
+    "metricAssertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assertion_id",
+        "dimension",
+        "metric_id",
+        "expected_value"
+      ],
+      "properties": {
+        "assertion_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "dimension": {"type": "string", "minLength": 1},
+        "metric_id": {"type": "string", "minLength": 1},
+        "statistic": {
+          "type": "string",
+          "minLength": 1,
+          "default": "mean_normalized_value"
+        },
+        "expected_value": {"type": "number"},
+        "tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.000001
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "label",
+        "source_csv",
+        "expected_included_market_count",
+        "expected_priority_dimensions"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "label": {"type": "string", "minLength": 1},
+        "source_csv": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path or a path relative to this configuration file."
+        },
+        "expected_included_market_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_excluded_market_count": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "expected_priority_dimensions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "expected_methodology_warning_codes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "expected_limitation_codes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "metric_assertions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/metricAssertion"}
+        },
+        "required_for_release": {"type": "boolean", "default": true},
+        "requires_live_pilot": {"type": "boolean", "default": true}
+      }
+    }
+  }
+}

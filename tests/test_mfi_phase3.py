@@ -73,6 +73,25 @@ def phase3_bundle() -> dict:
         "data_collection_start": "2026-01-01",
         "data_collection_end": "2026-01-31",
         "narrative_schema_version": "2.0",
+        "release_control": {
+            "analysis_version": "2",
+            "enabled": True,
+            "configuration_status": "configured",
+            "service_name": "mfi-drafter",
+            "deployment_revision": "phase4-test",
+        },
+        "generation_diagnostics": {
+            "dimensions": {"llm": [], "fallback": sorted(dimensions)},
+            "markets": {"llm": [], "fallback": sorted(markets)},
+            "context_extraction_mode": "not_applicable",
+            "executive_summary_mode": "fallback",
+            "red_team_status": "not_started",
+            "correction_attempts": 0,
+            "unresolved_high_count": 0,
+            "unresolved_medium_count": 0,
+            "unresolved_low_count": 0,
+            "retrievers": {},
+        },
         "assessment_profile": profile,
         "mean_mfi_across_assessed_markets": profile[
             "mean_mfi_across_assessed_markets"
@@ -639,6 +658,8 @@ def test_api_serialization_exposes_canonical_and_output_only_aliases(
         data_collection_end="2026-01-31",
     )
     assert output.narrative_schema_version == "2.0"
+    assert output.release_control.analysis_version == "2"
+    assert output.generation_diagnostics.executive_summary_mode == "fallback"
     assert len(output.dimension_narratives) == 9
     assert output.executive_summary_narrative.key_findings
     assert output.market_score_distribution
@@ -656,6 +677,10 @@ def test_api_serialization_exposes_canonical_and_output_only_aliases(
         data_collection_end="2026-01-31",
     )
     assert dispatcher_output["narrative_schema_version"] == "2.0"
+    assert dispatcher_output["release_control"]["analysis_version"] == "2"
+    assert dispatcher_output["generation_diagnostics"][
+        "executive_summary_mode"
+    ] == "fallback"
     assert len(dispatcher_output["dimension_narratives"]) == 9
     assert dispatcher_output["claim_validation"]["status"] == "passed"
     assert dispatcher_output["market_score_distribution"]

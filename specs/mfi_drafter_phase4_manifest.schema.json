@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wfp.org/schemas/mfi-drafter-phase4-release-manifest-1.0.json",
+  "title": "MFI Drafter Phase 4 Release Evidence Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_id",
+    "mode",
+    "generated_at",
+    "candidate_revision",
+    "baseline_revision",
+    "service_name",
+    "validation_config_sha256",
+    "requirements",
+    "regression_cases",
+    "comparison_checks",
+    "artifacts",
+    "approvals",
+    "pilot_runs",
+    "blockers",
+    "release_ready"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "release_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "enum": ["regression", "compare"]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "candidate_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_revision": {
+      "const": "524cc9a"
+    },
+    "service_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_identifier": {
+      "type": ["string", "null"]
+    },
+    "validation_config_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "requirements": {
+      "$ref": "#/$defs/requirements"
+    },
+    "regression_cases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/regressionCase"
+      }
+    },
+    "comparison_checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/approval"
+      }
+    },
+    "pilot_runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pilot"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "release_ready": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_id", "status", "blocking", "message", "evidence"],
+      "properties": {
+        "check_id": {"type": "string", "minLength": 1},
+        "status": {"enum": ["passed", "failed", "advisory"]},
+        "blocking": {"type": "boolean"},
+        "message": {"type": "string"},
+        "evidence": {"type": "object"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "path",
+        "sha256",
+        "byte_count",
+        "kind"
+      ],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_count": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string", "minLength": 1}
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_case_ids",
+        "required_live_pilot_case_ids",
+        "required_real_pilot_count"
+      ],
+      "properties": {
+        "required_case_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "required_live_pilot_case_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "required_real_pilot_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "regressionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "label",
+        "source_sha256",
+        "checks",
+        "artifacts",
+        "methodology_warning_codes",
+        "limitation_codes"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "label": {"type": "string", "minLength": 1},
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "checks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/check"}
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifact"}
+        },
+        "methodology_warning_codes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "limitation_codes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "reviewer",
+        "reviewed_at",
+        "analytical_status",
+        "visual_status",
+        "accepted_medium_flag_ids",
+        "warning_dispositions",
+        "artifact_sha256"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "reviewer": {"type": "string", "minLength": 1},
+        "reviewed_at": {"type": "string", "format": "date-time"},
+        "analytical_status": {"enum": ["approved", "rejected"]},
+        "visual_status": {"enum": ["approved", "rejected"]},
+        "accepted_medium_flag_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "warning_dispositions": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "artifact_sha256": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "notes": {"type": ["string", "null"]}
+      }
+    },
+    "pilot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "kind",
+        "case_id",
+        "completed_async",
+        "analysis_version",
+        "llm_calls",
+        "docx_exported",
+        "preview_rendered",
+        "score_integrity_passed",
+        "fallback_used",
+        "unresolved_high_count",
+        "unresolved_medium_flag_ids",
+        "accepted_medium_flag_ids",
+        "human_status"
+      ],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": ["regression_case", "real"]
+        },
+        "case_id": {"type": ["string", "null"]},
+        "completed_async": {"type": "boolean"},
+        "analysis_version": {"type": "string"},
+        "llm_calls": {"type": "integer", "minimum": 0},
+        "docx_exported": {"type": "boolean"},
+        "preview_rendered": {"type": "boolean"},
+        "score_integrity_passed": {"type": "boolean"},
+        "fallback_used": {"type": "boolean"},
+        "unresolved_high_count": {"type": "integer", "minimum": 0},
+        "unresolved_medium_flag_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "accepted_medium_flag_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "human_status": {"enum": ["approved", "rejected", "pending"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"kind": {"const": "regression_case"}}
+          },
+          "then": {
+            "properties": {"case_id": {"type": "string", "minLength": 1}}
+          },
+          "else": {
+            "properties": {"case_id": {"type": "null"}}
+          }
+        }
+      ]
+    }
+  }
+}

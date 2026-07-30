@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from math import ceil
 from pathlib import Path
@@ -16,6 +17,12 @@ from app.services.mfi_drafter.narrative import (
     fallback_executive_narrative,
     fallback_market_narrative,
     validate_structured_narratives,
+)
+from app.services.mfi_drafter.release_validation import (
+    MFIExpectedMetricAssertion,
+    MFIRegressionCaseConfig,
+    MFIReleaseValidationConfig,
+    run_regression,
 )
 
 
@@ -291,3 +298,102 @@ def test_local_benchmark_phase3_fallback_is_evidence_backed(
         assert 2 <= len(driver_ids) <= 4
         assert narrative["geographic_patterns"]
         assert narrative["recommendations"]
+
+
+def test_local_benchmarks_build_phase4_release_evidence(tmp_path):
+    for path, _expected_full, _expected_mfir in BENCHMARKS:
+        _skip_if_benchmark_absent(path)
+
+    validation_config = MFIReleaseValidationConfig(
+        cases=[
+            MFIRegressionCaseConfig(
+                case_id="benin-example",
+                label="Benin local regression example",
+                source_csv=BENCHMARKS[0][0].name,
+                expected_included_market_count=53,
+                expected_excluded_market_count=0,
+                expected_priority_dimensions=[
+                    "Service",
+                    "Infrastructure",
+                    "Food Quality",
+                ],
+            ),
+            MFIRegressionCaseConfig(
+                case_id="haiti-example",
+                label="Haiti local regression example",
+                source_csv=BENCHMARKS[1][0].name,
+                expected_included_market_count=68,
+                expected_excluded_market_count=6,
+                expected_priority_dimensions=[
+                    "Food Quality",
+                    "Infrastructure",
+                    "Service",
+                    "Price",
+                ],
+                expected_methodology_warning_codes=[
+                    "mfir_records_excluded"
+                ],
+                expected_limitation_codes=[
+                    "assessment_scope_not_representative",
+                    "unavailable_explanatory_evidence",
+                    "item_trader_denominator_unavailable",
+                    "mfir_records_excluded",
+                ],
+                metric_assertions=[
+                    MFIExpectedMetricAssertion(
+                        assertion_id="price-increase-mean",
+                        dimension="Price",
+                        metric_id="price.increase",
+                        expected_value=9.240196,
+                    ),
+                    MFIExpectedMetricAssertion(
+                        assertion_id="price-stability-mean",
+                        dimension="Price",
+                        metric_id="price.stability",
+                        expected_value=1.691176,
+                    ),
+                ],
+            ),
+        ]
+    )
+    manifest = run_regression(
+        validation_config=validation_config,
+        case_root=BENCHMARK_DIRECTORY,
+        output_directory=tmp_path / "phase4",
+        release_id="pytest-phase4",
+        candidate_revision="pytest-candidate",
+    )
+
+    assert manifest.release_ready is False
+    assert manifest.blockers == [
+        "approval:benin-example",
+        "approval:haiti-example",
+        "pilot:real_assessments",
+        "pilot:regression_case:benin-example",
+        "pilot:regression_case:haiti-example",
+    ]
+    assert {
+        case.case_id for case in manifest.regression_cases
+    } == {"benin-example", "haiti-example"}
+    for case in manifest.regression_cases:
+        assert not [
+            check
+            for check in case.checks
+            if check.blocking and check.status == "failed"
+        ]
+        assert all(
+            len(artifact.sha256) == 64 for artifact in case.artifacts
+        )
+        result_artifact = next(
+            artifact
+            for artifact in case.artifacts
+            if artifact.artifact_id.endswith(".result")
+        )
+        rendered = json.loads(
+            (tmp_path / "phase4" / result_artifact.path).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert rendered["llm_calls"] == 0
+        assert rendered["generation_diagnostics"]["dimensions"]["llm"] == []
+        assert rendered["generation_diagnostics"]["retrievers"] == {}

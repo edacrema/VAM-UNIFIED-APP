@@ -681,6 +681,59 @@ class MFIQAReview(BaseModel):
     flags: List[MFINarrativeQAFlag] = Field(default_factory=list)
 
 
+class MFIReleaseControl(BaseModel):
+    """Immutable deployment-control snapshot attached to an MFI run."""
+
+    analysis_version: str
+    enabled: bool
+    configuration_status: Literal[
+        "configured",
+        "default_disabled",
+        "invalid",
+    ]
+    service_name: str = "mfi-drafter"
+    deployment_revision: Optional[str] = None
+
+
+class MFINarrativeArtifactDiagnostics(BaseModel):
+    """Drafting provenance for one collection of narrative artifacts."""
+
+    llm: List[str] = Field(default_factory=list)
+    fallback: List[str] = Field(default_factory=list)
+
+
+class MFIGenerationDiagnostics(BaseModel):
+    """Operational diagnostics used to qualify Phase 4 pilot runs."""
+
+    dimensions: MFINarrativeArtifactDiagnostics = Field(
+        default_factory=MFINarrativeArtifactDiagnostics
+    )
+    markets: MFINarrativeArtifactDiagnostics = Field(
+        default_factory=MFINarrativeArtifactDiagnostics
+    )
+    context_extraction_mode: Literal[
+        "not_started",
+        "llm",
+        "fallback",
+        "not_applicable",
+    ] = "not_started"
+    executive_summary_mode: Literal[
+        "not_started",
+        "llm",
+        "fallback",
+    ] = "not_started"
+    red_team_status: Literal[
+        "not_started",
+        "completed",
+        "failed",
+    ] = "not_started"
+    correction_attempts: int = 0
+    unresolved_high_count: int = 0
+    unresolved_medium_count: int = 0
+    unresolved_low_count: int = 0
+    retrievers: Dict[str, str] = Field(default_factory=dict)
+
+
 class MFIMarketScoreDistributionEntry(BaseModel):
     """Neutral ordered market-score value for public consumers and charts."""
 
@@ -721,6 +774,10 @@ class GenerateMFIReportOutput(BaseModel):
     methodology_version: Literal["databridge-current"] = METHODOLOGY_VERSION
     score_authority: Literal["databridge_level_1", "synthetic_mock"] = SCORE_AUTHORITY
     narrative_schema_version: Literal["2.0"] = NARRATIVE_SCHEMA_VERSION
+    release_control: MFIReleaseControl
+    generation_diagnostics: MFIGenerationDiagnostics = Field(
+        default_factory=MFIGenerationDiagnostics
+    )
     excluded_market_records: List[MFIExcludedMarketRecord] = Field(default_factory=list)
     methodology_warnings: List[MFIMethodologyWarning] = Field(default_factory=list)
     
@@ -728,10 +785,22 @@ class GenerateMFIReportOutput(BaseModel):
     survey_metadata: Dict[str, Any]
     
     # MFI Data
-    national_mfi: float
-    risk_distribution: Dict[str, int]
+    national_mfi: float = Field(
+        ...,
+        deprecated=True,
+        description="Deprecated output-only alias; use mean_mfi_across_assessed_markets.",
+    )
+    risk_distribution: Dict[str, int] = Field(
+        ...,
+        deprecated=True,
+        description="Deprecated output-only alias; use market_score_distribution.",
+    )
     markets_data: List[Dict[str, Any]]
-    dimension_scores: List[Dict[str, Any]]
+    dimension_scores: List[Dict[str, Any]] = Field(
+        ...,
+        deprecated=True,
+        description="Deprecated output-only aggregation alias.",
+    )
     mean_mfi_across_assessed_markets: float
     assessment_profile: MFIAssessmentProfile
     market_score_distribution: List[MFIMarketScoreDistributionEntry] = Field(

@@ -12,6 +12,11 @@ import logging
 from .graph import run_mfi_report_generation
 from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .compatibility import canonical_and_legacy_response_fields
+from .features import (
+    MFIAnalysisVersionDisabled,
+    mfi_release_control,
+    require_mfi_analysis_v2,
+)
 from .schemas import (
     GenerateMFIReportInput,
     GenerateMFIReportOutput,
@@ -81,10 +86,14 @@ def _update_live_metadata(
 
 
 def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "release_control": state.get("release_control", {}),
+        "generation_diagnostics": state.get("generation_diagnostics", {}),
+    }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
-        return {}
-    return {
+        return metadata
+    metadata.update({
         "analysis_version": profile.get("analysis_version"),
         "analysis_schema_version": profile.get("analysis_schema_version"),
         "priority_dimension_names": profile.get("priority_dimension_names", []),
@@ -94,7 +103,15 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "narrative_schema_version": state.get("narrative_schema_version", "2.0"),
         "claim_validation": state.get("claim_validation", {}),
         "qa_review": state.get("qa_review", {}),
-    }
+    })
+    return metadata
+
+
+def _require_enabled_release_control():
+    try:
+        return require_mfi_analysis_v2()
+    except MFIAnalysisVersionDisabled as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict())
 
 def _build_mfi_output(
     *,
@@ -113,6 +130,8 @@ def _build_mfi_output(
         analysis_schema_version=result.get("analysis_schema_version", "2.0"),
         methodology_version=result.get("methodology_version", "databridge-current"),
         score_authority=result.get("score_authority", "synthetic_mock"),
+        release_control=result.get("release_control") or mfi_release_control(),
+        generation_diagnostics=result.get("generation_diagnostics", {}),
         excluded_market_records=result.get("excluded_market_records", []),
         methodology_warnings=result.get("methodology_warnings", []),
         survey_metadata=result.get("survey_metadata", {}),
@@ -155,7 +174,11 @@ def _build_mfi_output(
     )
 
 
-def _run_mfi_from_structured_data(csv_data: Dict[str, Any]) -> GenerateMFIReportOutput:
+def _run_mfi_from_structured_data(
+    csv_data: Dict[str, Any],
+    *,
+    release_control,
+) -> GenerateMFIReportOutput:
     country = csv_data["country"]
     data_collection_start = csv_data["data_collection_start"]
     data_collection_end = csv_data["data_collection_end"]
@@ -166,6 +189,7 @@ def _run_mfi_from_structured_data(csv_data: Dict[str, Any]) -> GenerateMFIReport
         data_collection_end=data_collection_end,
         markets=markets,
         csv_data=csv_data,
+        release_control=release_control,
     )
     return _build_mfi_output(
         result=result,
@@ -192,6 +216,7 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
     Returns:
         GenerateMFIReportOutput with all report sections
     """
+    release_control = _require_enabled_release_control()
     try:
         logger.info(f"Starting MFI report generation for {input_data.country}")
         
@@ -200,6 +225,7 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
             data_collection_start=input_data.data_collection_start,
             data_collection_end=input_data.data_collection_end,
             markets=input_data.markets,
+            release_control=release_control,
         )
         
         output = _build_mfi_output(
@@ -226,6 +252,7 @@ async def generate_mfi_report_from_csv(
     data_collection_end_override: Optional[str] = Form(None, description="Override end date"),
 ):
     """Generates a full MFI report from an uploaded CSV file."""
+    release_control = _require_enabled_release_control()
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -245,7 +272,10 @@ async def generate_mfi_report_from_csv(
             csv_data["country"],
             len(csv_data["markets"]),
         )
-        output = _run_mfi_from_structured_data(csv_data)
+        output = _run_mfi_from_structured_data(
+            csv_data,
+            release_control=release_control,
+        )
         logger.info(f"MFI report generation from CSV completed: {output.run_id}")
         return output
     except ValueError as e:
@@ -282,6 +312,7 @@ async def generate_mfi_report_from_csv_async(
 ):
     """Starts report generation from CSV in the background."""
     import uuid as uuid_module
+    release_control = _require_enabled_release_control()
 
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
@@ -301,6 +332,10 @@ async def generate_mfi_report_from_csv_async(
 
     run_id = f"mfi_{uuid_module.uuid4().hex[:8]}"
     create_run(run_id)
+    update_run(
+        run_id,
+        metadata={"release_control": release_control.model_dump()},
+    )
 
     progress_map = {
         "mfi_data_agent": 10,
@@ -393,6 +428,7 @@ async def generate_mfi_report_from_csv_async(
                 markets=csv_data["markets"],
                 csv_data=csv_data,
                 on_step=on_step,
+                release_control=release_control,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
@@ -429,9 +465,14 @@ async def generate_mfi_report_async(
         run_id for polling status
     """
     import uuid
+    release_control = _require_enabled_release_control()
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
 
     create_run(run_id)
+    update_run(
+        run_id,
+        metadata={"release_control": release_control.model_dump()},
+    )
 
     progress_map = {
         "mfi_data_agent": 10,
@@ -474,7 +515,8 @@ async def generate_mfi_report_async(
                 data_collection_start=input_data.data_collection_start,
                 data_collection_end=input_data.data_collection_end,
                 markets=input_data.markets,
-                on_step=on_step
+                on_step=on_step,
+                release_control=release_control,
             )
             
             update_run(run_id, warnings=result.get("warnings", []))
@@ -572,6 +614,14 @@ async def export_mfi_docx(
 
     filename = options.filename or f"mfi-drafter-{run_id}.docx"
     headers = {"Content-Disposition": build_content_disposition(filename)}
+    logger.info(
+        "MFI Drafter DOCX export completed",
+        extra={
+            "mfi_event": "docx_export_completed",
+            "mfi_run_id": run_id,
+            "mfi_docx_bytes": len(docx_bytes),
+        },
+    )
     return Response(
         content=docx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -582,13 +632,16 @@ async def export_mfi_docx(
 @router.get("/info")
 def get_service_info():
     """Returns service metadata for the frontend."""
+    release_control = mfi_release_control()
     return {
         "id": "mfi-drafter",
         "name": "MFI Report Generator",
         "description": "Generates full Market Functionality Index (MFI) reports. "
                        "Analyzes 9 market functionality dimensions and generates "
                        "visualizations, an executive summary, and recommendations.",
-        "version": "1.1.0",
+        "version": "2.0.0",
+        "release_control": release_control.model_dump(),
+        "generation_enabled": release_control.enabled,
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -616,6 +669,10 @@ def get_service_info():
         },
         "outputs": {
             "run_id": "Unique generation identifier",
+            "release_control": "Immutable Phase 4 deployment-control snapshot",
+            "generation_diagnostics": (
+                "Drafting provenance, retriever status, fallback use, and QA counts"
+            ),
             "mean_mfi_across_assessed_markets": (
                 "Unrounded unweighted mean across included Full MFI markets"
             ),
@@ -663,7 +720,13 @@ def get_service_info():
 @router.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "mfi-drafter"}
+    release_control = mfi_release_control()
+    return {
+        "status": "healthy",
+        "service": "mfi-drafter",
+        "generation_enabled": release_control.enabled,
+        "release_control": release_control.model_dump(),
+    }
 
 
 @router.get("/dimensions")

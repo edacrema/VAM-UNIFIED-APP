@@ -17,6 +17,7 @@ import html as html_lib
 import base64
 import random
 import logging
+from copy import deepcopy
 from math import pi
 from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
 
@@ -31,8 +32,11 @@ from langchain_core.messages import HumanMessage
 from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .analysis import build_assessment_profile
+from .features import require_mfi_analysis_v2
 from .schemas import (
-    MFI_DIMENSIONS, MFIMetric
+    MFI_DIMENSIONS,
+    MFIMetric,
+    MFIReleaseControl,
 )
 from .methodology import (
     ANALYSIS_SCHEMA_VERSION,
@@ -95,6 +99,8 @@ class MFIReportState(TypedDict):
     methodology_version: str
     score_authority: str
     narrative_schema_version: str
+    release_control: Dict[str, Any]
+    generation_diagnostics: Dict[str, Any]
     excluded_market_records: List[Dict[str, Any]]
     methodology_warnings: List[Dict[str, Any]]
     mean_mfi_across_assessed_markets: Optional[float]
@@ -137,7 +143,8 @@ def create_initial_state(
     data_collection_start: str,
     data_collection_end: str,
     markets: List[str],
-    csv_data: Optional[Dict[str, Any]] = None
+    csv_data: Optional[Dict[str, Any]] = None,
+    release_control: Optional[MFIReleaseControl] = None,
 ) -> MFIReportState:
     """Crea stato iniziale per il grafo."""
     return MFIReportState(
@@ -159,6 +166,23 @@ def create_initial_state(
         ),
         score_authority=(csv_data or {}).get("score_authority", "synthetic_mock"),
         narrative_schema_version=NARRATIVE_SCHEMA_VERSION,
+        release_control=(
+            release_control.model_dump()
+            if release_control is not None
+            else {}
+        ),
+        generation_diagnostics={
+            "dimensions": {"llm": [], "fallback": []},
+            "markets": {"llm": [], "fallback": []},
+            "context_extraction_mode": "not_started",
+            "executive_summary_mode": "not_started",
+            "red_team_status": "not_started",
+            "correction_attempts": 0,
+            "unresolved_high_count": 0,
+            "unresolved_medium_count": 0,
+            "unresolved_low_count": 0,
+            "retrievers": {},
+        },
         excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
         methodology_warnings=(csv_data or {}).get("methodology_warnings", []),
         mean_mfi_across_assessed_markets=None,
@@ -196,6 +220,34 @@ def create_initial_state(
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+
+def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
+    diagnostics = deepcopy(state.get("generation_diagnostics") or {})
+    diagnostics.setdefault("dimensions", {"llm": [], "fallback": []})
+    diagnostics.setdefault("markets", {"llm": [], "fallback": []})
+    diagnostics.setdefault("context_extraction_mode", "not_started")
+    diagnostics.setdefault("executive_summary_mode", "not_started")
+    diagnostics.setdefault("red_team_status", "not_started")
+    diagnostics.setdefault("correction_attempts", 0)
+    diagnostics.setdefault("unresolved_high_count", 0)
+    diagnostics.setdefault("unresolved_medium_count", 0)
+    diagnostics.setdefault("unresolved_low_count", 0)
+    diagnostics.setdefault("retrievers", {})
+    return diagnostics
+
+
+def _record_artifact_mode(
+    diagnostics: Dict[str, Any],
+    collection: Literal["dimensions", "markets"],
+    artifact_id: str,
+    mode: Literal["llm", "fallback"],
+) -> None:
+    bucket = diagnostics.setdefault(collection, {"llm": [], "fallback": []})
+    values = bucket.setdefault(mode, [])
+    if artifact_id not in values:
+        values.append(artifact_id)
+    values.sort(key=lambda value: str(value).casefold())
+
 
 def robust_json_parse(response: Any) -> Optional[Dict]:
     """Helper per pulire e parsare l'output JSON dell'LLM."""
@@ -749,6 +801,20 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         for d in docs
     ]
     
+    diagnostics = _generation_diagnostics(state)
+    retriever_status = diagnostics.setdefault("retrievers", {})
+    for name, documents, retriever in (
+        ("ReliefWeb", rw_docs, rw),
+        ("Seerist", seerist_docs, seerist),
+    ):
+        trace = getattr(retriever, "last_trace", None) or {}
+        if trace.get("error"):
+            retriever_status[name] = "failed"
+        elif documents:
+            retriever_status[name] = "completed"
+        else:
+            retriever_status[name] = "no_results"
+
     updates = {
         "contextual_documents": docs,
         "document_references": refs,
@@ -756,6 +822,7 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         "reliefweb_documents": list(rw_docs),
         "context_counts": context_counts,
         "retriever_traces": retriever_traces,
+        "generation_diagnostics": diagnostics,
         "current_node": "context_retrieval",
     }
     if warnings:
@@ -770,8 +837,11 @@ def node_context_extractor(state: MFIReportState) -> dict:
     logger.info("[ContextExtractor] Classifying contextual evidence")
     docs = state.get("contextual_documents", [])
     if not docs:
+        diagnostics = _generation_diagnostics(state)
+        diagnostics["context_extraction_mode"] = "not_applicable"
         return {
             "context_evidence": [],
+            "generation_diagnostics": diagnostics,
             "current_node": "context_extractor",
         }
 
@@ -822,9 +892,12 @@ Output JSON:
         context_evidence = []
         parse_flags = []
         llm_calls = 0
+    diagnostics = _generation_diagnostics(state)
+    diagnostics["context_extraction_mode"] = "llm" if llm_calls else "fallback"
     updates = {
         "context_evidence": context_evidence,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "generation_diagnostics": diagnostics,
         "current_node": "context_extractor",
     }
     if parse_flags:
@@ -1229,6 +1302,8 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
     targets = state.get("correction_targets") or []
     repairing = bool(targets)
     llm_calls = 0
+    diagnostics = _generation_diagnostics(state)
+    fallback_dimensions: List[str] = []
 
     for dimension_profile in dimensions:
         dimension = str(dimension_profile["dimension"])
@@ -1322,17 +1397,32 @@ Relevant targets:
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
             llm_calls += 1
+            deterministic_fallback = fallback_dimension_narrative(
+                dimension_profile,
+                assessment_profile=profile,
+            )
             drafted = parse_dimension_narrative(
                 result,
                 dimension_profile=dimension_profile,
                 assessment_profile=profile,
             )
+            mode = "fallback" if drafted == deterministic_fallback else "llm"
+            _record_artifact_mode(diagnostics, "dimensions", dimension, mode)
+            if mode == "fallback":
+                fallback_dimensions.append(dimension)
         except Exception as exc:
             logger.error("Dimension %s drafting error: %s", dimension, exc)
             drafted = fallback_dimension_narrative(
                 dimension_profile,
                 assessment_profile=profile,
             )
+            _record_artifact_mode(
+                diagnostics,
+                "dimensions",
+                dimension,
+                "fallback",
+            )
+            fallback_dimensions.append(dimension)
         if repairing and previous and flagged_fields:
             merged = dict(previous)
             for field_name in flagged_fields:
@@ -1342,11 +1432,19 @@ Relevant targets:
         else:
             narratives[dimension] = drafted
 
-    return {
+    updates = {
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "generation_diagnostics": diagnostics,
         "current_node": "dimension_drafter",
     }
+    if fallback_dimensions:
+        updates["warnings"] = [
+            "Deterministic narrative fallback used for dimension(s): "
+            + ", ".join(sorted(fallback_dimensions, key=str.casefold))
+            + "."
+        ]
+    return updates
 
 
 def node_market_recommendations_drafter(state: MFIReportState) -> dict:
@@ -1367,6 +1465,8 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
     targets = state.get("correction_targets") or []
     repairing = bool(targets)
     llm_calls = 0
+    diagnostics = _generation_diagnostics(state)
+    fallback_markets: List[str] = []
 
     for market_profile in priority_profiles:
         market_name = str(market_profile["market_name"])
@@ -1440,13 +1540,25 @@ Relevant targets:
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
             llm_calls += 1
+            deterministic_fallback = fallback_market_narrative(market_profile)
             drafted = parse_market_narrative(
                 result,
                 market_profile=market_profile,
             )
+            mode = "fallback" if drafted == deterministic_fallback else "llm"
+            _record_artifact_mode(diagnostics, "markets", market_name, mode)
+            if mode == "fallback":
+                fallback_markets.append(market_name)
         except Exception as exc:
             logger.error("Market %s drafting error: %s", market_name, exc)
             drafted = fallback_market_narrative(market_profile)
+            _record_artifact_mode(
+                diagnostics,
+                "markets",
+                market_name,
+                "fallback",
+            )
+            fallback_markets.append(market_name)
         if repairing and previous and flagged_fields:
             merged = dict(previous)
             for field_name in flagged_fields:
@@ -1456,11 +1568,19 @@ Relevant targets:
         else:
             narratives[market_name] = drafted
 
-    return {
+    updates = {
         "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "generation_diagnostics": diagnostics,
         "current_node": "market_recommendations_drafter",
     }
+    if fallback_markets:
+        updates["warnings"] = [
+            "Deterministic narrative fallback used for market(s): "
+            + ", ".join(sorted(fallback_markets, key=str.casefold))
+            + "."
+        ]
+    return updates
 
 
 # ============================================================================
@@ -1557,23 +1677,40 @@ Relevant targets:
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
+        deterministic_fallback = fallback_executive_narrative(profile)
         drafted = parse_executive_narrative(result, assessment_profile=profile)
         llm_calls = 1
+        executive_mode = (
+            "fallback" if drafted == deterministic_fallback else "llm"
+        )
     except Exception as exc:
         logger.error("Executive summary error: %s", exc)
         drafted = fallback_executive_narrative(profile)
         llm_calls = 0
+        executive_mode = "fallback"
     if repairing and previous and flagged_fields:
         merged = dict(previous)
         for field_name in flagged_fields:
             if field_name in drafted:
                 merged[field_name] = drafted[field_name]
         drafted = merged
-    return {
+    diagnostics = _generation_diagnostics(state)
+    if (
+        diagnostics.get("executive_summary_mode") != "fallback"
+        or executive_mode == "fallback"
+    ):
+        diagnostics["executive_summary_mode"] = executive_mode
+    updates = {
         "executive_summary_narrative": drafted,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "generation_diagnostics": diagnostics,
         "current_node": "executive_summary_drafter",
     }
+    if executive_mode == "fallback":
+        updates["warnings"] = [
+            "Deterministic narrative fallback used for the executive summary."
+        ]
+    return updates
 
 
 # ============================================================================
@@ -1686,8 +1823,13 @@ Return:
     try:
         response = get_model().invoke([HumanMessage(content=prompt)])
         payload = robust_json_parse(response)
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("flags"), list
+        ):
+            raise ValueError("Red-Team response does not satisfy its schema")
         flags = normalize_red_team_flags(payload)
         llm_calls = 1
+        red_team_status = "completed"
     except Exception as exc:
         logger.error("Red-Team review error: %s", exc)
         flags = [
@@ -1710,15 +1852,19 @@ Return:
             }
         ]
         llm_calls = 0
+        red_team_status = "failed"
     qa_review = build_qa_review(
         state.get("deterministic_flags", []),
         flags,
         correction_attempts=state.get("correction_attempts", 0),
     )
+    diagnostics = _generation_diagnostics(state)
+    diagnostics["red_team_status"] = red_team_status
     return {
         "red_team_flags": flags,
         "qa_review": qa_review,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "generation_diagnostics": diagnostics,
         "current_node": "red_team",
     }
 
@@ -1869,6 +2015,18 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             "Narrative QA completed with unresolved material issues. "
             "Affected claims are marked unverified; consult the QA notices."
         )
+    severity_counts = Counter(
+        str(flag.get("severity")) for flag in combined if isinstance(flag, dict)
+    )
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "correction_attempts": state.get("correction_attempts", 0),
+            "unresolved_high_count": int(severity_counts.get("high", 0)),
+            "unresolved_medium_count": int(severity_counts.get("medium", 0)),
+            "unresolved_low_count": int(severity_counts.get("low", 0)),
+        }
+    )
     return {
         "dimension_narratives": _mark_unresolved_claims(
             state.get("dimension_narratives", {}), flag_ids_by_claim
@@ -1880,6 +2038,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             state.get("executive_summary_narrative", {}), flag_ids_by_claim
         ),
         "qa_review": review,
+        "generation_diagnostics": diagnostics,
         "correction_targets": [],
         "warnings": warnings,
         "current_node": "finalize_qa",
@@ -1977,7 +2136,8 @@ def run_mfi_report_generation(
     data_collection_end: str,
     markets: List[str],
     csv_data: Optional[Dict[str, Any]] = None,
-    on_step: Optional[OnStepCallback] = None
+    on_step: Optional[OnStepCallback] = None,
+    release_control: Optional[MFIReleaseControl] = None,
 ) -> dict:
     """
     Entry point per la generazione del MFI Report.
@@ -1985,16 +2145,64 @@ def run_mfi_report_generation(
     Returns:
         Stato finale con report completo
     """
+    control = require_mfi_analysis_v2(release_control)
+    logger.info(
+        "MFI Drafter 2.0 generation started",
+        extra={
+            "mfi_event": "generation_started",
+            "mfi_analysis_version": control.analysis_version,
+            "mfi_deployment_revision": control.deployment_revision,
+            "mfi_country": country,
+        },
+    )
     initial_state = create_initial_state(
         country=country,
         data_collection_start=data_collection_start,
         data_collection_end=data_collection_end,
         markets=markets,
         csv_data=csv_data,
+        release_control=control,
     )
     
     agent = build_graph(on_step=on_step)
-    result = agent.invoke(initial_state)
+    try:
+        result = agent.invoke(initial_state)
+    except Exception:
+        logger.exception(
+            "MFI Drafter 2.0 generation failed",
+            extra={
+                "mfi_event": "generation_failed",
+                "mfi_analysis_version": control.analysis_version,
+                "mfi_deployment_revision": control.deployment_revision,
+                "mfi_country": country,
+            },
+        )
+        raise
     for key in ("seerist_documents", "reliefweb_documents"):
         result.pop(key, None)
+    diagnostics = result.get("generation_diagnostics") or {}
+    logger.info(
+        "MFI Drafter 2.0 generation completed",
+        extra={
+            "mfi_event": "generation_completed",
+            "mfi_analysis_version": control.analysis_version,
+            "mfi_deployment_revision": control.deployment_revision,
+            "mfi_country": country,
+            "mfi_qa_status": (result.get("qa_review") or {}).get("status"),
+            "mfi_llm_calls": result.get("llm_calls", 0),
+            "mfi_correction_attempts": result.get("correction_attempts", 0),
+            "mfi_fallback_dimensions": len(
+                (diagnostics.get("dimensions") or {}).get("fallback", [])
+            ),
+            "mfi_fallback_markets": len(
+                (diagnostics.get("markets") or {}).get("fallback", [])
+            ),
+            "mfi_methodology_warning_codes": sorted(
+                str(item.get("code"))
+                for item in result.get("methodology_warnings", [])
+                if isinstance(item, dict) and item.get("code")
+            ),
+            "mfi_retriever_status": diagnostics.get("retrievers", {}),
+        },
+    )
     return result

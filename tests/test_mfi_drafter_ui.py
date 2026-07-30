@@ -19,7 +19,14 @@ class FakeUpload:
 
 
 class FakeMFIBackend:
-    def __init__(self, *, upload=None, validation=None, result=None):
+    def __init__(
+        self,
+        *,
+        upload=None,
+        validation=None,
+        result=None,
+        generation_enabled=True,
+    ):
         self.upload = upload
         self.result = result
         self.validation = validation or {
@@ -30,9 +37,23 @@ class FakeMFIBackend:
         }
         self.requests = []
         self.runs = []
+        self.generation_enabled = generation_enabled
 
     def request_json(self, method, path, **kwargs):
         self.requests.append((method, path, kwargs))
+        if path == "/mfi-drafter/info":
+            return {
+                "generation_enabled": self.generation_enabled,
+                "release_control": {
+                    "analysis_version": (
+                        "2" if self.generation_enabled else "1"
+                    ),
+                    "enabled": self.generation_enabled,
+                    "configuration_status": "configured",
+                    "service_name": "mfi-drafter",
+                    "deployment_revision": "test",
+                },
+            }
         assert path == "/mfi-drafter/validate-csv"
         return self.validation
 
@@ -99,6 +120,25 @@ def test_mfi_form_removes_override_controls(monkeypatch):
     assert not [field for field in app.text_input if "Override" in field.label]
     assert not [box for box in app.checkbox if "Override" in box.label]
     assert not [field for field in app.date_input if "Override" in field.label]
+
+
+def test_phase4_disabled_deployment_disables_generation_but_keeps_page(
+    monkeypatch,
+):
+    backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        generation_enabled=False,
+    )
+    app = _app(monkeypatch, backend)
+
+    assert not app.exception
+    button = _element(app.button, "Generate report")
+    assert button.disabled is True
+    assert any(
+        "not enabled in this deployment" in warning.value
+        for warning in app.warning
+    )
+    assert backend.runs == []
 
 
 def test_invalid_mfi_metadata_opens_dialog_and_does_not_start_run(monkeypatch):

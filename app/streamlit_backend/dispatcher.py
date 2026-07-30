@@ -44,6 +44,11 @@ from app.services.mfi_drafter.data_loader import (
 from app.services.mfi_drafter.compatibility import (
     canonical_and_legacy_response_fields,
 )
+from app.services.mfi_drafter.features import (
+    MFIAnalysisVersionDisabled,
+    mfi_release_control,
+    require_mfi_analysis_v2,
+)
 from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
@@ -365,10 +370,14 @@ def _update_live_metadata(
 
 
 def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "release_control": state.get("release_control", {}),
+        "generation_diagnostics": state.get("generation_diagnostics", {}),
+    }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
-        return {}
-    return {
+        return metadata
+    metadata.update({
         "analysis_version": profile.get("analysis_version"),
         "analysis_schema_version": profile.get("analysis_schema_version"),
         "priority_dimension_names": profile.get("priority_dimension_names", []),
@@ -378,7 +387,15 @@ def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "narrative_schema_version": state.get("narrative_schema_version", "2.0"),
         "claim_validation": state.get("claim_validation", {}),
         "qa_review": state.get("qa_review", {}),
-    }
+    })
+    return metadata
+
+
+def _require_enabled_mfi_release_control():
+    try:
+        return require_mfi_analysis_v2()
+    except MFIAnalysisVersionDisabled as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_dict()) from exc
 
 
 def _build_mfi_report_output(
@@ -404,6 +421,11 @@ def _build_mfi_report_output(
         "analysis_schema_version": result.get("analysis_schema_version", "2.0"),
         "methodology_version": result.get("methodology_version", "databridge-current"),
         "score_authority": result.get("score_authority", "synthetic_mock"),
+        "release_control": (
+            result.get("release_control")
+            or mfi_release_control().model_dump()
+        ),
+        "generation_diagnostics": result.get("generation_diagnostics", {}),
         "excluded_market_records": result.get("excluded_market_records", []),
         "methodology_warnings": result.get("methodology_warnings", []),
         "survey_metadata": result.get("survey_metadata", {}),
@@ -1063,7 +1085,15 @@ def _dispatch_mfi_drafter(
     if method == "GET" and parts == ["info"]:
         return _json_response(_mfi_drafter_info())
     if method == "GET" and parts == ["health"]:
-        return _json_response({"status": "healthy", "service": "mfi-drafter"})
+        control = mfi_release_control()
+        return _json_response(
+            {
+                "status": "healthy",
+                "service": "mfi-drafter",
+                "generation_enabled": control.enabled,
+                "release_control": control.model_dump(),
+            }
+        )
     if method == "GET" and parts == ["dimensions"]:
         return _json_response(_mfi_drafter_dimensions())
     if method == "GET" and parts == ["sample-markets"]:
@@ -1072,6 +1102,7 @@ def _dispatch_mfi_drafter(
 
 
 def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
+    release_control = _require_enabled_mfi_release_control()
     if not isinstance(json_body, dict):
         raise LocalHTTPException(400, "Invalid JSON body")
 
@@ -1088,6 +1119,7 @@ def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
             data_collection_start=data_collection_start,
             data_collection_end=data_collection_end,
             markets=markets,
+            release_control=release_control,
         )
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
@@ -1109,6 +1141,7 @@ def _mfi_drafter_generate_from_csv(
     files: Any,
     params: Dict[str, Any],
 ) -> LocalResponse:
+    release_control = _require_enabled_mfi_release_control()
     upload = _extract_file(files, "file")
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
@@ -1144,6 +1177,7 @@ def _mfi_drafter_generate_from_csv(
             data_collection_end=csv_data["data_collection_end"],
             markets=csv_data["markets"],
             csv_data=csv_data,
+            release_control=release_control,
         )
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
@@ -1179,6 +1213,7 @@ def _mfi_drafter_generate_from_csv_async(
     files: Any,
     params: Dict[str, Any],
 ) -> LocalResponse:
+    release_control = _require_enabled_mfi_release_control()
     upload = _extract_file(files, "file")
     if upload is None or not upload.filename:
         raise LocalHTTPException(400, "Missing filename")
@@ -1207,6 +1242,10 @@ def _mfi_drafter_generate_from_csv_async(
 
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
+    update_run(
+        run_id,
+        metadata={"release_control": release_control.model_dump()},
+    )
 
     progress_map = {
         "mfi_data_agent": 10,
@@ -1299,6 +1338,7 @@ def _mfi_drafter_generate_from_csv_async(
                 markets=csv_data["markets"],
                 csv_data=csv_data,
                 on_step=on_step,
+                release_control=release_control,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
@@ -1318,11 +1358,16 @@ def _mfi_drafter_generate_from_csv_async(
 
 
 def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
+    release_control = _require_enabled_mfi_release_control()
     if not isinstance(json_body, dict):
         raise LocalHTTPException(400, "Invalid JSON body")
 
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
+    update_run(
+        run_id,
+        metadata={"release_control": release_control.model_dump()},
+    )
 
     progress_map = {
         "mfi_data_agent": 10,
@@ -1414,6 +1459,7 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
                 data_collection_end=json_body.get("data_collection_end"),
                 markets=json_body.get("markets"),
                 on_step=on_step,
+                release_control=release_control,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
@@ -1506,17 +1552,28 @@ def _mfi_drafter_export_docx(run_id: str, *, json_body: Any) -> LocalResponse:
         "Content-Disposition": build_content_disposition(filename),
         "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
+    logger.info(
+        "MFI Drafter DOCX export completed",
+        extra={
+            "mfi_event": "docx_export_completed",
+            "mfi_run_id": run_id,
+            "mfi_docx_bytes": len(docx_bytes),
+        },
+    )
     return LocalResponse(status_code=200, headers=headers, content=docx_bytes)
 
 
 def _mfi_drafter_info() -> Dict[str, Any]:
+    release_control = mfi_release_control()
     return {
         "id": "mfi-drafter",
         "name": "MFI Report Generator",
         "description": "Generates full Market Functionality Index (MFI) reports. "
         "Analyzes 9 market functionality dimensions and generates "
         "visualizations, an executive summary, and recommendations.",
-        "version": "1.1.0",
+        "version": "2.0.0",
+        "release_control": release_control.model_dump(),
+        "generation_enabled": release_control.enabled,
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -1544,6 +1601,10 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         },
         "outputs": {
             "run_id": "Unique generation identifier",
+            "release_control": "Immutable Phase 4 deployment-control snapshot",
+            "generation_diagnostics": (
+                "Drafting provenance, retriever status, fallback use, and QA counts"
+            ),
             "mean_mfi_across_assessed_markets": (
                 "Unrounded unweighted mean across included Full MFI markets"
             ),
