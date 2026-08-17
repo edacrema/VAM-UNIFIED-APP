@@ -1089,7 +1089,10 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             ReportBlock(
                 type="figure",
                 figure_id="geographic_map",
-                caption="Stored assessed-market MFI scores by location",
+                caption=(
+                    "Stored assessed-market MFI scores by location; numbered callouts "
+                    "identify selected review markets"
+                ),
                 width=7.0,
             )
         )

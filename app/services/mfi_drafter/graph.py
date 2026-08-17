@@ -70,6 +70,14 @@ from .narrative import (
     unmatched_high_claim_ids,
     validate_structured_narratives,
 )
+from .visualization import (
+    MAP_LABEL_MAX,
+    MFIMapLabelInput,
+    MFIVisualizationContractError,
+    format_market_coverage,
+    place_map_callouts,
+    validate_dimension_chart_coverage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -409,18 +417,24 @@ def _generate_simple_geographic_map(
     visualizations: Dict[str, str],
 ) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     lats = [float(m["latitude"]) for m in markets_with_coords]
     lons = [float(m["longitude"]) for m in markets_with_coords]
     mfi_scores = [float(m["overall_mfi"]) for m in markets_with_coords]
     names = [str(m.get("market_name", "")).strip() for m in markets_with_coords]
-    priority_names = set(
-        (state.get("assessment_profile") or {}).get("priority_market_names", [])
-    )
+    priority_names = {
+        str(name).strip()
+        for name in (state.get("assessment_profile") or {}).get(
+            "priority_market_names", []
+        )
+        if str(name).strip()
+    }
     point_sizes = [150 if name in priority_names else 80 for name in names]
     line_widths = [1.5 if name in priority_names else 0.5 for name in names]
 
-    fig, ax = plt.subplots(figsize=(12, 10))
+    fig, ax = plt.subplots(figsize=(14, 10))
+    fig.subplots_adjust(left=0.08, right=0.70, bottom=0.09, top=0.90)
     scatter = ax.scatter(
         lons,
         lats,
@@ -433,17 +447,6 @@ def _generate_simple_geographic_map(
         linewidths=line_widths,
     )
 
-    for lon, lat, name in zip(lons, lats, names):
-        if name in priority_names:
-            ax.annotate(
-                name,
-                (lon, lat),
-                fontsize=7,
-                fontweight="bold",
-                xytext=(3, 3),
-                textcoords="offset points",
-            )
-
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     country = str(state.get("country", "")).strip()
@@ -454,10 +457,96 @@ def _generate_simple_geographic_map(
         fontweight="bold",
     )
 
-    cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, pad=0.02)
     cbar.set_label("Stored MFI score (0-10)")
 
-    plt.tight_layout()
+    profile = state.get("assessment_profile") or {}
+    market_profiles = {
+        str(item.get("market_name", "")).strip(): item
+        for item in profile.get("markets", [])
+        if isinstance(item, dict) and str(item.get("market_name", "")).strip()
+    }
+    callout_inputs: list[MFIMapLabelInput] = []
+    for lon, lat, name in zip(lons, lats, names):
+        if name not in priority_names:
+            continue
+        market_profile = market_profiles.get(name)
+        if not isinstance(market_profile, dict):
+            raise MFIVisualizationContractError(
+                f"Selected market {name!r} has coordinates but no market profile"
+            )
+        try:
+            selection_order = int(market_profile["selection_order"])
+            score_rank = int(market_profile["score_rank"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MFIVisualizationContractError(
+                f"Selected market {name!r} lacks typed rank metadata"
+            ) from exc
+        callout_inputs.append(
+            MFIMapLabelInput(
+                market_name=name,
+                longitude=lon,
+                latitude=lat,
+                selection_order=selection_order,
+                score_rank=score_rank,
+            )
+        )
+
+    placements = place_map_callouts(ax, callout_inputs, maximum=MAP_LABEL_MAX)
+    for placement in placements:
+        ax.annotate(
+            str(placement.number),
+            (placement.longitude, placement.latitude),
+            fontsize=7,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            xytext=placement.offset_points,
+            textcoords="offset points",
+            bbox={
+                "boxstyle": "circle,pad=0.25",
+                "facecolor": "white",
+                "edgecolor": "black",
+                "linewidth": 0.7,
+            },
+            arrowprops={
+                "arrowstyle": "-",
+                "color": "#555555",
+                "linewidth": 0.6,
+                "shrinkA": 4,
+                "shrinkB": 3,
+            },
+            zorder=5,
+        )
+
+    if placements:
+        handles = [
+            Line2D(
+                [],
+                [],
+                linestyle="none",
+                marker="o",
+                markerfacecolor="white",
+                markeredgecolor="black",
+                markersize=6,
+                label=(
+                    f"{placement.number}. {placement.market_name} "
+                    f"(score rank {placement.score_rank})"
+                ),
+            )
+            for placement in placements
+        ]
+        fig.legend(
+            handles=handles,
+            title="Selected markets",
+            loc="upper left",
+            bbox_to_anchor=(0.73, 0.88),
+            borderaxespad=0.0,
+            fontsize=7,
+            title_fontsize=8,
+            frameon=True,
+        )
+
     visualizations["geographic_map"] = save_plot_to_base64()
 
 
@@ -1090,6 +1179,11 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
                 and item.get("region")
                 and item.get("statistics", {}).get("mean") is not None
             }
+            coverage = validate_dimension_chart_coverage(
+                dim_data.get("statistics", {}).get("coverage"),
+                plotted_market_count=len(sorted_markets),
+                dimension=dim_name,
+            )
             fig_height = max(6, len(markets) * 0.3)
             fig, ax = plt.subplots(figsize=(10, fig_height))
 
@@ -1125,11 +1219,9 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             ax.set_yticklabels(markets, fontsize=8)
             ax.set_xlabel("Stored dimension score (0-10)")
             ax.set_xlim(0, 10)
-            coverage = dim_data.get("statistics", {}).get("coverage", {})
             ax.set_title(
                 f"{dim_name} by assessed market\n"
-                f"Coverage: {coverage.get('available_count', 0)}/"
-                f"{coverage.get('total_count', 0)} markets",
+                f"Coverage: {format_market_coverage(coverage)}",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -1284,6 +1376,9 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
             _generate_simple_geographic_map(
                 state, markets_with_coords, visualizations
             )
+    except MFIVisualizationContractError:
+        logger.exception("MFI visualization contract violation")
+        raise
     except Exception as e:
         logger.error(f"Error generating visualizations: {e}")
 

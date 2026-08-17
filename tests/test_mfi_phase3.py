@@ -634,7 +634,13 @@ def test_report_delivers_prominent_unresolved_qa_warning(phase3_bundle):
 
 
 def test_graph_visuals_use_neutral_market_distribution(monkeypatch, phase3_bundle):
-    monkeypatch.setattr(graph, "save_plot_to_base64", lambda: "image")
+    def close_plot_and_return_image():
+        import matplotlib.pyplot as plt
+
+        plt.close()
+        return "image"
+
+    monkeypatch.setattr(graph, "save_plot_to_base64", close_plot_and_return_image)
     update = graph.node_mfi_graph_designer(
         {
             "country": "Testland",

@@ -92,6 +92,11 @@ Its two ratchet markers were removed and the tests now assert the corrected beha
 `tests/test_mfi_r0_diagnostic.py`, `tests/test_mfi_r0_inspector.py`, and the dedicated
 `tests/test_mfi_r1_evidence_classification.py`.
 
+**FIX-04 (dimension charts rendered false `0/0` coverage)** — closed in R5. The
+diagnostic ratchet is now a passing assertion across all nine dimensions, and dedicated
+coverage-contract tests reject missing, malformed, or internally inconsistent typed
+coverage before a chart can be delivered.
+
 ### Current ledger
 
 | Test location | Defect | Owning phase |
@@ -100,18 +105,18 @@ Its two ratchet markers were removed and the tests now assert the corrected beha
 | artifact | Unweighted means of market rates worded as respondent shares (FIX-03) | R3 |
 | artifact | Markdown delimiters survive into the export (FIX-08) | R3 |
 | artifact, inspector | No claim-level validation marker; QA findings never tabulated (FIX-01) | R4 |
-| diagnostic | Dimension charts render `0/0` coverage (FIX-04) | R5 |
 | all three | Tables exported with no presentation projection (FIX-05) | R6 |
 | all three | Context heading emitted empty; coverage restated per citation (FIX-07, FIX-09) | R7 |
 | artifact, inspector | Boilerplate repeated verbatim across dimensions (FIX-11) | R8 |
 
 ### Not covered by automated measurement
 
-**FIX-10 (overlapping map labels)** has no entry. Label collision is a geometric property
-of rendered output, and text inspection cannot see it. R5 must therefore carry its own
-label-placement unit tests over synthetic coordinates — asserting a deterministic label
-budget and non-overlapping label boxes — plus visual approval of the rendered fixture. The
-absence of a ratchet entry is a real gap in coverage, not a sign the defect is fixed.
+**FIX-10 (overlapping map labels)** is closed in R5 without a text-inspector entry. Label
+collision is a geometric property of rendered output, so its regression tests operate on
+synthetic sparse, near-coincident, and fully coincident coordinates. They assert the
+15-label budget, deterministic rank/name ordering, unchanged source points, collision-free
+label boxes, and the reserved edge-lane fallback; the graph smoke test validates the
+rendered PNG and compact numbered legend.
 
 Two further measurements are recorded for FIX-02 and FIX-03 in artifact mode only. The
 deterministic pipeline writes fallback narratives that contain neither defect, so a live

@@ -29,6 +29,7 @@ from .schemas import (
     MFIClaimCatalogEntry,
     MFIClaimValidationResult,
     MFIContextEvidenceStatement,
+    MFICoverageSummary,
     MFICorrectionAttemptRecord,
     MFICorrectionTarget,
     MFIDimensionNarrative,
@@ -39,6 +40,7 @@ from .schemas import (
     MFIQAReview,
     MFISubdimensionNarrative,
 )
+from .visualization import format_market_coverage
 
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?%?")
 _MATERIAL_SEVERITIES = {"high", "medium"}
@@ -1687,10 +1689,11 @@ def _allowed_renderings(value: float, unit: str, statistic: str) -> list[str]:
 def _coverage_label(value: Any) -> Optional[str]:
     if not isinstance(value, Mapping):
         return None
-    available = int(value.get("available_market_count") or 0)
-    total = int(value.get("total_assessed_market_count") or 0)
-    ratio = float(value.get("coverage_ratio") or 0.0)
-    return f"{available}/{total} assessed markets ({ratio * 100.0:.1f}%)"
+    try:
+        coverage = MFICoverageSummary.model_validate(value)
+    except (TypeError, ValueError, ValidationError):
+        return None
+    return format_market_coverage(coverage, subject="assessed markets")
 
 
 def _canonical_scope(

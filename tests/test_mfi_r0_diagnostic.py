@@ -140,13 +140,28 @@ def test_baseline_snapshot_is_recorded_and_matches(diagnostic_run) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: dimension charts read the wrong coverage keys and render 0/0 "
-    "(FIX-04, fixed in R5)",
-)
-def test_dimension_charts_report_real_coverage(diagnostic_report) -> None:
+def test_dimension_charts_report_real_coverage(
+    diagnostic_report, diagnostic_run
+) -> None:
     assert diagnostic_report.zero_coverage_chart_count == 0
+    expected_by_dimension = {
+        str(item["dimension"]): item["statistics"]["coverage"]
+        for item in diagnostic_run.profile["dimensions"]
+    }
+    dimension_titles = [
+        item
+        for item in diagnostic_report.chart_titles
+        if " by assessed market" in item.title and item.has_coverage
+    ]
+    assert len(dimension_titles) == 9
+    for item in dimension_titles:
+        dimension = item.title.split(" by assessed market", 1)[0]
+        expected = expected_by_dimension[dimension]
+        assert item.coverage_available == expected["available_market_count"]
+        assert item.coverage_total == expected["total_assessed_market_count"]
+        assert (
+            f"({float(expected['coverage_ratio']) * 100.0:.1f}%)" in item.title
+        )
 
 
 def test_every_dimension_chart_is_titled_with_coverage(diagnostic_report) -> None:
