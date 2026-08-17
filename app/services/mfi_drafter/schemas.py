@@ -266,6 +266,10 @@ class MFIAnalysisConfig(BaseModel):
     item_max_per_group: int = 3
     ranking_tie_tolerance: float = 1e-6
     quartile_interpolation: Literal["linear"] = "linear"
+    #: Required evidence must reach this share of assessed markets to pass without a
+    #: warning. The default treats any shortfall in required evidence as material, which
+    #: is safe because optional partial representation is classified separately.
+    partial_required_warning_ratio: float = 1.0
 
     @model_validator(mode="after")
     def validate_analysis_config(self) -> "MFIAnalysisConfig":
@@ -292,6 +296,10 @@ class MFIAnalysisConfig(BaseModel):
             raise ValueError("item_max_per_group must be at least 1")
         if self.ranking_tie_tolerance < 0.0:
             raise ValueError("ranking_tie_tolerance cannot be negative")
+        if not 0.0 <= self.partial_required_warning_ratio <= 1.0:
+            raise ValueError(
+                "partial_required_warning_ratio must be between 0 and 1"
+            )
         return self
 
 
@@ -302,6 +310,41 @@ class MFICoverageSummary(BaseModel):
     total_assessed_market_count: int
     missing_count: int
     coverage_ratio: float
+
+
+class MFIEvidenceAvailability(BaseModel):
+    """Why a metric's evidence is incomplete, and whether that warrants a warning.
+
+    Market coverage alone cannot distinguish a required subsection that failed to load
+    from an optional item that simply was not sold in every market. Both are "fewer
+    markets than assessed", but only the first is a methodology problem. This
+    classification carries that distinction so warnings can be raised for genuine
+    evidence failures and coverage can be disclosed neutrally for everything else.
+    """
+
+    classification: Literal[
+        "complete",
+        "partial_required",
+        "partial_optional",
+        "not_applicable",
+        "unusable_required",
+    ]
+    applicability_rule: Literal[
+        "required",
+        "optional_product_group",
+        "optional_item",
+        "quality_applicability",
+    ] = "required"
+    role: str = ""
+    represented_market_count: int = 0
+    total_assessed_market_count: int = 0
+    invalid_market_count: int = 0
+    #: True only for classifications that represent a genuine evidence failure.
+    warrants_warning: bool = False
+
+    @property
+    def is_optional(self) -> bool:
+        return self.applicability_rule in {"optional_item", "optional_product_group"}
 
 
 class MFIStatisticalSummary(BaseModel):
@@ -343,6 +386,7 @@ class MFIAnalyzedMetric(BaseModel):
     orientation: str
     evidence_scope: str
     coverage: MFICoverageSummary
+    availability: Optional[MFIEvidenceAvailability] = None
     unfavorable_rate: Optional[float] = None
     weakness_rank: Optional[int] = None
     group_rank: Optional[int] = None
@@ -434,8 +478,52 @@ class MFILimitation(BaseModel):
     metric_ids: List[str] = Field(default_factory=list)
 
 
+MFIAggregationMethod = Literal[
+    "unweighted_market_mean",
+    "market_value",
+    "rank",
+    "count",
+    "coverage",
+]
+MFIPopulationBasis = Literal[
+    "market_level",
+    "trader_level_within_market",
+    "descriptive",
+]
+MFIRepresentationBasis = Literal[
+    "all_assessed_markets",
+    "represented_assessed_markets",
+    "applicable_assessed_markets",
+    "incomplete_assessed_markets",
+    "single_assessed_market",
+    "assessment_dimension_profile",
+    "assessment_input_records",
+]
+
+
+class MFILedgerSemantics(BaseModel):
+    """Explicit aggregation semantics for a ledger entry that cannot be derived.
+
+    Every field is optional and overrides the derived value field by field, so a call
+    site can correct one aspect without restating the rest.
+    """
+
+    aggregation_method: Optional[MFIAggregationMethod] = None
+    population_basis: Optional[MFIPopulationBasis] = None
+    pooled_denominator_available: Optional[bool] = None
+    representation_basis: Optional[MFIRepresentationBasis] = None
+    permitted_subject_phrase: Optional[str] = None
+
+
 class MFIMetricLedgerEntry(BaseModel):
-    """One uniquely addressable value supporting profiles and tables."""
+    """One uniquely addressable value supporting profiles and tables.
+
+    The aggregation fields record *what population a value describes*, which market
+    coverage alone cannot express. An assessment-wide mean of per-market trader rates and
+    a single market's trader proportion are both proportions over the same underlying
+    question, but only the second has a respondent denominator. Recording the difference
+    here is what allows correct wording to be required later.
+    """
 
     ledger_id: str
     label: str
@@ -449,6 +537,19 @@ class MFIMetricLedgerEntry(BaseModel):
     region: Optional[str] = None
     coverage: Optional[MFICoverageSummary] = None
     source_metric_ids: List[str] = Field(default_factory=list)
+    #: How per-unit values were combined into this number.
+    aggregation_method: MFIAggregationMethod = "unweighted_market_mean"
+    #: The elementary unit of observation behind this number's denominator.
+    population_basis: MFIPopulationBasis = "descriptive"
+    #: Whether a denominator for this value exists in the processed data and may
+    #: therefore be stated numerically. False for every trader-level value, because the
+    #: assessment carries no applicability-specific respondent counts.
+    pooled_denominator_available: bool = False
+    #: Which assessed markets stand behind the value.
+    representation_basis: MFIRepresentationBasis = "all_assessed_markets"
+    #: Deterministic noun phrase describing the value correctly. Never contains a digit,
+    #: so quoting it can never introduce an unauthorized numeric token.
+    permitted_subject_phrase: str = ""
 
 
 class MFIDeterministicTableRow(BaseModel):
@@ -508,6 +609,8 @@ class MFIContextEvidenceStatement(BaseModel):
     document_ids: List[str] = Field(default_factory=list)
     validation_status: Literal["pending", "verified", "unverified"] = "pending"
     validation_flags: List[str] = Field(default_factory=list)
+    validation_flag_ids: List[str] = Field(default_factory=list)
+    substituted: bool = False
 
 
 class MFIClaimCatalogEntry(BaseModel):
@@ -527,6 +630,18 @@ class MFIClaimCatalogEntry(BaseModel):
     region: Optional[str] = None
     coverage_label: Optional[str] = None
     source_metric_ids: List[str] = Field(default_factory=list)
+    aggregation_method: MFIAggregationMethod = "unweighted_market_mean"
+    population_basis: MFIPopulationBasis = "descriptive"
+    pooled_denominator_available: bool = False
+    representation_basis: MFIRepresentationBasis = "all_assessed_markets"
+    permitted_subject_phrase: str = ""
+    #: Claim scopes this value can legitimately support. Kept separate from ``scope`` so
+    #: that a value can back more than one, which a single canonical scope cannot express.
+    permitted_claim_scopes: List[str] = Field(default_factory=list)
+    #: Representation counts as integers, so a claim can cite the denominator without
+    #: parsing it back out of the formatted coverage label.
+    represented_market_count: Optional[int] = None
+    assessed_market_count: Optional[int] = None
 
 
 class MFINarrativeClaim(BaseModel):
@@ -559,7 +674,13 @@ class MFINarrativeClaim(BaseModel):
         "descriptive",
     ] = "neutral"
     validation_status: Literal["pending", "verified", "unverified"] = "pending"
+    #: Flag codes, which are stable across runs and safe to display.
     validation_flags: List[str] = Field(default_factory=list)
+    #: Flag identifiers, which hash the message and therefore change whenever wording
+    #: does. Kept separate from the codes so a consumer can pick the stable one.
+    validation_flag_ids: List[str] = Field(default_factory=list)
+    #: True when the drafted text was withdrawn and replaced by deterministic wording.
+    substituted: bool = False
 
 
 class MFISubdimensionNarrative(BaseModel):
@@ -609,6 +730,9 @@ class MFIExecutiveNarrative(BaseModel):
     key_findings: List[MFINarrativeClaim] = Field(default_factory=list)
     recommendations: List[MFINarrativeClaim] = Field(default_factory=list)
     limitations: List[MFINarrativeClaim] = Field(default_factory=list)
+    #: Deterministic statement of what the assessment does not establish. Its own field
+    #: rather than a limitation, because the limitation list is truncated for length.
+    scope_statement: Optional[MFINarrativeClaim] = None
 
 
 class MFINarrativeQAFlag(BaseModel):
@@ -668,6 +792,37 @@ class MFICorrectionTarget(BaseModel):
     flag_ids: List[str] = Field(default_factory=list)
 
 
+class MFICorrectionAttemptRecord(BaseModel):
+    """Audit record for one claim or artifact targeted in a correction cycle."""
+
+    attempt_number: int = Field(ge=1)
+    artifact_type: Literal[
+        "context",
+        "dimension",
+        "market",
+        "executive_summary",
+        "global",
+    ]
+    artifact_id: Optional[str] = None
+    field_name: Optional[str] = None
+    claim_id: Optional[str] = None
+    flag_ids: List[str] = Field(default_factory=list)
+    flag_codes: List[str] = Field(default_factory=list)
+    execution_outcome: Literal[
+        "pending",
+        "llm_completed",
+        "deterministic_fallback",
+        "llm_or_schema_failed",
+        "not_executed",
+    ] = "pending"
+    validation_outcome: Literal[
+        "pending",
+        "resolved",
+        "partially_resolved",
+        "unresolved",
+    ] = "pending"
+
+
 class MFIQAReview(BaseModel):
     """Final combined deterministic and LLM QA status."""
 
@@ -678,6 +833,9 @@ class MFIQAReview(BaseModel):
         "completed_with_warnings",
     ] = "not_recorded"
     correction_attempts: int = 0
+    correction_history: List[MFICorrectionAttemptRecord] = Field(
+        default_factory=list
+    )
     flags: List[MFINarrativeQAFlag] = Field(default_factory=list)
 
 
@@ -732,6 +890,8 @@ class MFIGenerationDiagnostics(BaseModel):
     unresolved_medium_count: int = 0
     unresolved_low_count: int = 0
     retrievers: Dict[str, str] = Field(default_factory=dict)
+    claim_substitutions: List[Dict[str, Any]] = Field(default_factory=list)
+    unmatched_high_claim_ids: List[str] = Field(default_factory=list)
 
 
 class MFIMarketScoreDistributionEntry(BaseModel):

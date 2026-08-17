@@ -31,6 +31,8 @@ from .schemas import (
     MFIDeterministicTableRow,
     MFIDeterministicTables,
     MFIDimensionProfile,
+    MFIEvidenceAvailability,
+    MFILedgerSemantics,
     MFILimitation,
     MFILocalizedPatterns,
     MFIMarketDimensionProfile,
@@ -43,6 +45,115 @@ from .schemas import (
 
 ANALYSIS_VERSION = "mfi-analysis-phase2-v1"
 _DIMENSION_ORDER = {name: index for index, name in enumerate(DISPLAY_DIMENSIONS)}
+_APPLICABILITY_RULES = {
+    "required",
+    "optional_product_group",
+    "optional_item",
+    "quality_applicability",
+}
+
+# Statistics whose semantics are fixed regardless of the metric's evidence scope.
+#
+# This tier exists because ``_materialize_analyzed_metric`` stamps one inherited
+# ``evidence_scope`` onto all of a metric's ledger entries, so a coverage ratio or a rank
+# can arrive carrying "surveyed_traders_in_market" even though its denominator is markets.
+# Resolving by statistic first corrects that without mutating ``evidence_scope``, which
+# other layers still read.
+_STATISTIC_SEMANTICS: Mapping[str, tuple[str, str]] = {
+    "coverage": ("coverage", "market_level"),
+    "coverage_ratio": ("coverage", "market_level"),
+    "rank": ("rank", "descriptive"),
+    "rank_lowest_first": ("rank", "descriptive"),
+    "count": ("count", "descriptive"),
+    "denominator": ("count", "market_level"),
+}
+
+# Unweighted statistics computed over per-market official scores. ``statistic`` carries
+# which one; the aggregation enum records only that the population is markets.
+_CROSS_MARKET_STATISTICS = frozenset(
+    {
+        "mean",
+        "median",
+        "minimum",
+        "maximum",
+        "q1",
+        "q3",
+        "iqr",
+        "range",
+        "numerator",
+    }
+)
+
+# Assessment-level aggregates of per-market metric values.
+_METRIC_AGGREGATE_STATISTICS = frozenset(
+    {
+        "mean_raw_value",
+        "mean_normalized_value",
+        "derived_unfavorable_rate",
+    }
+)
+
+# Values describing exactly one market.
+_SINGLE_MARKET_STATISTICS = frozenset(
+    {
+        "stored_level_1_score",
+        "market_explanatory_raw_value",
+        "market_explanatory_normalized_value",
+        "derived_market_unfavorable_rate",
+    }
+)
+
+_TRADER_SCOPE = "surveyed_traders_in_market"
+
+_CROSS_MARKET_PHRASES: Mapping[str, str] = {
+    "mean": "the unweighted mean across assessed markets",
+    "median": "the median across assessed markets",
+    "minimum": "the lowest value observed among assessed markets",
+    "maximum": "the highest value observed among assessed markets",
+    "q1": "the first quartile across assessed markets",
+    "q3": "the third quartile across assessed markets",
+    "iqr": "the interquartile range across assessed markets",
+    "range": "the range between the lowest and highest assessed markets",
+    "numerator": "the sum of values across assessed markets",
+    "denominator": "the number of assessed markets contributing to this statistic",
+    "coverage": "the share of assessed markets contributing to this statistic",
+}
+
+_RANK_PHRASES: Mapping[str, str] = {
+    "nine_dimension_assessment_profile": (
+        "the relative weakness rank among the nine assessment dimensions"
+    ),
+    "nine_dimension_market_profile": (
+        "the relative weakness rank among the nine dimensions in this market"
+    ),
+    "included_assessed_markets": "the relative weakness rank among assessed markets",
+    "included_assessed_markets_in_region": (
+        "the relative weakness rank among assessed markets in this region"
+    ),
+}
+
+_REPRESENTATION_SUFFIXES: Mapping[str, str] = {
+    # Complete coverage needs no qualifier: the base phrases already say "across assessed
+    # markets", so appending one only repeats it.
+    "all_assessed_markets": "",
+    "represented_assessed_markets": (
+        "among the assessed markets where {subject} was represented"
+    ),
+    "applicable_assessed_markets": (
+        "among the assessed markets where {subject} was applicable"
+    ),
+    "incomplete_assessed_markets": (
+        "among the assessed markets with usable evidence for {subject}"
+    ),
+}
+
+_AVAILABILITY_TO_REPRESENTATION: Mapping[str, str] = {
+    "complete": "all_assessed_markets",
+    "partial_optional": "represented_assessed_markets",
+    "not_applicable": "applicable_assessed_markets",
+    "partial_required": "incomplete_assessed_markets",
+    "unusable_required": "incomplete_assessed_markets",
+}
 
 
 def build_assessment_profile(
@@ -90,9 +201,27 @@ def build_assessment_profile(
         region: Optional[str] = None,
         coverage: Optional[MFICoverageSummary] = None,
         source_metric_ids: Optional[Iterable[str]] = None,
+        availability: Optional[MFIEvidenceAvailability] = None,
+        subject_label: Optional[str] = None,
+        semantics: Optional[MFILedgerSemantics] = None,
     ) -> str:
         if ledger_id in ledger:
             raise ValueError(f"Duplicate MFI metric-ledger ID: {ledger_id}")
+        derived = _ledger_semantics(
+            statistic=statistic,
+            unit=unit,
+            evidence_scope=evidence_scope,
+            market_name=market_name,
+            region=region,
+            availability=availability,
+            subject_label=subject_label,
+        )
+        if semantics is not None:
+            # Field-by-field so a call site can correct one aspect without restating
+            # the rest of the derivation.
+            derived = derived.model_copy(
+                update=semantics.model_dump(exclude_none=True)
+            )
         ledger[ledger_id] = MFIMetricLedgerEntry(
             ledger_id=ledger_id,
             label=label,
@@ -106,6 +235,11 @@ def build_assessment_profile(
             region=region,
             coverage=coverage,
             source_metric_ids=sorted(set(source_metric_ids or [])),
+            aggregation_method=derived.aggregation_method,
+            population_basis=derived.population_basis,
+            pooled_denominator_available=bool(derived.pooled_denominator_available),
+            representation_basis=derived.representation_basis,
+            permitted_subject_phrase=derived.permitted_subject_phrase or "",
         )
         return ledger_id
 
@@ -159,6 +293,13 @@ def build_assessment_profile(
         evidence_scope="nine_dimension_assessment_profile",
         coverage=full_coverage,
         source_metric_ids=[_official_metric_id(d) for d in DISPLAY_DIMENSIONS],
+        # This mean averages the nine dimension means, not the assessed markets, so the
+        # market-population derivation would describe the wrong denominator.
+        semantics=MFILedgerSemantics(
+            permitted_subject_phrase=(
+                "the mean of the nine dimension means across assessed markets"
+            ),
+        ),
     )
 
     dimension_ranked = _rank_records(
@@ -213,6 +354,11 @@ def build_assessment_profile(
             evidence_scope="included_assessed_markets",
             coverage=full_coverage,
             source_metric_ids=[],
+            semantics=MFILedgerSemantics(
+                permitted_subject_phrase=(
+                    "the number of assessed markets without a region identifier"
+                ),
+            ),
         )
         limitations.append(
             MFILimitation(
@@ -278,7 +424,7 @@ def build_assessment_profile(
                     "assessment.limitation.unavailable_evidence."
                     f"{_slug(dimension)}.count"
                 ),
-                label=f"{dimension} unavailable explanatory metrics",
+                label=f"{dimension} unusable required metrics",
                 value=len(unavailable),
                 statistic="count",
                 unit="count",
@@ -287,18 +433,55 @@ def build_assessment_profile(
                 dimension=dimension,
                 coverage=full_coverage,
                 source_metric_ids=sorted(unavailable),
+                semantics=MFILedgerSemantics(
+                    permitted_subject_phrase=(
+                        "the number of required metrics in this dimension without "
+                        "usable assessment evidence"
+                    ),
+                ),
             )
             limitations.append(
                 MFILimitation(
                     code="unavailable_explanatory_evidence",
                     message=(
-                        f"{dimension} has {len(unavailable)} subsection or driver "
-                        "metric(s) without complete usable assessment evidence."
+                        f"{dimension} has {len(unavailable)} required subsection or "
+                        "driver metric(s) without usable assessment evidence."
                     ),
                     dimension=dimension,
                     metric_ids=sorted(unavailable),
                 )
             )
+
+    # Partial representation of optional items is normal and does not affect the
+    # authoritative Level-1 score, so it is disclosed as coverage rather than warned
+    # about. The ledger entry keeps it citable by the narrative layer.
+    for dimension in DISPLAY_DIMENSIONS:
+        partial_optional = sorted(
+            metric.metric_id
+            for metric in analyzed_drivers.get(dimension, [])
+            if metric.availability is not None
+            and metric.availability.classification == "partial_optional"
+        )
+        if not partial_optional:
+            continue
+        add_ledger(
+            f"assessment.coverage.partial_optional_items.{_slug(dimension)}.count",
+            label=f"{dimension} optional items represented in some assessed markets",
+            value=len(partial_optional),
+            statistic="count",
+            unit="count",
+            orientation="descriptive",
+            evidence_scope="included_assessed_markets",
+            dimension=dimension,
+            coverage=full_coverage,
+            source_metric_ids=partial_optional,
+            semantics=MFILedgerSemantics(
+                permitted_subject_phrase=(
+                    "the number of optional items in this dimension represented in only "
+                    "some assessed markets"
+                ),
+            ),
+        )
 
     if any(
         metric.role == "item_driver" and metric.coverage.available_market_count
@@ -397,6 +580,11 @@ def build_assessment_profile(
             evidence_scope="assessment_input_records",
             coverage=None,
             source_metric_ids=[],
+            semantics=MFILedgerSemantics(
+                permitted_subject_phrase=(
+                    "the number of MFIr-only market records excluded from the assessment"
+                ),
+            ),
         )
         limitations.append(
             MFILimitation(
@@ -809,6 +997,271 @@ def _flatten_metric_summaries(
     return result
 
 
+def _representation_basis(
+    *,
+    statistic: str,
+    evidence_scope: str,
+    availability: Optional[MFIEvidenceAvailability],
+) -> str:
+    """Decide which assessed markets stand behind a value.
+
+    Coverage counts alone cannot separate an optional item that was simply not traded
+    everywhere from required evidence that failed to load, and the two need different
+    wording, so the R1 classification is consulted when it is available.
+    """
+    if evidence_scope == "nine_dimension_assessment_profile":
+        return "assessment_dimension_profile"
+    if evidence_scope == "assessment_input_records":
+        return "assessment_input_records"
+    if statistic in _SINGLE_MARKET_STATISTICS:
+        return "single_assessed_market"
+    if availability is not None:
+        return _AVAILABILITY_TO_REPRESENTATION.get(
+            availability.classification, "all_assessed_markets"
+        )
+    return "all_assessed_markets"
+
+
+_RESPONDENT_NOUNS = ("trader", "respondent", "response", "vendor")
+
+
+def _safe_subject(text: Optional[str]) -> Optional[str]:
+    """Return a subject label only if it is safe inside a permitted phrase.
+
+    Labels come from assessment data and are rejected outright rather than sanitised on
+    two grounds. A digit could be quoted into a claim and would then fail numeric
+    authorization, since only a cited value's own rendering is authorized. A respondent
+    noun would contradict the phrase it sits in — a market-level statistic must never
+    read as though it counted traders, which is the wording defect this metadata exists
+    to make preventable.
+    """
+    if text is None:
+        return None
+    cleaned = str(text).strip()
+    if not cleaned or any(character.isdigit() for character in cleaned):
+        return None
+    lowered = cleaned.casefold()
+    if any(noun in lowered for noun in _RESPONDENT_NOUNS):
+        return None
+    return cleaned
+
+
+def _subject_phrase(
+    *,
+    statistic: str,
+    unit: str,
+    evidence_scope: str,
+    population_basis: str,
+    representation_basis: str,
+    market_name: Optional[str],
+    region: Optional[str],
+    subject_label: Optional[str],
+) -> str:
+    """Return a deterministic noun phrase describing the value correctly.
+
+    The phrase never contains a digit. It is exposed to the drafting prompts, and numeric
+    authorization only accepts tokens matching a cited value's rendering, so a digit
+    quoted from here would be rejected as an unauthorized number.
+    """
+    # Market and region names are never interpolated: a name such as "Camp 4" would put a
+    # digit into a phrase the drafting prompts can quote, and numeric authorization would
+    # then reject it as an unauthorized number. Consumers already receive `market_name`
+    # and `region` as separate fields.
+    subject = _safe_subject(subject_label) or "this item"
+    suffix_template = _REPRESENTATION_SUFFIXES.get(representation_basis, "")
+    suffix = suffix_template.format(subject=subject) if suffix_template else ""
+    where = " in this market" if market_name else ""
+
+    if statistic == "rank":
+        return "the relative weakness rank among comparable evidence metrics"
+
+    if statistic == "rank_lowest_first":
+        return _RANK_PHRASES.get(evidence_scope, "the relative weakness rank")
+
+    if statistic == "coverage_ratio":
+        return "the share of assessed markets with usable evidence for this metric"
+
+    if statistic in _CROSS_MARKET_PHRASES:
+        phrase = _CROSS_MARKET_PHRASES[statistic]
+        return f"{phrase} in this region" if region else phrase
+
+    if statistic in _METRIC_AGGREGATE_STATISTICS:
+        if population_basis == "trader_level_within_market":
+            base = {
+                "derived_unfavorable_rate": (
+                    "the unweighted mean market-level unfavorable rate"
+                ),
+                "mean_raw_value": (
+                    "the unweighted mean of market-level trader proportions"
+                ),
+                "mean_normalized_value": (
+                    "the unweighted mean of market-level normalized scores"
+                ),
+            }[statistic]
+        else:
+            base = {
+                "derived_unfavorable_rate": (
+                    "the share of assessed markets where this condition was unfavorable"
+                ),
+                "mean_raw_value": (
+                    "the share of assessed markets satisfying this condition"
+                    if unit == "proportion"
+                    else "the unweighted mean value across assessed markets"
+                ),
+                "mean_normalized_value": "the unweighted mean normalized score",
+            }[statistic]
+        return f"{base} {suffix}" if suffix else base
+
+    if statistic == "stored_level_1_score":
+        # "Level-1" would put a digit into a quotable phrase; say it in words instead.
+        return "the stored authoritative score recorded for this market"
+
+    if statistic in _SINGLE_MARKET_STATISTICS:
+        if population_basis == "trader_level_within_market":
+            if statistic == "derived_market_unfavorable_rate":
+                return (
+                    f"the proportion of surveyed traders{where} reporting the "
+                    "unfavorable condition"
+                )
+            if statistic == "market_explanatory_normalized_value":
+                return f"the normalized score derived from surveyed traders{where}"
+            return f"the proportion of surveyed traders{where}"
+        if statistic == "market_explanatory_normalized_value":
+            return "the normalized score recorded for this market"
+        if unit == "proportion":
+            return "the condition recorded for this market"
+        return "the value recorded for this market"
+
+    return "this deterministic assessment value"
+
+
+def _ledger_semantics(
+    *,
+    statistic: str,
+    unit: str,
+    evidence_scope: str,
+    market_name: Optional[str] = None,
+    region: Optional[str] = None,
+    availability: Optional[MFIEvidenceAvailability] = None,
+    subject_label: Optional[str] = None,
+) -> MFILedgerSemantics:
+    """Derive aggregation semantics for one ledger entry.
+
+    Resolution is tiered and first match wins. Statistic is consulted before evidence
+    scope because a metric's scope is inherited unchanged by all of its ledger entries,
+    including ones whose denominator is markets rather than traders.
+
+    Aggregation is never derived from ``market_name``: a market's rank among all assessed
+    markets carries a market name but is not a single-market value.
+
+    Raises:
+        ValueError: if the statistic is not in the derivation table. Failing here is
+            deliberate — every ledger entry passes through this function, so an
+            unmapped statistic is caught at once rather than silently defaulting.
+    """
+    fixed = _STATISTIC_SEMANTICS.get(statistic)
+    if fixed is not None:
+        aggregation_method, population_basis = fixed
+    elif statistic in _CROSS_MARKET_STATISTICS:
+        aggregation_method, population_basis = "unweighted_market_mean", "market_level"
+    elif statistic in _METRIC_AGGREGATE_STATISTICS:
+        aggregation_method = "unweighted_market_mean"
+        population_basis = (
+            "trader_level_within_market"
+            if evidence_scope == _TRADER_SCOPE
+            else "market_level"
+        )
+    elif statistic in _SINGLE_MARKET_STATISTICS:
+        aggregation_method = "market_value"
+        population_basis = (
+            "trader_level_within_market"
+            if evidence_scope == _TRADER_SCOPE
+            else "market_level"
+        )
+    else:
+        raise ValueError(
+            f"Unmapped MFI ledger statistic {statistic!r}; add it to the R2 "
+            "aggregation-semantics derivation table."
+        )
+
+    representation_basis = _representation_basis(
+        statistic=statistic,
+        evidence_scope=evidence_scope,
+        availability=availability,
+    )
+    phrase = _subject_phrase(
+        statistic=statistic,
+        unit=unit,
+        evidence_scope=evidence_scope,
+        population_basis=population_basis,
+        representation_basis=representation_basis,
+        market_name=market_name,
+        region=region,
+        subject_label=subject_label,
+    )
+    return MFILedgerSemantics(
+        aggregation_method=aggregation_method,
+        population_basis=population_basis,
+        # A denominator may be stated only when it is an assessed-market count carried in
+        # ``coverage``. Trader-level values never qualify: the assessment provides no
+        # applicability-specific respondent counts.
+        pooled_denominator_available=(
+            population_basis == "market_level" and aggregation_method != "market_value"
+        ),
+        representation_basis=representation_basis,
+        permitted_subject_phrase=phrase,
+    )
+
+
+def _classify_evidence_availability(
+    *,
+    definition: Any,
+    role: str,
+    available: int,
+    assessed_count: int,
+    invalid: int,
+    raw: Optional[float],
+    config: MFIAnalysisConfig,
+) -> MFIEvidenceAvailability:
+    """Classify why a metric's evidence is incomplete.
+
+    The distinction that matters is *why* a metric covers fewer markets than were
+    assessed. Required evidence that is absent or invalid is a methodology problem. An
+    optional item that was simply not traded in every market is normal, and reporting it
+    as missing evidence is a false alarm — the authoritative Level-1 score does not
+    depend on it.
+    """
+    rule = str(getattr(definition, "applicability_rule", "required") or "required")
+    complete = available >= assessed_count and invalid == 0
+
+    if rule == "quality_applicability":
+        # Food Quality applicability is decided per market by the assessment itself, so
+        # partial coverage is the designed behaviour rather than missing evidence.
+        classification = "complete" if complete else "not_applicable"
+    elif rule in {"optional_item", "optional_product_group"}:
+        classification = "complete" if complete else "partial_optional"
+    elif invalid > 0 or available == 0 or raw is None:
+        classification = "unusable_required"
+    elif available < assessed_count:
+        classification = "partial_required"
+    else:
+        classification = "complete"
+
+    warrants_warning = classification == "unusable_required" or (
+        classification == "partial_required"
+        and available < config.partial_required_warning_ratio * assessed_count
+    )
+    return MFIEvidenceAvailability(
+        classification=classification,
+        applicability_rule=rule if rule in _APPLICABILITY_RULES else "required",
+        role=role,
+        represented_market_count=available,
+        total_assessed_market_count=assessed_count,
+        invalid_market_count=invalid,
+        warrants_warning=warrants_warning,
+    )
+
+
 def _analyze_evidence(
     *,
     dimension: str,
@@ -833,7 +1286,16 @@ def _analyze_evidence(
             or (definition.orientation if definition else "descriptive")
         )
         unfavorable = _unfavorable_rate(raw, orientation)
-        if raw is None or available < assessed_count:
+        availability = _classify_evidence_availability(
+            definition=definition,
+            role=role,
+            available=available,
+            assessed_count=assessed_count,
+            invalid=int(summary.get("missing_count") or 0),
+            raw=raw,
+            config=config,
+        )
+        if availability.warrants_warning:
             unavailable.append(metric_id)
         prepared.append(
             {
@@ -842,6 +1304,7 @@ def _analyze_evidence(
                 "metric_id": metric_id,
                 "role": role,
                 "coverage": coverage,
+                "availability": availability,
                 "raw": raw,
                 "normalized": normalized,
                 "orientation": orientation,
@@ -1060,6 +1523,14 @@ def _materialize_analyzed_metric(
         "dimension": str(summary.get("dimension") or definition.dimension),
         "coverage": item["coverage"],
         "source_metric_ids": source_metric_ids,
+        # Coverage counts alone cannot say *why* a metric covers fewer markets than were
+        # assessed, and an optional item, an inapplicable Food Quality condition, and a
+        # required-evidence failure each need different wording.
+        "availability": item.get("availability"),
+        "subject_label": (
+            (definition.item_name if definition else None)
+            or str(summary.get("display_name") or "")
+        ),
     }
     if item["raw"] is not None:
         ledger_ids.append(
@@ -1121,6 +1592,7 @@ def _materialize_analyzed_metric(
         orientation=common["orientation"],
         evidence_scope=common["evidence_scope"],
         coverage=item["coverage"],
+        availability=item.get("availability"),
         unfavorable_rate=item["unfavorable"],
         weakness_rank=item["weakness_rank"],
         group_rank=item["group_rank"],

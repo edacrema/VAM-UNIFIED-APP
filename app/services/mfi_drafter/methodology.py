@@ -148,6 +148,28 @@ NARRATIVE_PROMPT_CONSTRAINTS = (
     "Do not determine transfer modality from MFI evidence alone.",
 )
 
+# Content prohibitions, kept separate from the evidence contract above because they have a
+# different audience: the review step receives these but has no use for catalog rules.
+NARRATIVE_PROHIBITIONS = (
+    "Do not recommend, reject, compare, or predict the effectiveness of cash, vouchers, "
+    "in-kind assistance, hybrid approaches, or any transfer modality.",
+    "Do not infer affordability, inflation, purchasing power, beneficiary outcomes, or "
+    "programme feasibility from MFI evidence.",
+    "Do not assert that any value caused, drove, led to, exacerbated, eroded, diminished, "
+    "or resulted in any other outcome. Describe patterns, not mechanisms.",
+    "A conditional or hedged form of a prohibited conclusion is still a prohibited "
+    "conclusion. 'could be viable' and 'may be constrained' are not permitted.",
+    "You may state what the evidence does not establish, for example that the Price "
+    "dimension does not by itself measure affordability or purchasing power.",
+    "Recommendations may request further verification, monitoring, consultation, or "
+    "feasibility assessment, and nothing more.",
+    "Describe an unweighted mean of market-level rates using the supplied "
+    "permitted_subject_phrase. Never describe it as a share of traders, respondents, or "
+    "responses.",
+    "Write plain text only. Do not use Markdown delimiters: no backticks, asterisks, "
+    "headings, links, or code fences.",
+)
+
 
 @dataclass(frozen=True)
 class MetricDefinition:

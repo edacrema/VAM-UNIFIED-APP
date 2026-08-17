@@ -1035,6 +1035,20 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
                 st.error(text)
             continue
 
+        if btype == "claim_warning":
+            text = str(block.get("text") or "").strip()
+            meta = block.get("meta") or {}
+            if text:
+                if (
+                    isinstance(meta, dict)
+                    and meta.get("disposition")
+                    == "replaced_by_deterministic_fallback"
+                ):
+                    st.error(text)
+                else:
+                    st.warning(text)
+            continue
+
         if btype == "table":
             meta = block.get("meta")
             if isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":

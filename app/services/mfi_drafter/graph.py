@@ -35,6 +35,7 @@ from .analysis import build_assessment_profile
 from .features import require_mfi_analysis_v2
 from .schemas import (
     MFI_DIMENSIONS,
+    MFICorrectionAttemptRecord,
     MFIMetric,
     MFIReleaseControl,
 )
@@ -43,11 +44,13 @@ from .methodology import (
     DIMENSION_DESCRIPTIONS,
     DRIVERS_BY_DIMENSION,
     METHODOLOGY_VERSION,
+    NARRATIVE_PROHIBITIONS,
     NARRATIVE_PROMPT_CONSTRAINTS,
     NARRATIVE_SCHEMA_VERSION,
     SUBSECTIONS_BY_DIMENSION,
 )
 from .narrative import (
+    apply_unresolved_claim_policy,
     build_claim_catalog,
     build_correction_targets,
     build_qa_review,
@@ -64,6 +67,7 @@ from .narrative import (
     parse_dimension_narrative,
     parse_executive_narrative,
     parse_market_narrative,
+    unmatched_high_claim_ids,
     validate_structured_narratives,
 )
 
@@ -131,6 +135,8 @@ class MFIReportState(TypedDict):
     red_team_flags: List[Dict[str, Any]]
     qa_review: Dict[str, Any]
     correction_targets: List[Dict[str, Any]]
+    correction_history: List[Dict[str, Any]]
+    claim_substitutions: List[Dict[str, Any]]
     warnings: Annotated[List[str], operator.add]
     run_id: str
     correction_attempts: int
@@ -206,9 +212,12 @@ def create_initial_state(
         qa_review={
             "status": "not_recorded",
             "correction_attempts": 0,
+            "correction_history": [],
             "flags": [],
         },
         correction_targets=[],
+        correction_history=[],
+        claim_substitutions=[],
         warnings=[],
         run_id=f"mfi_{uuid.uuid4().hex[:8]}",
         correction_attempts=0,
@@ -233,6 +242,8 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("unresolved_medium_count", 0)
     diagnostics.setdefault("unresolved_low_count", 0)
     diagnostics.setdefault("retrievers", {})
+    diagnostics.setdefault("claim_substitutions", [])
+    diagnostics.setdefault("unmatched_high_claim_ids", [])
     return diagnostics
 
 
@@ -1304,6 +1315,8 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
     fallback_dimensions: List[str] = []
+    correction_history = deepcopy(state.get("correction_history", []) or [])
+    attempt_number = int(state.get("correction_attempts", 0) or 0)
 
     for dimension_profile in dimensions:
         dimension = str(dimension_profile["dimension"])
@@ -1353,8 +1366,10 @@ Every dimension must cover its mean, profile rank, variation, findings, and
 recommendations. A priority dimension must also include weakest official
 subsections (Food Quality: applicable question drivers), 2-4 explanatory
 drivers, relevant items when supplied, localized patterns, and limitations.
-Recommendations must cite evidence used by a finding. Context cannot assert
-causality. Do not make unilateral modality conclusions.
+Recommendations must cite evidence used by a finding.
+
+PROHIBITIONS:
+{json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
 Return:
 {{
@@ -1410,6 +1425,9 @@ Relevant targets:
             _record_artifact_mode(diagnostics, "dimensions", dimension, mode)
             if mode == "fallback":
                 fallback_dimensions.append(dimension)
+            correction_outcome = (
+                "deterministic_fallback" if mode == "fallback" else "llm_completed"
+            )
         except Exception as exc:
             logger.error("Dimension %s drafting error: %s", dimension, exc)
             drafted = fallback_dimension_narrative(
@@ -1423,6 +1441,14 @@ Relevant targets:
                 "fallback",
             )
             fallback_dimensions.append(dimension)
+            correction_outcome = "llm_or_schema_failed"
+        if repairing:
+            correction_history = _record_correction_execution(
+                correction_history,
+                attempt_number=attempt_number,
+                targets=relevant_targets,
+                outcome=correction_outcome,
+            )
         if repairing and previous and flagged_fields:
             merged = dict(previous)
             for field_name in flagged_fields:
@@ -1436,6 +1462,7 @@ Relevant targets:
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "correction_history": correction_history,
         "current_node": "dimension_drafter",
     }
     if fallback_dimensions:
@@ -1467,6 +1494,8 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
     fallback_markets: List[str] = []
+    correction_history = deepcopy(state.get("correction_history", []) or [])
+    attempt_number = int(state.get("correction_attempts", 0) or 0)
 
     for market_profile in priority_profiles:
         market_name = str(market_profile["market_name"])
@@ -1498,8 +1527,10 @@ weak dimensions and matching market-scoped evidence. Every number must exactly
 match a `formatted_value` in CLAIM_CATALOG and cite the associated `metric_id`.
 Do not calculate or infer values. Every claim must declare metric_ids,
 document_ids, scope, and polarity. Recommendations must cite evidence used by a
-priority issue. Modality language must remain conditional and must not make a
-unilateral transfer-modality conclusion.
+priority issue.
+
+PROHIBITIONS:
+{json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
 MARKET_PROFILE:
 {json.dumps(market_profile)}
@@ -1513,14 +1544,13 @@ CONSTRAINTS:
 Return:
 {{
   "priority_issues": [CLAIM],
-  "recommended_interventions": [CLAIM],
-  "modality_consideration": CLAIM_OR_NULL
+  "recommended_interventions": [CLAIM]
 }}
 where CLAIM is:
 {{
   "claim_id": "stable id",
   "text": "...",
-  "claim_kind": "finding|recommendation|modality_consideration",
+  "claim_kind": "finding|recommendation",
   "metric_ids": ["ledger ids"],
   "document_ids": [],
   "scope": "market",
@@ -1549,6 +1579,9 @@ Relevant targets:
             _record_artifact_mode(diagnostics, "markets", market_name, mode)
             if mode == "fallback":
                 fallback_markets.append(market_name)
+            correction_outcome = (
+                "deterministic_fallback" if mode == "fallback" else "llm_completed"
+            )
         except Exception as exc:
             logger.error("Market %s drafting error: %s", market_name, exc)
             drafted = fallback_market_narrative(market_profile)
@@ -1559,6 +1592,14 @@ Relevant targets:
                 "fallback",
             )
             fallback_markets.append(market_name)
+            correction_outcome = "llm_or_schema_failed"
+        if repairing:
+            correction_history = _record_correction_execution(
+                correction_history,
+                attempt_number=attempt_number,
+                targets=relevant_targets,
+                outcome=correction_outcome,
+            )
         if repairing and previous and flagged_fields:
             merged = dict(previous)
             for field_name in flagged_fields:
@@ -1572,6 +1613,7 @@ Relevant targets:
         "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "correction_history": correction_history,
         "current_node": "market_recommendations_drafter",
     }
     if fallback_markets:
@@ -1633,7 +1675,10 @@ use an exact `formatted_value` from CLAIM_CATALOG and cite its `metric_id`.
 Context claims must cite document IDs, retain their supplied classification,
 and must not assert causality. Do not calculate or infer values. Do not use
 national-score or risk-class terminology. Recommendations must cite a finding's
-evidence and modality language must remain conditional.
+evidence.
+
+PROHIBITIONS:
+{json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
 ASSESSMENT_PROFILE:
 {json.dumps({
@@ -1683,11 +1728,17 @@ Relevant targets:
         executive_mode = (
             "fallback" if drafted == deterministic_fallback else "llm"
         )
+        correction_outcome = (
+            "deterministic_fallback"
+            if executive_mode == "fallback"
+            else "llm_completed"
+        )
     except Exception as exc:
         logger.error("Executive summary error: %s", exc)
         drafted = fallback_executive_narrative(profile)
         llm_calls = 0
         executive_mode = "fallback"
+        correction_outcome = "llm_or_schema_failed"
     if repairing and previous and flagged_fields:
         merged = dict(previous)
         for field_name in flagged_fields:
@@ -1706,6 +1757,13 @@ Relevant targets:
         "generation_diagnostics": diagnostics,
         "current_node": "executive_summary_drafter",
     }
+    if repairing:
+        updates["correction_history"] = _record_correction_execution(
+            list(state.get("correction_history", []) or []),
+            attempt_number=int(state.get("correction_attempts", 0) or 0),
+            targets=relevant_targets,
+            outcome=correction_outcome,
+        )
     if executive_mode == "fallback":
         updates["warnings"] = [
             "Deterministic narrative fallback used for the executive summary."
@@ -1780,8 +1838,11 @@ Use English only. Review the structured artifacts against the cited catalog,
 deterministic flags, context classifications, and limitations. Check semantic
 interpretation, polarity, scope, coverage qualification, recommendation
 linkage, unsupported causal or affordability claims, priority drill-downs,
-and unilateral modality conclusions. Do not invent new facts or recalculate
-values. Return valid JSON only.
+and any conclusion about transfer modality. Do not invent new facts or
+recalculate values. Return valid JSON only.
+
+PROHIBITIONS:
+{json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
 DIMENSION_NARRATIVES:
 {json.dumps(state.get('dimension_narratives', {}))}
@@ -1857,6 +1918,7 @@ Return:
         state.get("deterministic_flags", []),
         flags,
         correction_attempts=state.get("correction_attempts", 0),
+        correction_history=state.get("correction_history", []),
     )
     diagnostics = _generation_diagnostics(state)
     diagnostics["red_team_status"] = red_team_status
@@ -1874,6 +1936,169 @@ Return:
 # ============================================================================
 
 MAX_CORRECTION_ATTEMPTS = 3
+
+_CORRECTION_EXECUTION_PRECEDENCE = {
+    "pending": 0,
+    "not_executed": 1,
+    "llm_completed": 2,
+    "deterministic_fallback": 3,
+    "llm_or_schema_failed": 4,
+}
+
+
+def _flags_for_correction_target(
+    flags: List[Dict[str, Any]],
+    target: Dict[str, Any],
+    claim_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    target_flag_ids = {str(value) for value in target.get("flag_ids", []) if value}
+    matched = [
+        flag
+        for flag in flags
+        if str(flag.get("flag_id") or "") in target_flag_ids
+        and (
+            str(flag.get("claim_id") or "") == str(claim_id or "")
+            if claim_id is not None
+            else not flag.get("claim_id")
+        )
+    ]
+    return matched
+
+
+def _start_correction_attempt(
+    *,
+    history: List[Dict[str, Any]],
+    flags: List[Dict[str, Any]],
+    targets: List[Dict[str, Any]],
+    attempt_number: int,
+) -> List[Dict[str, Any]]:
+    """Append one auditable record per targeted claim (or unscoped target)."""
+    updated = deepcopy(history)
+    for target in targets:
+        claim_ids: List[Optional[str]] = [
+            str(value) for value in target.get("claim_ids", []) if value
+        ]
+        target_flags = [
+            flag
+            for flag in flags
+            if str(flag.get("flag_id") or "")
+            in {str(value) for value in target.get("flag_ids", []) if value}
+        ]
+        if any(not flag.get("claim_id") for flag in target_flags) or not claim_ids:
+            claim_ids.append(None)
+        for claim_id in claim_ids:
+            matched = _flags_for_correction_target(flags, target, claim_id)
+            record = MFICorrectionAttemptRecord(
+                attempt_number=attempt_number,
+                artifact_type=str(target.get("artifact_type") or "global"),
+                artifact_id=target.get("artifact_id"),
+                field_name=target.get("field_name"),
+                claim_id=claim_id,
+                flag_ids=sorted(
+                    {str(flag.get("flag_id")) for flag in matched if flag.get("flag_id")}
+                ),
+                flag_codes=sorted(
+                    {str(flag.get("code")) for flag in matched if flag.get("code")}
+                ),
+            ).model_dump()
+            if record not in updated:
+                updated.append(record)
+    return updated
+
+
+def _record_correction_execution(
+    history: List[Dict[str, Any]],
+    *,
+    attempt_number: int,
+    targets: List[Dict[str, Any]],
+    outcome: Literal[
+        "llm_completed",
+        "deterministic_fallback",
+        "llm_or_schema_failed",
+        "not_executed",
+    ],
+) -> List[Dict[str, Any]]:
+    """Record the worst execution outcome without losing an earlier failure."""
+    updated = deepcopy(history)
+    target_keys = {
+        (
+            str(target.get("artifact_type") or "global"),
+            target.get("artifact_id"),
+            target.get("field_name"),
+        )
+        for target in targets
+    }
+    for record in updated:
+        key = (
+            str(record.get("artifact_type") or "global"),
+            record.get("artifact_id"),
+            record.get("field_name"),
+        )
+        if int(record.get("attempt_number") or 0) != attempt_number or key not in target_keys:
+            continue
+        previous = str(record.get("execution_outcome") or "pending")
+        if _CORRECTION_EXECUTION_PRECEDENCE[outcome] >= _CORRECTION_EXECUTION_PRECEDENCE.get(
+            previous, 0
+        ):
+            record["execution_outcome"] = outcome
+    return updated
+
+
+def _correction_flag_matches_record(
+    flag: Dict[str, Any], record: Dict[str, Any]
+) -> bool:
+    codes = {str(value) for value in record.get("flag_codes", []) if value}
+    if codes and str(flag.get("code") or "") not in codes:
+        return False
+    claim_id = record.get("claim_id")
+    if claim_id is not None:
+        return str(flag.get("claim_id") or "") == str(claim_id)
+    if str(flag.get("artifact_type") or "global") != str(
+        record.get("artifact_type") or "global"
+    ):
+        return False
+    if record.get("artifact_id") is not None and str(flag.get("artifact_id") or "") != str(
+        record.get("artifact_id")
+    ):
+        return False
+    if record.get("field_name") is not None and str(flag.get("field_name") or "") != str(
+        record.get("field_name")
+    ):
+        return False
+    return True
+
+
+def _reconcile_correction_history(
+    history: List[Dict[str, Any]],
+    flags: List[Dict[str, Any]],
+    *,
+    close_pending_execution: bool = False,
+) -> List[Dict[str, Any]]:
+    """Freeze each attempt's validation outcome at the next QA boundary."""
+    updated = deepcopy(history)
+    for record in updated:
+        if close_pending_execution and record.get("execution_outcome") == "pending":
+            record["execution_outcome"] = "not_executed"
+        if record.get("validation_outcome") != "pending":
+            continue
+        expected_codes = {
+            str(value) for value in record.get("flag_codes", []) if value
+        }
+        remaining_codes = {
+            str(flag.get("code"))
+            for flag in flags
+            if _correction_flag_matches_record(flag, record) and flag.get("code")
+        }
+        if not remaining_codes:
+            record["validation_outcome"] = "resolved"
+        elif expected_codes and remaining_codes < expected_codes:
+            record["validation_outcome"] = "partially_resolved"
+        else:
+            record["validation_outcome"] = "unresolved"
+    return [
+        MFICorrectionAttemptRecord.model_validate(record).model_dump()
+        for record in updated
+    ]
 
 def should_correct(state: MFIReportState) -> Literal["correct", "finish"]:
     """Route material repairable issues through at most three targeted repairs."""
@@ -1900,9 +2125,21 @@ def node_prepare_correction(state: MFIReportState) -> dict:
         *state.get("red_team_flags", []),
     ]
     targets = build_correction_targets(flags)
+    attempt_number = state.get("correction_attempts", 0) + 1
+    history = _reconcile_correction_history(
+        list(state.get("correction_history", []) or []),
+        flags,
+    )
+    history = _start_correction_attempt(
+        history=history,
+        flags=flags,
+        targets=targets,
+        attempt_number=attempt_number,
+    )
     updates: Dict[str, Any] = {
         "correction_targets": targets,
-        "correction_attempts": state.get("correction_attempts", 0) + 1,
+        "correction_attempts": attempt_number,
+        "correction_history": history,
         "current_node": "targeted_correction",
     }
     context_targets = [
@@ -1916,6 +2153,18 @@ def node_prepare_correction(state: MFIReportState) -> dict:
         if isinstance(item, dict) and item.get("doc_id")
     ]
     if not context_targets or not documents:
+        unavailable_context_targets = [
+            target
+            for target in context_targets
+            if target.get("artifact_type") == "context"
+        ]
+        if unavailable_context_targets:
+            updates["correction_history"] = _record_correction_execution(
+                history,
+                attempt_number=attempt_number,
+                targets=unavailable_context_targets,
+                outcome="not_executed",
+            )
         return updates
     prompt = f"""Repair only the targeted contextual evidence statements.
 
@@ -1963,28 +2212,142 @@ Return {{"statements": [{{"statement_id": "...", "text": "...",
                 if isinstance(statement, dict)
             ]
         updates["llm_calls"] = state.get("llm_calls", 0) + 1
+        updates["correction_history"] = _record_correction_execution(
+            history,
+            attempt_number=attempt_number,
+            targets=context_targets,
+            outcome="llm_completed",
+        )
     except Exception as exc:
         logger.error("Targeted context correction failed: %s", exc)
+        updates["correction_history"] = _record_correction_execution(
+            history,
+            attempt_number=attempt_number,
+            targets=context_targets,
+            outcome="llm_or_schema_failed",
+        )
     return updates
 
 
-def _mark_unresolved_claims(value: Any, flag_ids_by_claim: Dict[str, List[str]]) -> Any:
+def _mark_unresolved_claims(
+    value: Any,
+    flag_ids_by_claim: Dict[str, List[str]],
+    flag_codes_by_claim: Optional[Dict[str, List[str]]] = None,
+) -> Any:
     if isinstance(value, dict):
         result = {
-            key: _mark_unresolved_claims(nested, flag_ids_by_claim)
+            key: _mark_unresolved_claims(
+                nested, flag_ids_by_claim, flag_codes_by_claim
+            )
             for key, nested in value.items()
         }
         claim_id = result.get("claim_id")
         if claim_id in flag_ids_by_claim:
             result["validation_status"] = "unverified"
-            result["validation_flags"] = sorted(
-                set(result.get("validation_flags", []))
+            # Identifiers go in their own field. They hash the flag message, so they
+            # change whenever wording does; the codes beside them stay stable and are what
+            # a reader or a downstream renderer should key on.
+            result["validation_flag_ids"] = sorted(
+                set(result.get("validation_flag_ids", []))
                 | set(flag_ids_by_claim[claim_id])
             )
+            if flag_codes_by_claim:
+                result["validation_flags"] = sorted(
+                    set(result.get("validation_flags", []))
+                    | set(flag_codes_by_claim.get(claim_id, []))
+                )
         return result
     if isinstance(value, list):
-        return [_mark_unresolved_claims(item, flag_ids_by_claim) for item in value]
+        return [
+            _mark_unresolved_claims(
+                item, flag_ids_by_claim, flag_codes_by_claim
+            )
+            for item in value
+        ]
     return value
+
+
+def _apply_context_qa_policy(
+    context_evidence: List[Dict[str, Any]],
+    flags: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Mark context findings and withdraw causal statements deterministically."""
+    statements = deepcopy(context_evidence)
+    substitutions: List[Dict[str, Any]] = []
+    for statement in statements:
+        if not isinstance(statement, dict):
+            continue
+        statement_id = str(statement.get("statement_id") or "")
+        matched = [
+            flag
+            for flag in flags
+            if str(flag.get("artifact_type") or "") == "context"
+            and str(flag.get("artifact_id") or "") == statement_id
+            and str(flag.get("severity") or "") in {"high", "medium"}
+        ]
+        if not matched:
+            continue
+        statement["validation_status"] = "unverified"
+        statement["validation_flags"] = sorted(
+            {str(flag.get("code")) for flag in matched if flag.get("code")}
+        )
+        statement["validation_flag_ids"] = sorted(
+            {str(flag.get("flag_id")) for flag in matched if flag.get("flag_id")}
+        )
+        high = [flag for flag in matched if flag.get("severity") == "high"]
+        if not high:
+            continue
+        rejected_text = str(statement.get("text") or "")
+        rejected_document_ids = list(statement.get("document_ids", []) or [])
+        replacement = (
+            "A contextual statement was withdrawn because it could not be "
+            "validated for use in this report."
+        )
+        statement["text"] = replacement
+        statement["document_ids"] = []
+        statement["substituted"] = True
+        substitutions.append(
+            {
+                "claim_id": statement_id,
+                "artifact_type": "context",
+                "artifact_id": statement_id,
+                "field_name": "text",
+                "claim_kind": "context",
+                "rejected_text": rejected_text,
+                "replacement_text": replacement,
+                "rejected_metric_ids": [],
+                "rejected_document_ids": rejected_document_ids,
+                "codes": sorted(
+                    {str(flag.get("code")) for flag in high if flag.get("code")}
+                ),
+                "flag_ids": sorted(
+                    {str(flag.get("flag_id")) for flag in high if flag.get("flag_id")}
+                ),
+                "severity": "high",
+                "disposition": "replaced_by_deterministic_fallback",
+            }
+        )
+    return statements, substitutions
+
+
+def _visible_qa_claim_ids(*values: Any) -> set[str]:
+    visible: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("claim_id"):
+                visible.add(str(value["claim_id"]))
+            if value.get("statement_id") and value.get("classification") != "unrelated":
+                visible.add(str(value["statement_id"]))
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    for value in values:
+        visit(value)
+    return visible
 
 
 def node_finalize_qa(state: MFIReportState) -> dict:
@@ -1993,30 +2356,98 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         *state.get("deterministic_flags", []),
         *state.get("red_team_flags", []),
     ]
-    review = build_qa_review(
-        state.get("deterministic_flags", []),
-        state.get("red_team_flags", []),
-        correction_attempts=state.get("correction_attempts", 0),
-    )
     material = [
         flag
         for flag in combined
         if str(flag.get("severity")) in {"high", "medium"}
     ]
     flag_ids_by_claim: Dict[str, List[str]] = {}
+    flag_codes_by_claim: Dict[str, List[str]] = {}
     for flag in material:
         if flag.get("claim_id"):
             flag_ids_by_claim.setdefault(str(flag["claim_id"]), []).append(
                 str(flag.get("flag_id"))
             )
+            flag_codes_by_claim.setdefault(str(flag["claim_id"]), []).append(
+                str(flag.get("code"))
+            )
+    # Repair attempts are spent by the time this runs, so a surviving high-severity
+    # finding means the statement is unsupported rather than merely unpolished. Withdraw
+    # first, then mark, so a withdrawn claim still carries its unverified status.
+    (
+        dimension_narratives,
+        market_narratives,
+        executive_narrative,
+        substitutions,
+    ) = apply_unresolved_claim_policy(
+        dimension_narratives=state.get("dimension_narratives", {}),
+        market_narratives=state.get("market_narratives", {}),
+        executive_narrative=state.get("executive_summary_narrative", {}),
+        flags=combined,
+    )
+    context_evidence, context_substitutions = _apply_context_qa_policy(
+        list(state.get("context_evidence", []) or []),
+        material,
+    )
+    substitutions.extend(context_substitutions)
+    unmatched = unmatched_high_claim_ids(combined, substitutions)
+
+    correction_history = _reconcile_correction_history(
+        list(state.get("correction_history", []) or []),
+        combined,
+        close_pending_execution=True,
+    )
+    review = build_qa_review(
+        state.get("deterministic_flags", []),
+        state.get("red_team_flags", []),
+        correction_attempts=state.get("correction_attempts", 0),
+        correction_history=correction_history,
+    )
+
     warnings: list[str] = []
-    if material:
+    visible_claim_ids = _visible_qa_claim_ids(
+        dimension_narratives,
+        market_narratives,
+        executive_narrative,
+        context_evidence,
+    )
+    marked_claim_findings = [
+        flag
+        for flag in material
+        if str(
+            flag.get("claim_id")
+            or (
+                flag.get("artifact_id")
+                if flag.get("artifact_type") == "context"
+                else ""
+            )
+            or ""
+        )
+        in visible_claim_ids
+    ]
+    global_findings = [
+        flag for flag in material if flag not in marked_claim_findings
+    ]
+    if marked_claim_findings:
         warnings.append(
             "Narrative QA completed with unresolved material issues. "
-            "Affected claims are marked unverified; consult the QA notices."
+            "Review the claim-level notices and final QA findings table."
+        )
+    if global_findings or unmatched:
+        warnings.append(
+            "Material process-level QA issues remain; consult the final QA "
+            "findings table."
+        )
+    if substitutions:
+        warnings.append(
+            "Statements that could not be validated against the assessment evidence "
+            "were withdrawn. The rejected drafts are retained in the technical QA "
+            "details."
         )
     severity_counts = Counter(
-        str(flag.get("severity")) for flag in combined if isinstance(flag, dict)
+        str(flag.get("severity"))
+        for flag in review.get("flags", [])
+        if isinstance(flag, dict)
     )
     diagnostics = _generation_diagnostics(state)
     diagnostics.update(
@@ -2025,20 +2456,25 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             "unresolved_high_count": int(severity_counts.get("high", 0)),
             "unresolved_medium_count": int(severity_counts.get("medium", 0)),
             "unresolved_low_count": int(severity_counts.get("low", 0)),
+            "claim_substitutions": substitutions,
+            "unmatched_high_claim_ids": unmatched,
         }
     )
     return {
         "dimension_narratives": _mark_unresolved_claims(
-            state.get("dimension_narratives", {}), flag_ids_by_claim
+            dimension_narratives, flag_ids_by_claim, flag_codes_by_claim
         ),
         "market_narratives": _mark_unresolved_claims(
-            state.get("market_narratives", {}), flag_ids_by_claim
+            market_narratives, flag_ids_by_claim, flag_codes_by_claim
         ),
         "executive_summary_narrative": _mark_unresolved_claims(
-            state.get("executive_summary_narrative", {}), flag_ids_by_claim
+            executive_narrative, flag_ids_by_claim, flag_codes_by_claim
         ),
+        "context_evidence": context_evidence,
         "qa_review": review,
+        "correction_history": correction_history,
         "generation_diagnostics": diagnostics,
+        "claim_substitutions": substitutions,
         "correction_targets": [],
         "warnings": warnings,
         "current_node": "finalize_qa",

@@ -333,9 +333,11 @@ def test_local_benchmarks_build_phase4_release_evidence(tmp_path):
                 expected_methodology_warning_codes=[
                     "mfir_records_excluded"
                 ],
+                # Since R1, optional item non-representation is disclosed as coverage
+                # rather than reported as unavailable evidence, so this benchmark no
+                # longer expects that limitation.
                 expected_limitation_codes=[
                     "assessment_scope_not_representative",
-                    "unavailable_explanatory_evidence",
                     "item_trader_denominator_unavailable",
                     "mfir_records_excluded",
                 ],

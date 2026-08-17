@@ -10,6 +10,7 @@ from app.services.mfi_drafter.methodology import (
     DIMENSION_DESCRIPTIONS,
     METHODOLOGY_VERSION,
 )
+from app.services.mfi_drafter.wording import NEUTRAL_SCOPE_STATEMENT
 
 
 class ReportBlock(BaseModel):
@@ -24,6 +25,7 @@ class ReportBlock(BaseModel):
         "limitation_box",
         "methodology_note",
         "qa_warning",
+        "claim_warning",
     ]
     text: Optional[str] = None
     level: Optional[int] = None
@@ -542,12 +544,196 @@ def _mfi_evidence_note(
     return " | ".join(parts)
 
 
+_MFI_QA_SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+_MFI_QA_ARTIFACT_ORDER = {
+    "context": 0,
+    "executive_summary": 1,
+    "dimension": 2,
+    "market": 3,
+    "global": 4,
+}
+
+
+def _mfi_material_qa_flags(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    qa_review = result.get("qa_review") or {}
+    unique: Dict[str, Dict[str, Any]] = {}
+    for index, flag in enumerate(qa_review.get("flags", []) or []):
+        if not isinstance(flag, dict) or flag.get("severity") not in {"high", "medium"}:
+            continue
+        flag_id = str(flag.get("flag_id") or f"qa-flag-{index}")
+        unique[flag_id] = {**flag, "flag_id": flag_id}
+    return sorted(
+        unique.values(),
+        key=lambda flag: (
+            _MFI_QA_SEVERITY_ORDER.get(str(flag.get("severity")), 9),
+            _MFI_QA_ARTIFACT_ORDER.get(str(flag.get("artifact_type")), 9),
+            str(flag.get("artifact_id") or "").casefold(),
+            str(flag.get("field_name") or "").casefold(),
+            str(flag.get("claim_id") or "").casefold(),
+            str(flag.get("code") or "").casefold(),
+            str(flag.get("flag_id") or ""),
+        ),
+    )
+
+
+def _mfi_qa_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    qa_review = result.get("qa_review") or {}
+    diagnostics = result.get("generation_diagnostics") or {}
+    substitutions = result.get("claim_substitutions") or diagnostics.get(
+        "claim_substitutions", []
+    )
+    return {
+        "flags": _mfi_material_qa_flags(result),
+        "history": [
+            dict(record)
+            for record in qa_review.get("correction_history", []) or []
+            if isinstance(record, dict)
+        ],
+        "substitutions": {
+            str(record.get("claim_id")): dict(record)
+            for record in substitutions or []
+            if isinstance(record, dict) and record.get("claim_id")
+        },
+        "rendered_flag_ids": set(),
+        "marker_count_by_flag": {},
+    }
+
+
+def _mfi_flags_for_claim(
+    qa_context: Dict[str, Any], claim_id: str
+) -> List[Dict[str, Any]]:
+    return [
+        flag
+        for flag in qa_context.get("flags", [])
+        if str(flag.get("claim_id") or "") == claim_id
+        or (
+            str(flag.get("artifact_type") or "") == "context"
+            and str(flag.get("artifact_id") or "") == claim_id
+        )
+    ]
+
+
+def _mfi_history_for_flag(
+    qa_context: Dict[str, Any], flag: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    matches: List[Dict[str, Any]] = []
+    for record in qa_context.get("history", []):
+        record_codes = {str(value) for value in record.get("flag_codes", []) if value}
+        if record_codes and str(flag.get("code") or "") not in record_codes:
+            continue
+        if flag.get("claim_id"):
+            if str(record.get("claim_id") or "") != str(flag.get("claim_id")):
+                continue
+        else:
+            if str(record.get("artifact_type") or "") != str(
+                flag.get("artifact_type") or ""
+            ):
+                continue
+            if str(record.get("artifact_id") or "") != str(
+                flag.get("artifact_id") or ""
+            ):
+                continue
+            if record.get("field_name") is not None and str(
+                record.get("field_name") or ""
+            ) != str(flag.get("field_name") or ""):
+                continue
+        matches.append(record)
+    return sorted(matches, key=lambda item: int(item.get("attempt_number") or 0))
+
+
+def _mfi_claim_warning(
+    claim: Dict[str, Any], qa_context: Optional[Dict[str, Any]]
+) -> Optional[ReportBlock]:
+    if not qa_context:
+        return None
+    claim_id = str(claim.get("claim_id") or "").strip()
+    if not claim_id:
+        return None
+    flags = _mfi_flags_for_claim(qa_context, claim_id)
+    if not flags:
+        return None
+    severity = min(
+        (str(flag.get("severity") or "medium") for flag in flags),
+        key=lambda value: _MFI_QA_SEVERITY_ORDER.get(value, 9),
+    )
+    flag_ids = sorted({str(flag.get("flag_id")) for flag in flags})
+    codes = sorted({str(flag.get("code")) for flag in flags if flag.get("code")})
+    messages = list(
+        dict.fromkeys(
+            _mfi_safe_qa_text(flag.get("message"), qa_context)
+            for flag in flags
+            if flag.get("message")
+        )
+    )
+    history = {
+        (
+            int(record.get("attempt_number") or 0),
+            str(record.get("execution_outcome") or "pending"),
+            str(record.get("validation_outcome") or "pending"),
+        ): record
+        for flag in flags
+        for record in _mfi_history_for_flag(qa_context, flag)
+    }
+    attempted = [
+        record
+        for record in history.values()
+        if record.get("execution_outcome") not in {"pending", "not_executed"}
+    ]
+    substitution = qa_context.get("substitutions", {}).get(claim_id)
+    if substitution:
+        disposition = "replaced_by_deterministic_fallback"
+        lead = "[DO NOT USE ORIGINAL] Original draft withdrawn; deterministic fallback shown."
+    elif severity == "medium":
+        disposition = "retained_unverified_for_delivery"
+        lead = "[UNVERIFIED] Unverified — review required."
+    else:
+        disposition = "unresolved_delivery_issue"
+        lead = "[DO NOT USE] Unresolved delivery issue."
+    outcomes = sorted(
+        {
+            f"{record.get('execution_outcome')} / {record.get('validation_outcome')}"
+            for record in history.values()
+        }
+    )
+    text = (
+        f"{lead} Claim ID: {claim_id}. Severity: {severity.upper()}. "
+        f"QA codes: {', '.join(codes) or 'not recorded'}. "
+        f"Reason: {' | '.join(messages) or 'Material QA validation issue.'} "
+        f"Repair attempted: {'yes' if attempted else 'no'}; attempts: {len(attempted)}; "
+        f"outcome: {', '.join(outcomes) or 'not attempted'}."
+    )
+    for flag_id in flag_ids:
+        qa_context["rendered_flag_ids"].add(flag_id)
+        counts = qa_context["marker_count_by_flag"]
+        counts[flag_id] = int(counts.get(flag_id, 0)) + 1
+    primary = flags[0]
+    return ReportBlock(
+        type="claim_warning",
+        text=text,
+        meta={
+            "claim_id": claim_id,
+            "severity": severity,
+            "flag_ids": flag_ids,
+            "flag_codes": codes,
+            "messages": messages,
+            "artifact_type": primary.get("artifact_type"),
+            "artifact_id": primary.get("artifact_id"),
+            "field_name": primary.get("field_name"),
+            "repair_attempted": bool(attempted),
+            "attempt_count": len(attempted),
+            "execution_outcomes": outcomes,
+            "disposition": disposition,
+        },
+    )
+
+
 def _append_mfi_claim(
     blocks: List[ReportBlock],
     claim: Any,
     *,
     catalog: Dict[str, Any],
     documents: Dict[str, Dict[str, Any]],
+    qa_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not isinstance(claim, dict) or not str(claim.get("text") or "").strip():
         return
@@ -558,6 +744,7 @@ def _append_mfi_claim(
             meta={
                 "claim_id": claim.get("claim_id"),
                 "validation_status": claim.get("validation_status"),
+                "substituted": bool(claim.get("substituted")),
                 "metric_ids": list(claim.get("metric_ids", []) or []),
                 "document_ids": list(claim.get("document_ids", []) or []),
             },
@@ -576,6 +763,9 @@ def _append_mfi_claim(
                 },
             )
         )
+    warning = _mfi_claim_warning(claim, qa_context)
+    if warning is not None:
+        blocks.append(warning)
 
 
 def _mfi_table_block(
@@ -595,6 +785,158 @@ def _mfi_table_block(
             "rows": rows,
         },
     )
+
+
+def _mfi_safe_qa_text(text: Any, qa_context: Dict[str, Any]) -> str:
+    cleaned = str(text or "")
+    for substitution in qa_context.get("substitutions", {}).values():
+        rejected = str(substitution.get("rejected_text") or "").strip()
+        if rejected:
+            cleaned = cleaned.replace(rejected, "[withdrawn draft omitted]")
+    return cleaned
+
+
+def _mfi_flag_audit(
+    flag: Dict[str, Any], qa_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    history = _mfi_history_for_flag(qa_context, flag)
+    attempted = [
+        record
+        for record in history
+        if record.get("execution_outcome") not in {"pending", "not_executed"}
+    ]
+    outcomes = list(
+        dict.fromkeys(
+            f"{record.get('execution_outcome')} / {record.get('validation_outcome')}"
+            for record in history
+        )
+    )
+    claim_key = str(
+        flag.get("claim_id")
+        or (
+            flag.get("artifact_id")
+            if flag.get("artifact_type") == "context"
+            else ""
+        )
+        or ""
+    )
+    if claim_key in qa_context.get("substitutions", {}):
+        disposition = "replaced_by_deterministic_fallback"
+    elif str(flag.get("flag_id")) in qa_context.get("rendered_flag_ids", set()):
+        disposition = (
+            "retained_unverified_for_delivery"
+            if flag.get("severity") == "medium"
+            else "unresolved_delivery_issue"
+        )
+    else:
+        disposition = "global_unresolved"
+    return {
+        "attempted": attempted,
+        "attempt_count": len(attempted),
+        "outcome": ", ".join(outcomes) or "not attempted",
+        "disposition": disposition,
+    }
+
+
+def _mfi_qa_findings_table(
+    qa_context: Dict[str, Any]
+) -> Optional[ReportBlock]:
+    flags = qa_context.get("flags", [])
+    if not flags:
+        return None
+    columns = [
+        "severity",
+        "source",
+        "artifact",
+        "location",
+        "field",
+        "claim_id",
+        "code",
+        "message",
+        "attempts",
+        "outcome",
+        "disposition",
+    ]
+    rows = []
+    for flag in flags:
+        audit = _mfi_flag_audit(flag, qa_context)
+        rows.append(
+            {
+                "row_id": str(flag.get("flag_id")),
+                "values": {
+                    "severity": str(flag.get("severity") or "").upper(),
+                    "source": flag.get("source") or "",
+                    "artifact": flag.get("artifact_type") or "",
+                    "location": flag.get("artifact_id") or "",
+                    "field": flag.get("field_name") or "",
+                    "claim_id": flag.get("claim_id") or "",
+                    "code": flag.get("code") or "",
+                    "message": _mfi_safe_qa_text(flag.get("message"), qa_context),
+                    "attempts": audit["attempt_count"],
+                    "outcome": audit["outcome"],
+                    "disposition": audit["disposition"],
+                },
+            }
+        )
+    return ReportBlock(
+        type="table",
+        meta={
+            "table_kind": "mfi_deterministic",
+            "title": "QA findings",
+            "columns": columns,
+            "rows": rows,
+            "qa_flag_ids": [str(flag.get("flag_id")) for flag in flags],
+        },
+    )
+
+
+def _assert_mfi_qa_traceability(
+    blocks: List[ReportBlock], qa_context: Dict[str, Any]
+) -> None:
+    """Fail closed on a renderer contract that would hide a material finding."""
+    material_ids = {
+        str(flag.get("flag_id")) for flag in qa_context.get("flags", [])
+    }
+    marker_counts = qa_context.get("marker_count_by_flag", {})
+    global_ids = {
+        str(flag_id)
+        for block in blocks
+        if block.type == "qa_warning" and isinstance(block.meta, dict)
+        for flag_id in block.meta.get("global_flag_ids", []) or []
+    }
+    table_ids = [
+        str(row.get("row_id"))
+        for block in blocks
+        if block.type == "table"
+        and isinstance(block.meta, dict)
+        and block.meta.get("title") == "QA findings"
+        for row in block.meta.get("rows", []) or []
+        if isinstance(row, dict)
+    ]
+    if len(table_ids) != len(set(table_ids)) or set(table_ids) != material_ids:
+        raise ValueError("Every material QA flag must appear exactly once in QA findings")
+    for flag_id in material_ids:
+        marker_count = int(marker_counts.get(flag_id, 0))
+        global_count = 1 if flag_id in global_ids else 0
+        if marker_count + global_count != 1:
+            raise ValueError(
+                f"Material QA flag {flag_id} must map to one visible marker or global notice"
+            )
+    visible_parts: List[str] = []
+    for block in blocks:
+        if block.text:
+            visible_parts.append(block.text)
+        if block.type == "table" and isinstance(block.meta, dict):
+            for row in block.meta.get("rows", []) or []:
+                if isinstance(row, dict):
+                    visible_parts.extend(
+                        str(value) for value in (row.get("values") or {}).values()
+                    )
+    visible = "\n".join(visible_parts)
+    for substitution in qa_context.get("substitutions", {}).values():
+        rejected = str(substitution.get("rejected_text") or "").strip()
+        if rejected and rejected in visible:
+            raise ValueError("Withdrawn narrative text reached reader-facing report blocks")
 
 
 def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
@@ -618,6 +960,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         if isinstance(item, dict) and item.get("doc_id")
     }
     visualizations = result.get("visualizations") or {}
+    qa_context = _mfi_qa_context(result)
 
     blocks: List[ReportBlock] = [
         ReportBlock(type="heading", text=title, level=1),
@@ -647,6 +990,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         },
         catalog=catalog,
         documents=documents,
+        qa_context=qa_context,
     )
     methodology_warnings = result.get("methodology_warnings") or []
     excluded = result.get("excluded_market_records") or []
@@ -679,9 +1023,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                     "metric_ids": [],
                     "document_ids": statement.get("document_ids", []),
                     "validation_status": statement.get("validation_status"),
+                    "substituted": statement.get("substituted", False),
                 },
                 catalog=catalog,
                 documents=documents,
+                qa_context=qa_context,
             )
     if references:
         blocks.append(ReportBlock(type="references", references=references))
@@ -704,6 +1050,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         },
         catalog=catalog,
         documents=documents,
+        qa_context=qa_context,
     )
     if visualizations.get("mfi_radar"):
         blocks.append(
@@ -749,7 +1096,21 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
 
     blocks.append(ReportBlock(type="heading", text="Executive summary", level=2))
     _append_mfi_claim(
-        blocks, executive.get("motivation"), catalog=catalog, documents=documents
+        blocks,
+        executive.get("motivation"),
+        catalog=catalog,
+        documents=documents,
+        qa_context=qa_context,
+    )
+
+
+    # Stated once, where the reader meets the report, rather than repeated per market.
+    _append_mfi_claim(
+        blocks,
+        executive.get("scope_statement"),
+        catalog=catalog,
+        documents=documents,
+        qa_context=qa_context,
     )
     for field in ("key_findings", "recommendations", "limitations"):
         if executive.get(field):
@@ -758,7 +1119,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             )
         for claim in executive.get(field, []) or []:
             _append_mfi_claim(
-                blocks, claim, catalog=catalog, documents=documents
+                blocks,
+                claim,
+                catalog=catalog,
+                documents=documents,
+                qa_context=qa_context,
             )
 
     blocks.append(ReportBlock(type="heading", text="MFI dimensions", level=2))
@@ -785,7 +1150,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 )
             )
         _append_mfi_claim(
-            blocks, narrative.get("summary"), catalog=catalog, documents=documents
+            blocks,
+            narrative.get("summary"),
+            catalog=catalog,
+            documents=documents,
+            qa_context=qa_context,
         )
         for field in (
             "key_findings",
@@ -795,7 +1164,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         ):
             for claim in narrative.get(field, []) or []:
                 _append_mfi_claim(
-                    blocks, claim, catalog=catalog, documents=documents
+                    blocks,
+                    claim,
+                    catalog=catalog,
+                    documents=documents,
+                    qa_context=qa_context,
                 )
 
     blocks.append(
@@ -826,6 +1199,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 subdimension.get("interpretation"),
                 catalog=catalog,
                 documents=documents,
+                qa_context=qa_context,
             )
         for table_key, label in (
             ("subsection_rows", "Official subsection evidence"),
@@ -893,14 +1267,12 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         for field in ("priority_issues", "recommended_interventions"):
             for claim in narrative.get(field, []) or []:
                 _append_mfi_claim(
-                    blocks, claim, catalog=catalog, documents=documents
+                    blocks,
+                    claim,
+                    catalog=catalog,
+                    documents=documents,
+                    qa_context=qa_context,
                 )
-        _append_mfi_claim(
-            blocks,
-            narrative.get("modality_consideration"),
-            catalog=catalog,
-            documents=documents,
-        )
 
     blocks.append(
         ReportBlock(
@@ -915,7 +1287,8 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             text=(
                 f"Methodology version: {result.get('methodology_version') or METHODOLOGY_VERSION}. "
                 f"Score authority: {result.get('score_authority', '')}. "
-                "Stored DataBridge Level-1 scores remain authoritative."
+                "Stored DataBridge Level-1 scores remain authoritative. "
+                f"{NEUTRAL_SCOPE_STATEMENT}"
             ),
         )
     )
@@ -929,22 +1302,89 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 )
             )
     qa_review = result.get("qa_review") or {}
-    material_flags = [
-        flag
-        for flag in qa_review.get("flags", []) or []
-        if isinstance(flag, dict) and flag.get("severity") in {"high", "medium"}
-    ]
+    material_flags = qa_context.get("flags", [])
     if material_flags:
+        blocks.append(
+            ReportBlock(type="heading", text="Final QA findings", level=3)
+        )
+        all_flags = [
+            flag
+            for flag in qa_review.get("flags", []) or []
+            if isinstance(flag, dict)
+        ]
+        severity_counts = {
+            severity: sum(flag.get("severity") == severity for flag in all_flags)
+            for severity in ("high", "medium", "low")
+        }
+        rendered_ids = qa_context.get("rendered_flag_ids", set())
+        global_flags = [
+            flag
+            for flag in material_flags
+            if str(flag.get("flag_id")) not in rendered_ids
+        ]
+        substitutions = qa_context.get("substitutions", {})
+        summary_parts = [
+            "Narrative QA completed with unresolved material issues.",
+            (
+                f"High: {severity_counts['high']}; medium: "
+                f"{severity_counts['medium']}; low: {severity_counts['low']}; "
+                f"correction cycles: {int(qa_review.get('correction_attempts') or 0)}."
+            ),
+        ]
+        if substitutions:
+            summary_parts.append(
+                "Original drafts withdrawn by the delivery policy are identified "
+                "beside their deterministic replacements."
+            )
+        if rendered_ids:
+            summary_parts.append(
+                "Retained material claims carry visible claim-level review notices."
+            )
+        if global_flags:
+            summary_parts.append(
+                "Process-level or unmapped issues are listed below and in the QA table."
+            )
         blocks.append(
             ReportBlock(
                 type="qa_warning",
-                text=(
-                    "Narrative QA completed with unresolved material issues. "
-                    "Affected claims are marked unverified."
-                ),
-                meta={"qa_status": qa_review.get("status"), "flags": material_flags},
+                text=" ".join(summary_parts),
+                meta={
+                    "qa_status": qa_review.get("status"),
+                    "severity_counts": severity_counts,
+                    "correction_attempts": int(
+                        qa_review.get("correction_attempts") or 0
+                    ),
+                },
             )
         )
+        for flag in global_flags:
+            audit = _mfi_flag_audit(flag, qa_context)
+            blocks.append(
+                ReportBlock(
+                    type="qa_warning",
+                    text=(
+                        f"Global QA issue — {str(flag.get('severity') or '').upper()} "
+                        f"[{flag.get('code') or 'uncoded'}]: "
+                        f"{_mfi_safe_qa_text(flag.get('message'), qa_context)} "
+                        f"Disposition: {audit['disposition']}; attempts: "
+                        f"{audit['attempt_count']}; outcome: {audit['outcome']}."
+                    ),
+                    meta={
+                        "global_flag_ids": [str(flag.get("flag_id"))],
+                        "severity": flag.get("severity"),
+                        "code": flag.get("code"),
+                        "artifact_type": flag.get("artifact_type"),
+                        "artifact_id": flag.get("artifact_id"),
+                        "field_name": flag.get("field_name"),
+                        "claim_id": flag.get("claim_id"),
+                        "disposition": audit["disposition"],
+                    },
+                )
+            )
+        findings_table = _mfi_qa_findings_table(qa_context)
+        if findings_table is not None:
+            blocks.append(findings_table)
+        _assert_mfi_qa_traceability(blocks, qa_context)
     elif qa_review:
         blocks.append(
             ReportBlock(

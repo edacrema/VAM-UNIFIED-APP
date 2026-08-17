@@ -183,10 +183,37 @@ if isinstance(result, dict):
         for flag in qa_review.get("flags", []) or []
         if isinstance(flag, dict) and flag.get("severity") in {"high", "medium"}
     ]
+    all_qa_flags = [
+        flag
+        for flag in qa_review.get("flags", []) or []
+        if isinstance(flag, dict)
+    ]
+    severity_counts = {
+        severity: sum(flag.get("severity") == severity for flag in all_qa_flags)
+        for severity in ("high", "medium", "low")
+    }
+    diagnostics = result.get("generation_diagnostics") or {}
+    substitutions = diagnostics.get("claim_substitutions", []) or []
+    qa_columns = st.columns(5)
+    qa_columns[0].metric("High QA findings", str(severity_counts["high"]))
+    qa_columns[1].metric("Medium QA findings", str(severity_counts["medium"]))
+    qa_columns[2].metric("Low QA findings", str(severity_counts["low"]))
+    qa_columns[3].metric(
+        "Correction cycles", str(qa_review.get("correction_attempts") or 0)
+    )
+    qa_columns[4].metric("Withdrawn drafts", str(len(substitutions)))
     if material_qa_flags:
+        claim_scoped = any(
+            isinstance(block, dict) and block.get("type") == "claim_warning"
+            for block in result.get("report_blocks", []) or []
+        )
         st.error(
             "Narrative QA completed with unresolved material issues. "
-            "Affected claims are marked unverified in the report."
+            + (
+                "Review the claim-level notices and final QA findings table."
+                if claim_scoped
+                else "Review the process-level notices and final QA findings table."
+            )
         )
 
     def _preview() -> None:

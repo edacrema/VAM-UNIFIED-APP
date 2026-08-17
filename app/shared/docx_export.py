@@ -425,6 +425,22 @@ def build_docx_bytes_from_report_blocks(
             )
             continue
 
+        if block.type == "claim_warning":
+            meta = block.meta or {}
+            is_withdrawn = (
+                isinstance(meta, dict)
+                and meta.get("disposition")
+                == "replaced_by_deterministic_fallback"
+            )
+            _add_notice_box(
+                doc,
+                block.text or "",
+                label="Claim warning",
+                fill="FDE8E8" if is_withdrawn else "FFF4CC",
+                color=(176, 0, 32) if is_withdrawn else (145, 94, 0),
+            )
+            continue
+
     out = io.BytesIO()
     doc.save(out)
     out.seek(0)

@@ -42,9 +42,11 @@ from .narrative import (
 RELEASE_MANIFEST_SCHEMA_VERSION = "1.0"
 LEGACY_REFERENCE_COMMIT = "524cc9a"
 DEFAULT_OUTPUT_ROOT = Path(".tmp") / "mfi-phase4"
+# Limitations every complete assessment is expected to carry. Since R1,
+# "unavailable_explanatory_evidence" is raised only for genuinely unusable required
+# evidence, so a healthy assessment must not be required to produce it.
 EXPECTED_LIMITATION_CODES = {
     "assessment_scope_not_representative",
-    "unavailable_explanatory_evidence",
     "item_trader_denominator_unavailable",
 }
 HARD_METHODOLOGY_WARNING_CODES = {

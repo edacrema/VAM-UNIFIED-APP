@@ -14,10 +14,22 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from pydantic import ValidationError
 
 from .methodology import DISPLAY_DIMENSIONS
+from .wording import (
+    NEUTRAL_SCOPE_STATEMENT,
+    affordability_claims,
+    causal_claims,
+    has_approved_aggregation_wording,
+    modality_conclusions,
+    pooled_population_phrases,
+    residual_markup,
+    sanitize_claim_text,
+    withdrawn_text,
+)
 from .schemas import (
     MFIClaimCatalogEntry,
     MFIClaimValidationResult,
     MFIContextEvidenceStatement,
+    MFICorrectionAttemptRecord,
     MFICorrectionTarget,
     MFIDimensionNarrative,
     MFIExecutiveNarrative,
@@ -38,7 +50,10 @@ _CLAIM_FIELDS = (
     "recommendations",
     "priority_issues",
     "recommended_interventions",
+    # Retained although nothing emits it: a rehydrated or legacy artifact that still
+    # carries the field must stay validated rather than bypass every check.
     "modality_consideration",
+    "scope_statement",
     "motivation",
     "limitations",
 )
@@ -84,9 +99,36 @@ def build_claim_catalog(
             source_metric_ids=[
                 str(item) for item in raw.get("source_metric_ids", []) if item
             ],
+            aggregation_method=raw.get("aggregation_method")
+            or "unweighted_market_mean",
+            population_basis=raw.get("population_basis") or "descriptive",
+            pooled_denominator_available=bool(
+                raw.get("pooled_denominator_available")
+            ),
+            representation_basis=raw.get("representation_basis")
+            or "all_assessed_markets",
+            permitted_subject_phrase=str(raw.get("permitted_subject_phrase") or ""),
+            # A single canonical scope cannot express that one value legitimately backs
+            # more than one kind of claim. The list is seeded with the canonical scope so
+            # behaviour is unchanged; later phases widen it and move the validator onto it.
+            permitted_claim_scopes=[scope],
+            represented_market_count=_optional_count(
+                coverage, "available_market_count"
+            ),
+            assessed_market_count=_optional_count(
+                coverage, "total_assessed_market_count"
+            ),
         )
         catalog[metric_id] = entry.model_dump()
     return catalog
+
+
+def _optional_count(coverage: Any, key: str) -> Optional[int]:
+    """Return one coverage count as an integer, so claims need not parse the label."""
+    if not isinstance(coverage, Mapping):
+        return None
+    value = coverage.get(key)
+    return int(value) if isinstance(value, (int, float)) else None
 
 
 def compact_catalog(
@@ -111,6 +153,10 @@ def compact_catalog(
                 "dimension": entry.get("dimension"),
                 "market_name": entry.get("market_name"),
                 "region": entry.get("region"),
+                # The correct way to describe what this value measures. Supplied so the
+                # wording does not have to be inferred from the label; the classification
+                # enums behind it stay internal, since validation reads the full catalog.
+                "permitted_subject_phrase": entry.get("permitted_subject_phrase"),
             }
         )
     return result
@@ -224,7 +270,7 @@ def parse_context_evidence(
     for index, raw in enumerate(raw_statements or []):
         if not isinstance(raw, Mapping):
             continue
-        text = str(raw.get("text") or "").strip()
+        text = sanitize_claim_text(raw.get("text"))
         if not text:
             continue
         classification = str(raw.get("classification") or "unrelated")
@@ -384,17 +430,10 @@ def parse_market_narrative(
             claim_kind="recommendation",
             default_scope="market",
         )
-        modality_raw = payload.get("modality_consideration")
-        modality = (
-            _claim_from_payload(
-                modality_raw,
-                claim_id=f"market.{_slug(market_name)}.modality",
-                claim_kind="modality_consideration",
-                scope="market",
-            )
-            if modality_raw
-            else None
-        )
+        # The prompt no longer requests a modality consideration, and any model that
+        # supplies one anyway is answering a question the assessment cannot answer. The
+        # scope caveat is stated once in the executive summary and the methodology note
+        # instead of once per market.
         return MFIMarketNarrative(
             market_name=market_name,
             region=_optional_text(market_profile.get("region")),
@@ -407,7 +446,7 @@ def parse_market_narrative(
             ],
             priority_issues=issues,
             recommended_interventions=interventions,
-            modality_consideration=modality,
+            modality_consideration=None,
         ).model_dump()
     except (TypeError, ValueError, ValidationError):
         return fallback
@@ -452,6 +491,9 @@ def parse_executive_narrative(
                 claim_kind="limitation",
                 default_scope="assessment",
             ),
+            # Deterministic regardless of what the model returned, so the report always
+            # states its own scope exactly once.
+            scope_statement=_scope_statement_claim(),
         ).model_dump()
     except (TypeError, ValueError, ValidationError):
         return fallback
@@ -744,18 +786,10 @@ def fallback_market_narrative(
                 polarity="neutral",
             )
         ],
-        modality_consideration=MFINarrativeClaim(
-            claim_id=f"market.{slug}.modality",
-            text=(
-                "The MFI evidence is a market-side consideration and must be "
-                "combined with protection, programme, and feasibility evidence "
-                "before any transfer-modality decision."
-            ),
-            claim_kind="modality_consideration",
-            metric_ids=linked,
-            scope="market",
-            polarity="neutral",
-        ),
+        # Deliberately absent: repeating one identical caveat in every market section is
+        # the boilerplate the report already carries too much of, and a caveat that
+        # appears only when drafting happens to fail is not a delivery contract.
+        modality_consideration=None,
     ).model_dump()
 
 
@@ -837,7 +871,26 @@ def fallback_executive_narrative(
             )
         ],
         limitations=limitations[:3],
+        scope_statement=_scope_statement_claim(),
     ).model_dump()
+
+
+def _scope_statement_claim() -> MFINarrativeClaim:
+    """Build the deterministic statement of what the assessment does not establish.
+
+    It is emitted on every run, including LLM-drafted ones, so the report always states
+    its own scope once. Because it names a modality and reaches a conclusion about scope,
+    only the validator's methodological-negation rule keeps it legal — which makes the
+    deterministic suites a live guard on that rule.
+    """
+    return MFINarrativeClaim(
+        claim_id="assessment.scope_statement",
+        text=NEUTRAL_SCOPE_STATEMENT,
+        claim_kind="limitation",
+        metric_ids=[],
+        scope="assessment",
+        polarity="neutral",
+    )
 
 
 def _limitation_claim_ids(
@@ -1118,6 +1171,11 @@ def validate_structured_narratives(
                 )
         claim_flags.extend(_terminology_flags(text, location, claim_id, cited_ids))
         claim_flags.extend(_causality_flags(text, location, claim_id))
+        claim_flags.extend(_markup_flags(text, location, claim_id))
+        claim_flags.extend(
+            _population_wording_flags(text, location, claim_id, claim, cited_entries)
+        )
+        claim_flags = _deduplicate_flags(claim_flags)
         claim["validation_flags"] = [
             str(item["code"]) for item in claim_flags
         ]
@@ -1299,6 +1357,7 @@ def build_qa_review(
     red_team_flags: Sequence[Mapping[str, Any]],
     *,
     correction_attempts: int,
+    correction_history: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     flags = _deduplicate_flags([*deterministic_flags, *red_team_flags])
     material = [flag for flag in flags if flag["severity"] in _MATERIAL_SEVERITIES]
@@ -1313,8 +1372,111 @@ def build_qa_review(
     return MFIQAReview(
         status=status,
         correction_attempts=int(correction_attempts),
+        correction_history=[
+            MFICorrectionAttemptRecord.model_validate(record)
+            for record in correction_history
+        ],
         flags=[MFINarrativeQAFlag.model_validate(flag) for flag in flags],
     ).model_dump()
+
+
+def apply_unresolved_claim_policy(
+    *,
+    dimension_narratives: Mapping[str, Any],
+    market_narratives: Mapping[str, Any],
+    executive_narrative: Mapping[str, Any],
+    flags: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Withdraw claim text that could not be validated, keeping the draft in diagnostics.
+
+    Repair is attempted first and bounded; this runs only once the attempts are spent. A
+    high-severity finding means the statement is not supported by the assessment, so
+    delivering it with a caveat would still be delivering it. The text is replaced by
+    deterministic wording that says what happened, and the rejected draft is preserved
+    only in technical QA details.
+
+    Medium findings are left in place deliberately: they are wording or completeness
+    problems rather than unsupported statements, and the delivery policy shows them with a
+    visible marker instead of withdrawing them.
+
+    Severity alone decides, not repairability — a finding nothing can repair is precisely
+    the one that most needs replacing. No model is involved.
+    """
+    high_by_claim: dict[str, list[Mapping[str, Any]]] = {}
+    for flag in flags:
+        if str(flag.get("severity")) != "high":
+            continue
+        claim_id = _optional_text(flag.get("claim_id"))
+        if claim_id:
+            high_by_claim.setdefault(claim_id, []).append(flag)
+
+    records: list[dict[str, Any]] = []
+    if not high_by_claim:
+        return (
+            deepcopy(dict(dimension_narratives)),
+            deepcopy(dict(market_narratives)),
+            deepcopy(dict(executive_narrative)),
+            records,
+        )
+
+    dimensions = deepcopy(dict(dimension_narratives))
+    markets = deepcopy(dict(market_narratives))
+    executive = deepcopy(dict(executive_narrative))
+
+    for location, claim in _iter_claims(dimensions, markets, executive):
+        claim_id = str(claim.get("claim_id") or "")
+        matched = high_by_claim.pop(claim_id, None)
+        if not matched:
+            continue
+        replacement = withdrawn_text(claim.get("claim_kind"))
+        records.append(
+            {
+                "claim_id": claim_id,
+                "artifact_type": str(location.get("artifact_type") or ""),
+                "artifact_id": _optional_text(location.get("artifact_id")),
+                "field_name": _optional_text(location.get("field_name")),
+                "claim_kind": str(claim.get("claim_kind") or ""),
+                "rejected_text": str(claim.get("text") or ""),
+                "replacement_text": replacement,
+                "rejected_metric_ids": list(claim.get("metric_ids") or []),
+                "rejected_document_ids": list(claim.get("document_ids") or []),
+                "codes": sorted({str(flag.get("code")) for flag in matched}),
+                "flag_ids": sorted({str(flag.get("flag_id")) for flag in matched}),
+                "severity": "high",
+                "disposition": "replaced_by_deterministic_fallback",
+            }
+        )
+        claim["text"] = replacement
+        claim["substituted"] = True
+        # Citations are dropped from the claim because the evidence note would otherwise
+        # print values beneath text that no longer states anything about them, and an
+        # unresolvable citation is itself a common cause of withdrawal. The originals stay
+        # in the record above.
+        claim["metric_ids"] = []
+        claim["document_ids"] = []
+
+    return dimensions, markets, executive, records
+
+
+def unmatched_high_claim_ids(
+    flags: Sequence[Mapping[str, Any]],
+    substitutions: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Return high-severity claim ids that matched no claim in any artifact.
+
+    A finding that points at nothing cannot be shown to a reader, so reporting that claims
+    are marked would be a promise the report does not keep.
+    """
+    substituted = {str(record.get("claim_id")) for record in substitutions}
+    return sorted(
+        {
+            claim_id
+            for flag in flags
+            if str(flag.get("severity")) == "high"
+            and (claim_id := _optional_text(flag.get("claim_id")))
+            and claim_id not in substituted
+        }
+    )
 
 
 def material_repairable_flags(flags: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1457,7 +1619,10 @@ def _claim_from_payload(
     scope: str,
 ) -> MFINarrativeClaim:
     raw = payload if isinstance(payload, Mapping) else {"text": payload}
-    text = str(raw.get("text") or "").strip()
+    # The single funnel for every drafted claim, so sanitizing here makes the stored text
+    # canonical for the API, the preview, and the export alike rather than leaving each
+    # renderer to clean up after the model.
+    text = sanitize_claim_text(raw.get("text"))
     if not text:
         raise ValueError("Narrative claim text is required")
     return MFINarrativeClaim(
@@ -1692,100 +1857,115 @@ def _polarity_mismatch(
     return False
 
 
+def _location_fields(location: Mapping[str, Any]) -> dict[str, Any]:
+    """Carry a flag's artifact identity from the claim it came from.
+
+    Correction targets are grouped by ``(artifact_type, artifact_id, field_name)``, so a
+    flag that hardcodes an identity re-drafts the wrong artifact. The affordability and
+    concept checks previously hardcoded ``dimension``/``Price``, which was harmless only
+    while they were gated to that dimension.
+    """
+    return {
+        "artifact_type": str(location["artifact_type"]),
+        "artifact_id": _optional_text(location.get("artifact_id")),
+        "field_name": _optional_text(location.get("field_name")),
+    }
+
+
+# Word-boundaried, longest form first so "very high risk" reports once rather than also
+# matching the "high risk" substring inside itself.
+_TERMINOLOGY_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    (r"\bnational\s+mfi\b", "unsupported_national_terminology", "national MFI"),
+    (r"\bnational\s+score\b", "unsupported_national_terminology", "national score"),
+    (r"\bvery high risk\b", "unsupported_risk_terminology", "very high risk"),
+    (
+        r"(?<!very )\b(?:high|medium|low) risk\b",
+        "unsupported_risk_terminology",
+        "risk class",
+    ),
+    (r"\bcritical dimension\b", "unsupported_priority_terminology", "critical dimension"),
+    (r"\bcritical market\b", "unsupported_priority_terminology", "critical market"),
+)
+
+
 def _terminology_flags(
     text: str,
     location: Mapping[str, Any],
     claim_id: str,
     metric_ids: Sequence[str],
 ) -> list[dict[str, Any]]:
-    lowered = text.casefold()
-    phrases = {
-        "national mfi": "unsupported_national_terminology",
-        "national score": "unsupported_national_terminology",
-        "very high risk": "unsupported_risk_terminology",
-        "high risk": "unsupported_risk_terminology",
-        "medium risk": "unsupported_risk_terminology",
-        "low risk": "unsupported_risk_terminology",
-        "critical dimension": "unsupported_priority_terminology",
-        "critical market": "unsupported_priority_terminology",
-    }
     flags: list[dict[str, Any]] = []
-    for phrase, code in phrases.items():
-        if phrase in lowered:
+    for pattern, code, label in _TERMINOLOGY_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
             flags.append(
                 _flag(
                     code=code,
                     severity="high",
-                    artifact_type=str(location["artifact_type"]),
-                    artifact_id=_optional_text(location.get("artifact_id")),
-                    field_name=_optional_text(location.get("field_name")),
+                    **_location_fields(location),
                     claim_id=claim_id,
-                    message=f"Unsupported report terminology: {phrase}.",
+                    message=f"Unsupported report terminology: {label}.",
                     metric_ids=metric_ids,
                 )
             )
-    if any(
-        phrase in lowered
-        for phrase in (
-            "cbt is feasible",
-            "cbt is not feasible",
-            "cash transfer is feasible",
-            "cash transfers are feasible",
-            "cash-based transfer is feasible",
-        )
-    ):
+
+    for sentence in modality_conclusions(text):
         flags.append(
             _flag(
                 code="unsupported_modality_conclusion",
                 severity="high",
-                artifact_type=str(location["artifact_type"]),
-                artifact_id=_optional_text(location.get("artifact_id")),
-                field_name=_optional_text(location.get("field_name")),
+                **_location_fields(location),
                 claim_id=claim_id,
-                message="MFI evidence cannot determine transfer modality.",
+                message=(
+                    "MFI evidence cannot determine transfer modality. A conditional "
+                    "form of the conclusion is still a conclusion."
+                ),
                 metric_ids=metric_ids,
+                actual_value=sentence,
             )
         )
-    artifact_id = str(location.get("artifact_id") or "")
-    if artifact_id == "Price" and any(
-        term in lowered
-        for term in ("affordable", "affordability", "purchasing power", "inflation")
-    ):
+
+    # Ungated. The Price dimension is where affordability is most tempting, but the
+    # inference is unsupported wherever it appears, and the observed report drew it in
+    # market narratives that the dimension gate could never have seen.
+    for sentence in affordability_claims(text):
         flags.append(
             _flag(
                 code="unsupported_affordability_claim",
                 severity="high",
-                artifact_type="dimension",
-                artifact_id="Price",
-                field_name=_optional_text(location.get("field_name")),
+                **_location_fields(location),
                 claim_id=claim_id,
-                message="The Price dimension alone does not establish affordability or inflation.",
+                message=(
+                    "MFI evidence does not establish affordability, inflation, or "
+                    "household purchasing power."
+                ),
                 metric_ids=metric_ids,
+                actual_value=sentence,
             )
         )
-    if artifact_id == "Service" and any(
-        term in lowered for term in ("courtesy", "consumer satisfaction")
+
+    artifact_id = str(location.get("artifact_id") or "")
+    if artifact_id == "Service" and re.search(
+        r"\b(?:courtesy|consumer satisfaction)\b", text, re.IGNORECASE
     ):
         flags.append(
             _flag(
                 code="unsupported_service_concept",
                 severity="high",
-                artifact_type="dimension",
-                artifact_id="Service",
-                field_name=_optional_text(location.get("field_name")),
+                **_location_fields(location),
                 claim_id=claim_id,
                 message="Service evidence does not measure courtesy or consumer satisfaction.",
                 metric_ids=metric_ids,
             )
         )
-    if artifact_id == "Access & Protection" and "operating hours" in lowered:
+    if artifact_id == "Access & Protection" and re.search(
+        r"\boperating hours\b", text, re.IGNORECASE
+    ):
         flags.append(
             _flag(
                 code="unsupported_access_concept",
                 severity="high",
-                artifact_type="dimension",
-                artifact_id="Access & Protection",
-                field_name=_optional_text(location.get("field_name")),
+                **_location_fields(location),
                 claim_id=claim_id,
                 message="Access & Protection evidence does not measure operating hours.",
                 metric_ids=metric_ids,
@@ -1799,28 +1979,131 @@ def _causality_flags(
     location: Mapping[str, Any],
     claim_id: str,
 ) -> list[dict[str, Any]]:
-    if str(location.get("artifact_type")) not in {"context", "executive_summary"}:
-        return []
-    lowered = text.casefold()
-    causal = (
-        "caused",
-        "led to",
-        "resulted in",
-        "because of",
-        "drove the",
-        "is responsible for",
-    )
-    if not any(term in lowered for term in causal):
-        return []
+    """Flag causal and predictive assertions in any artifact.
+
+    Previously limited to context and executive claims, which left dimension and market
+    prose — where the observed report actually asserted mechanisms — entirely unchecked.
+    """
     return [
         _flag(
             code="unsupported_causal_claim",
             severity="high",
-            artifact_type=str(location["artifact_type"]),
-            artifact_id=_optional_text(location.get("artifact_id")),
-            field_name=_optional_text(location.get("field_name")),
+            **_location_fields(location),
             claim_id=claim_id,
-            message="Context may triangulate patterns but cannot establish causality.",
+            message=(
+                "The assessment describes patterns and cannot establish causal or "
+                "predictive effects."
+            ),
+            actual_value=sentence,
+        )
+        for sentence in causal_claims(text)
+    ]
+
+
+def _population_wording_flags(
+    text: str,
+    location: Mapping[str, Any],
+    claim_id: str,
+    claim: Mapping[str, Any],
+    cited_entries: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Enforce the aggregation wording recorded by the previous phase.
+
+    An unweighted mean of per-market rates has no respondent denominator — the processed
+    assessment carries none — so describing it as a share of traders states something the
+    data cannot support. A single market's trader proportion is the one case where that
+    wording is correct, and it is distinguished by its aggregation method rather than by
+    any property of the sentence.
+
+    Limitation claims are exempt: the limitation explaining that item-specific trader
+    denominators are unavailable is this rule's own justification.
+    """
+    if str(claim.get("claim_kind") or "") == "limitation":
+        return []
+
+    flags: list[dict[str, Any]] = []
+    unweighted = [
+        entry
+        for entry in cited_entries
+        if str(entry.get("aggregation_method")) == "unweighted_market_mean"
+    ]
+
+    pooled = [
+        entry for entry in unweighted if not entry.get("pooled_denominator_available")
+    ]
+    phrases = pooled_population_phrases(text)
+    if phrases and pooled:
+        flags.append(
+            _flag(
+                code="unsupported_population_wording",
+                severity="high",
+                **_location_fields(location),
+                claim_id=claim_id,
+                message=(
+                    "This value is an unweighted mean of market-level rates and has no "
+                    "respondent denominator, so it cannot be stated as a share of "
+                    "traders or responses."
+                ),
+                metric_ids=[str(entry.get("metric_id")) for entry in pooled],
+                expected_value=str(pooled[0].get("permitted_subject_phrase") or ""),
+                actual_value=phrases[0],
+            )
+        )
+
+    trader_level = [
+        entry
+        for entry in unweighted
+        if str(entry.get("population_basis")) == "trader_level_within_market"
+        and str(entry.get("unit")) == "proportion"
+    ]
+    if (
+        trader_level
+        and any(token[2] for token in _numeric_tokens(text))
+        and not has_approved_aggregation_wording(text)
+    ):
+        flags.append(
+            _flag(
+                code="unqualified_aggregation_wording",
+                severity="medium",
+                **_location_fields(location),
+                claim_id=claim_id,
+                message=(
+                    "A percentage derived from an unweighted mean of market-level rates "
+                    "must be qualified as unweighted or market-level."
+                ),
+                metric_ids=[str(entry.get("metric_id")) for entry in trader_level],
+                expected_value=str(
+                    trader_level[0].get("permitted_subject_phrase") or ""
+                ),
+            )
+        )
+    return flags
+
+
+def _markup_flags(
+    text: str,
+    location: Mapping[str, Any],
+    claim_id: str,
+) -> list[dict[str, Any]]:
+    """Flag Markdown delimiters that survived sanitization.
+
+    The sanitizer removes delimiters at the parsing boundary, so anything still present
+    means it aborted to protect a number, or the construct is one it does not handle.
+    Either way the canonical text is not plain, and the report contract requires it to be.
+    """
+    found = residual_markup(text)
+    if not found:
+        return []
+    return [
+        _flag(
+            code="unsupported_markup",
+            severity="medium",
+            **_location_fields(location),
+            claim_id=claim_id,
+            message=(
+                "Claim text must be plain text. Unsupported markup remains: "
+                f"{', '.join(found)}."
+            ),
         )
     ]
 
