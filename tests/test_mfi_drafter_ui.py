@@ -100,6 +100,7 @@ shared.render_bug_report_sidebar_link = lambda **kwargs: None
 shared.render_bug_report_header_link = lambda **kwargs: None
 shared.render_report_delivery = lambda **kwargs: None
 shared.render_report_blocks = lambda *args, **kwargs: None
+shared.render_mfi_raw_table_downloads = lambda *args, **kwargs: None
 shared.request_json = backend.request_json
 shared.run_async_and_poll = backend.run_async_and_poll
 shared.safe_show_error = lambda error: st.error(str(error))

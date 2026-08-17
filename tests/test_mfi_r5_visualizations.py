@@ -326,7 +326,20 @@ def test_geographic_report_caption_explains_numbered_callouts() -> None:
     blocks = build_mfi_report_blocks(
         {
             "visualizations": {"geographic_map": "image"},
-            "assessment_profile": {"dimensions": [], "markets": [], "tables": {}},
+            "assessment_profile": {
+                "dimensions": [],
+                "markets": [],
+                "priority_dimension_names": [],
+                "metric_ledger": {},
+                "tables": {
+                    "dimension_rows": [],
+                    "regional_rows": [],
+                    "subsection_rows": [],
+                    "driver_rows": [],
+                    "relevant_item_rows": [],
+                    "priority_market_rows": [],
+                },
+            },
         }
     )
     map_block = next(

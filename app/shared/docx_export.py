@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, Pt, RGBColor
 
 from app.services.market_monitor.i18n import t
@@ -210,58 +210,94 @@ def _add_basket_definitions_table_to_document(doc: Document, *, meta: Dict[str, 
     doc.add_paragraph()
 
 
-def _display_table_value(value: Any) -> str:
-    if value is None:
-        return "—"
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    if isinstance(value, list):
-        return ", ".join(str(item) for item in value)
-    return str(value)
-
-
-def _add_mfi_deterministic_table(doc: Document, *, meta: Dict[str, Any]) -> None:
+def _add_mfi_presentation_table(doc: Document, *, meta: Dict[str, Any]) -> None:
+    """Render an already projected MFI table without inferring or formatting cells."""
     rows = meta.get("rows") or []
     if not isinstance(rows, list) or not rows:
         return
-    values = [
-        row.get("values", {})
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("values"), dict)
+    spec_id = str(meta.get("spec_id") or "").strip()
+    columns = [str(column) for column in meta.get("columns", []) or []]
+    column_specs = meta.get("column_specs") or []
+    if not spec_id or not columns or not isinstance(column_specs, list):
+        raise ValueError("Projected MFI tables require a spec ID and explicit columns")
+    if len(columns) > 8 or len(column_specs) != len(columns):
+        raise ValueError("Projected MFI table columns violate the renderer contract")
+    spec_keys = [
+        str(item.get("key") or "") if isinstance(item, dict) else ""
+        for item in column_specs
     ]
-    if not values:
-        return
-    requested = [
-        str(column) for column in meta.get("columns", []) if str(column).strip()
-    ]
-    columns = requested or list(
-        dict.fromkeys(key for row in values for key in row.keys())
-    )
-    if not columns:
-        return
+    if spec_keys != columns:
+        raise ValueError("Projected MFI table columns do not match column_specs")
+    values = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("values"), dict):
+            raise ValueError("Projected MFI table contains a malformed row")
+        if any(column not in row["values"] for column in columns):
+            raise ValueError("Projected MFI table row is missing a visible column")
+        values.append(row["values"])
     title = str(meta.get("title") or "").strip()
     if title:
         doc.add_heading(title, level=4)
     table = doc.add_table(rows=len(values) + 1, cols=len(columns))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    total_width = sum(float(item["width_hint"]) for item in column_specs)
+    widths = [6.5 * float(item["width_hint"]) / total_width for item in column_specs]
+    alignment = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT,
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    }
     for index, column in enumerate(columns):
         cell = table.rows[0].cells[index]
-        cell.text = column.replace("_", " ").title()
+        cell.text = str(column_specs[index].get("label") or "")
+        _set_table_cell_width(cell, widths[index])
         _set_cell_background(cell, (0, 114, 188))
         for paragraph in cell.paragraphs:
+            paragraph.alignment = alignment.get(
+                str(column_specs[index].get("alignment") or "left"),
+                WD_ALIGN_PARAGRAPH.LEFT,
+            )
             for run in paragraph.runs:
                 run.bold = True
                 run.font.size = Pt(7)
                 run.font.color.rgb = RGBColor(255, 255, 255)
+    _set_repeat_table_header(table.rows[0])
     for row_index, row in enumerate(values, start=1):
+        _set_table_row_cant_split(table.rows[row_index])
         for column_index, column in enumerate(columns):
             cell = table.rows[row_index].cells[column_index]
-            cell.text = _display_table_value(row.get(column))
+            _set_table_cell_width(cell, widths[column_index])
+            cell.text = str(row[column])
             for paragraph in cell.paragraphs:
+                paragraph.alignment = alignment.get(
+                    str(column_specs[column_index].get("alignment") or "left"),
+                    WD_ALIGN_PARAGRAPH.LEFT,
+                )
                 for run in paragraph.runs:
                     run.font.size = Pt(7)
     doc.add_paragraph()
+
+
+def _set_repeat_table_header(row: Any) -> None:
+    properties = row._tr.get_or_add_trPr()
+    element = OxmlElement("w:tblHeader")
+    element.set(qn("w:val"), "true")
+    properties.append(element)
+
+
+def _set_table_row_cant_split(row: Any) -> None:
+    properties = row._tr.get_or_add_trPr()
+    properties.append(OxmlElement("w:cantSplit"))
+
+
+def _set_table_cell_width(cell: Any, width_inches: float) -> None:
+    cell.width = Inches(width_inches)
+    properties = cell._tc.get_or_add_tcPr()
+    width = properties.get_or_add_tcW()
+    width.set(qn("w:w"), str(int(round(width_inches * 1440))))
+    width.set(qn("w:type"), "dxa")
 
 
 def _add_notice_box(
@@ -379,8 +415,12 @@ def build_docx_bytes_from_report_blocks(
                 _add_overview_table_to_document(doc, meta=meta)
             elif isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
                 _add_basket_definitions_table_to_document(doc, meta=meta)
+            elif isinstance(meta, dict) and meta.get("table_kind") == "mfi_presentation":
+                _add_mfi_presentation_table(doc, meta=meta)
             elif isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
-                _add_mfi_deterministic_table(doc, meta=meta)
+                raise ValueError(
+                    "Unprojected canonical MFI tables cannot be rendered in DOCX"
+                )
             continue
 
         if block.type == "definition_box":

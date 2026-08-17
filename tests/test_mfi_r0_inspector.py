@@ -141,9 +141,28 @@ def test_notice_boxes_are_excluded_from_table_width() -> None:
         ReportBlock(
             type="table",
             meta={
-                "table_kind": "mfi_deterministic",
+                "table_kind": "mfi_presentation",
+                "spec_id": "mfi.inspector_width_probe.v1",
                 "title": "Dimension summary",
-                "columns": [],
+                "columns": ["dimension", "mean"],
+                "column_specs": [
+                    {
+                        "key": "dimension",
+                        "label": "Dimension",
+                        "format": "text",
+                        "alignment": "left",
+                        "width_hint": 2.0,
+                        "ledger_linkage_policy": "not_applicable",
+                    },
+                    {
+                        "key": "mean",
+                        "label": "Mean",
+                        "format": "score_statistic",
+                        "alignment": "right",
+                        "width_hint": 1.0,
+                        "ledger_linkage_policy": "not_applicable",
+                    },
+                ],
                 "rows": [{"values": {"dimension": "Service", "mean": 3.33}}],
             },
         ),
@@ -363,20 +382,10 @@ def test_optional_coverage_does_not_raise_an_evidence_limitation(ratchet_report)
     assert ratchet_report.optional_only_limitation_count == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: deterministic tables render every key as a column "
-    "(FIX-05, fixed in R6)",
-)
 def test_report_tables_stay_within_the_readable_column_budget(ratchet_report) -> None:
     assert ratchet_report.max_table_column_count <= 8
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: deterministic tables reach the renderers with no explicit "
-    "presentation projection (FIX-05, fixed in R6)",
-)
 def test_every_report_table_declares_its_columns(ratchet_report) -> None:
     assert ratchet_report.undeclared_column_table_count == 0
 
@@ -433,9 +442,26 @@ def test_material_qa_findings_are_tabulated() -> None:
         ReportBlock(
             type="table",
             meta={
-                "table_kind": "mfi_deterministic",
+                "table_kind": "mfi_presentation",
+                "spec_id": "mfi.qa_probe.v1",
                 "title": "QA findings",
                 "columns": ["severity", "claim_id", "code", "message"],
+                "column_specs": [
+                    {
+                        "key": key,
+                        "label": label,
+                        "format": "text",
+                        "alignment": "left",
+                        "width_hint": 1.0,
+                        "ledger_linkage_policy": "not_applicable",
+                    }
+                    for key, label in (
+                        ("severity", "Severity"),
+                        ("claim_id", "Claim ID"),
+                        ("code", "Code"),
+                        ("message", "Message"),
+                    )
+                ],
                 "rows": [
                     {
                         "row_id": "flag-1",

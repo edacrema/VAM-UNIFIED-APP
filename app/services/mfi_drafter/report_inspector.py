@@ -954,7 +954,10 @@ def _docx_table_shape(
             index=index,
             kind=kind,
             title=heading,
-            declared_column_count=0,
+            # DOCX has no report-block metadata. A concrete header grid is therefore
+            # the rendered declaration of its columns; block-mode inspection remains
+            # responsible for detecting missing projection metadata before export.
+            declared_column_count=header_count if kind == "data" else 0,
             grid_column_count=grid,
             header_cell_count=header_count,
             effective_column_count=effective,

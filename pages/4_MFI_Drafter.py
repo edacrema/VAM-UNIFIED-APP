@@ -6,6 +6,7 @@ from streamlit_shared import (
     render_bug_report_sidebar_link,
     render_instructions_sidebar_button,
     render_onboarding_sidebar_button,
+    render_mfi_raw_table_downloads,
     render_report_delivery,
     render_report_blocks,
     render_wfp_sidebar_logo,
@@ -236,6 +237,10 @@ if isinstance(result, dict):
             st.markdown("**Generation notices**")
             for warning in result.get("warnings") or []:
                 st.warning(str(warning))
+        render_mfi_raw_table_downloads(
+            assessment_profile,
+            key_prefix=f"mfi_{display_run_id or 'completed'}",
+        )
         st.markdown("**Deterministic assessment profile**")
         st.json(assessment_profile)
         st.markdown("**Claim validation**")

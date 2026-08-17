@@ -10,6 +10,10 @@ from app.services.mfi_drafter.methodology import (
     DIMENSION_DESCRIPTIONS,
     METHODOLOGY_VERSION,
 )
+from app.services.mfi_drafter.table_projection import (
+    build_mfi_presentation_table,
+    build_mfi_qa_presentation_table,
+)
 from app.services.mfi_drafter.wording import NEUTRAL_SCOPE_STATEMENT
 
 
@@ -770,21 +774,20 @@ def _append_mfi_claim(
 
 def _mfi_table_block(
     title: str,
-    rows: Any,
+    profile: Dict[str, Any],
     *,
-    columns: Optional[List[str]] = None,
+    spec_id: str,
+    dimension: Optional[str] = None,
 ) -> Optional[ReportBlock]:
-    if not isinstance(rows, list) or not rows:
-        return None
-    return ReportBlock(
-        type="table",
-        meta={
-            "table_kind": "mfi_deterministic",
-            "title": title,
-            "columns": columns or [],
-            "rows": rows,
-        },
+    meta = build_mfi_presentation_table(
+        profile,
+        spec_id=spec_id,
+        title=title,
+        dimension=dimension,
     )
+    if not meta.get("rows"):
+        return None
+    return ReportBlock(type="table", meta=meta)
 
 
 def _mfi_safe_qa_text(text: Any, qa_context: Dict[str, Any]) -> str:
@@ -844,49 +847,61 @@ def _mfi_qa_findings_table(
     flags = qa_context.get("flags", [])
     if not flags:
         return None
-    columns = [
-        "severity",
-        "source",
-        "artifact",
-        "location",
-        "field",
-        "claim_id",
-        "code",
-        "message",
-        "attempts",
-        "outcome",
-        "disposition",
-    ]
     rows = []
     for flag in flags:
         audit = _mfi_flag_audit(flag, qa_context)
+        raw_values = {
+            "severity": str(flag.get("severity") or "").upper(),
+            "source": flag.get("source") or "",
+            "artifact": flag.get("artifact_type") or "",
+            "location": flag.get("artifact_id") or "",
+            "field": flag.get("field_name") or "",
+            "claim_id": flag.get("claim_id") or "",
+            "code": flag.get("code") or "",
+            "message": _mfi_safe_qa_text(flag.get("message"), qa_context),
+            "attempts": audit["attempt_count"],
+            "outcome": audit["outcome"],
+            "disposition": audit["disposition"],
+        }
         rows.append(
             {
                 "row_id": str(flag.get("flag_id")),
                 "values": {
-                    "severity": str(flag.get("severity") or "").upper(),
-                    "source": flag.get("source") or "",
-                    "artifact": flag.get("artifact_type") or "",
-                    "location": flag.get("artifact_id") or "",
-                    "field": flag.get("field_name") or "",
-                    "claim_id": flag.get("claim_id") or "",
-                    "code": flag.get("code") or "",
-                    "message": _mfi_safe_qa_text(flag.get("message"), qa_context),
-                    "attempts": audit["attempt_count"],
-                    "outcome": audit["outcome"],
-                    "disposition": audit["disposition"],
+                    "severity": raw_values["severity"],
+                    "source": raw_values["source"],
+                    "artifact_location": " / ".join(
+                        value
+                        for value in (
+                            str(raw_values["artifact"]),
+                            str(raw_values["location"]),
+                        )
+                        if value
+                    ),
+                    "field": raw_values["field"],
+                    "claim_code": " / ".join(
+                        value
+                        for value in (
+                            str(raw_values["claim_id"]),
+                            str(raw_values["code"]),
+                        )
+                        if value
+                    ),
+                    "message": raw_values["message"],
+                    "attempts_outcome": (
+                        f"{raw_values['attempts']} / {raw_values['outcome']}"
+                    ),
+                    "disposition": raw_values["disposition"],
                 },
+                "raw_values": raw_values,
             }
         )
     return ReportBlock(
         type="table",
-        meta={
-            "table_kind": "mfi_deterministic",
-            "title": "QA findings",
-            "columns": columns,
-            "rows": rows,
-            "qa_flag_ids": [str(flag.get("flag_id")) for flag in flags],
-        },
+        meta=build_mfi_qa_presentation_table(
+            title="QA findings",
+            rows=rows,
+            qa_flag_ids=[str(flag.get("flag_id")) for flag in flags],
+        ),
     )
 
 
@@ -944,7 +959,6 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     country = str(result.get("country") or "").strip()
     title = f"MFI Report - {country}" if country else "MFI Report"
     profile = result.get("assessment_profile") or {}
-    tables = profile.get("tables") or {}
     catalog = result.get("claim_catalog") or {}
     context_evidence = result.get("context_evidence") or []
     dimension_narratives = result.get("dimension_narratives") or {}
@@ -1077,11 +1091,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 width=7.0,
             )
         )
-    for title_text, table_key in (
-        ("Dimension summary", "dimension_rows"),
-        ("Regional dimension summary", "regional_rows"),
+    for title_text, spec_id in (
+        ("Dimension summary", "mfi.dimension_summary.v1"),
+        ("Regional dimension summary", "mfi.regional_summary.v1"),
     ):
-        table = _mfi_table_block(title_text, tables.get(table_key))
+        table = _mfi_table_block(title_text, profile, spec_id=spec_id)
         if table:
             blocks.append(table)
     if visualizations.get("geographic_map"):
@@ -1204,20 +1218,19 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 documents=documents,
                 qa_context=qa_context,
             )
-        for table_key, label in (
-            ("subsection_rows", "Official subsection evidence"),
-            ("driver_rows", "Ranked explanatory evidence"),
-            ("relevant_item_rows", "Relevant item evidence"),
+        for spec_id, label in (
+            ("mfi.official_subsection.v1", "Official subsection evidence"),
+            ("mfi.ranked_driver.v1", "Ranked explanatory evidence"),
+            ("mfi.relevant_item.v1", "Relevant item evidence"),
         ):
-            if dimension == "Food Quality" and table_key == "subsection_rows":
+            if dimension == "Food Quality" and spec_id == "mfi.official_subsection.v1":
                 continue
-            rows = [
-                row
-                for row in tables.get(table_key, []) or []
-                if isinstance(row, dict)
-                and (row.get("values") or {}).get("dimension") == dimension
-            ]
-            table = _mfi_table_block(f"{dimension}: {label}", rows)
+            table = _mfi_table_block(
+                f"{dimension}: {label}",
+                profile,
+                spec_id=spec_id,
+                dimension=str(dimension),
+            )
             if table:
                 blocks.append(table)
         safe_name = re.sub(
@@ -1248,7 +1261,9 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         )
     )
     priority_market_table = _mfi_table_block(
-        "Selected assessed markets", tables.get("priority_market_rows")
+        "Selected assessed markets",
+        profile,
+        spec_id="mfi.priority_market.v1",
     )
     if priority_market_table:
         blocks.append(priority_market_table)
@@ -1291,7 +1306,9 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 f"Methodology version: {result.get('methodology_version') or METHODOLOGY_VERSION}. "
                 f"Score authority: {result.get('score_authority', '')}. "
                 "Stored DataBridge Level-1 scores remain authoritative. "
-                f"{NEUTRAL_SCOPE_STATEMENT}"
+                f"{NEUTRAL_SCOPE_STATEMENT} "
+                "Complete unprojected analytical tables remain available as JSON and "
+                "CSV files in the report's Technical details downloads."
             ),
         )
     )

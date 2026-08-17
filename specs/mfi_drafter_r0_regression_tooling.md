@@ -97,6 +97,12 @@ diagnostic ratchet is now a passing assertion across all nine dimensions, and de
 coverage-contract tests reject missing, malformed, or internally inconsistent typed
 coverage before a chart can be delivered.
 
+**FIX-05 (canonical rows exported without a reader-facing projection)** is closed in R6.
+Six immutable analytical table specs now select and format report rows before they reach
+either renderer; every visible analytical cell retains ledger linkage, all tables declare
+at most eight columns, and complete canonical rows remain available through the Technical
+details JSON/CSV downloads.
+
 ### Current ledger
 
 | Test location | Defect | Owning phase |
@@ -105,7 +111,6 @@ coverage before a chart can be delivered.
 | artifact | Unweighted means of market rates worded as respondent shares (FIX-03) | R3 |
 | artifact | Markdown delimiters survive into the export (FIX-08) | R3 |
 | artifact, inspector | No claim-level validation marker; QA findings never tabulated (FIX-01) | R4 |
-| all three | Tables exported with no presentation projection (FIX-05) | R6 |
 | all three | Context heading emitted empty; coverage restated per citation (FIX-07, FIX-09) | R7 |
 | artifact, inspector | Boilerplate repeated verbatim across dimensions (FIX-11) | R8 |
 

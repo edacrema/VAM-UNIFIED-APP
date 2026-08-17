@@ -222,11 +222,6 @@ def test_required_evidence_is_complete_on_the_diagnostic_sample(diagnostic_run) 
     assert warning_metrics == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: deterministic tables render every key as a column "
-    "(FIX-05, fixed in R6)",
-)
 def test_diagnostic_tables_stay_within_the_readable_column_budget(
     diagnostic_report,
 ) -> None:

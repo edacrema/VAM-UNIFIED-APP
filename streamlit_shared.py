@@ -11,6 +11,7 @@ from urllib.parse import quote
 import pandas as pd
 import streamlit as st
 
+from app.services.mfi_drafter.table_projection import build_mfi_raw_table_downloads
 from app.shared.report_blocks import basket_definition_table_display
 from app.streamlit_backend.dispatcher import dispatch_request
 
@@ -942,6 +943,31 @@ def render_report_sections(sections: Any) -> None:
                 st.write(content)
 
 
+def render_mfi_raw_table_downloads(
+    assessment_profile: Any,
+    *,
+    key_prefix: str,
+) -> None:
+    """Render the complete canonical table bundle in Technical details."""
+    if not isinstance(assessment_profile, dict):
+        return
+    st.markdown("**Complete analytical table downloads**")
+    st.caption(
+        "These files contain the complete unprojected Phase 2 tables at canonical "
+        "precision; reader-facing report tables are selected and formatted projections."
+    )
+    for index, download in enumerate(
+        build_mfi_raw_table_downloads(assessment_profile)
+    ):
+        st.download_button(
+            str(download["label"]),
+            data=download["data"],
+            file_name=str(download["file_name"]),
+            mime=str(download["mime"]),
+            key=f"{key_prefix}_raw_table_{index}",
+        )
+
+
 def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
     if not isinstance(blocks, list):
         st.write(blocks)
@@ -1101,29 +1127,41 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
                         key=f"report_table_download_{idx}",
                     )
                     continue
-            if isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
+            if isinstance(meta, dict) and meta.get("table_kind") == "mfi_presentation":
                 rows = meta.get("rows") or []
-                flat_rows = [
-                    row.get("values", {})
-                    for row in rows
-                    if isinstance(row, dict) and isinstance(row.get("values"), dict)
-                ]
-                if flat_rows:
+                columns = [str(column) for column in meta.get("columns", []) or []]
+                column_specs = meta.get("column_specs") or []
+                if not str(meta.get("spec_id") or "").strip() or not columns:
+                    raise ValueError(
+                        "Projected MFI tables require a spec ID and explicit columns"
+                    )
+                if not isinstance(column_specs, list) or [
+                    str(item.get("key") or "") if isinstance(item, dict) else ""
+                    for item in column_specs
+                ] != columns:
+                    raise ValueError(
+                        "Projected MFI table columns do not match column_specs"
+                    )
+                display_rows = []
+                labels = [str(item.get("label") or "") for item in column_specs]
+                for row in rows:
+                    values = row.get("values") if isinstance(row, dict) else None
+                    if not isinstance(values, dict) or any(
+                        column not in values for column in columns
+                    ):
+                        raise ValueError("Projected MFI table contains a malformed row")
+                    display_rows.append([values[column] for column in columns])
+                if display_rows:
                     title = str(meta.get("title") or "").strip()
                     if title:
                         st.markdown(f"**{title}**")
-                    columns = [
-                        str(column)
-                        for column in meta.get("columns", [])
-                        if str(column).strip()
-                    ]
-                    dataframe = pd.DataFrame(flat_rows)
-                    if columns:
-                        dataframe = dataframe[
-                            [column for column in columns if column in dataframe.columns]
-                        ]
+                    dataframe = pd.DataFrame(display_rows, columns=labels)
                     st.dataframe(dataframe, width="stretch", hide_index=True)
                 continue
+            if isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
+                raise ValueError(
+                    "Unprojected canonical MFI tables cannot be rendered in Streamlit"
+                )
 
             if isinstance(meta, dict):
                 st.json(meta)

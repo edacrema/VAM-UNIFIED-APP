@@ -19,6 +19,7 @@ from .methodology import (
     OFFICIAL_DIMENSION_SCORE_VARIABLES,
     SCORE_AUTHORITY,
 )
+from .table_projection import MFIReportTableColumn, MFIReportTableSpec
 
 
 # ============================================================================

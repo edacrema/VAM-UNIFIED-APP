@@ -21,6 +21,7 @@ from app.services.mfi_drafter.report_inspector import (
     inspect_docx_bytes,
     inspect_docx_path,
 )
+from app.services.mfi_drafter.synthetic_fixtures import build_report_run
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import ReportBlock
 
@@ -71,9 +72,25 @@ def r4_traceability_report() -> StructuralReport:
         ReportBlock(
             type="table",
             meta={
-                "table_kind": "mfi_deterministic",
+                "table_kind": "mfi_presentation",
+                "spec_id": "mfi.qa_traceability_probe.v1",
                 "title": "QA findings",
                 "columns": ["severity", "claim_id", "code"],
+                "column_specs": [
+                    {
+                        "key": key,
+                        "label": label,
+                        "format": "text",
+                        "alignment": "left",
+                        "width_hint": 1.0,
+                        "ledger_linkage_policy": "not_applicable",
+                    }
+                    for key, label in (
+                        ("severity", "Severity"),
+                        ("claim_id", "Claim ID"),
+                        ("code", "Code"),
+                    )
+                ],
                 "rows": [
                     {
                         "row_id": "flag-1",
@@ -90,6 +107,12 @@ def r4_traceability_report() -> StructuralReport:
     return inspect_docx_bytes(
         build_docx_bytes_from_report_blocks(blocks, visualizations={})
     )
+
+
+@pytest.fixture(scope="module")
+def r6_projection_report() -> StructuralReport:
+    """Exercise the current projection; stored artifacts may predate R6."""
+    return inspect_docx_bytes(build_report_run(render_figures=False).docx)
 
 
 def test_artifact_is_a_real_report(artifact_report) -> None:
@@ -144,13 +167,10 @@ def test_no_assessment_statistic_is_worded_as_a_respondent_share(artifact_report
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: internal deterministic rows are exported without a presentation "
-    "projection (FIX-05, fixed in R6)",
-)
-def test_exported_tables_stay_within_the_readable_column_budget(artifact_report) -> None:
-    assert artifact_report.max_table_column_count <= 8
+def test_exported_tables_stay_within_the_readable_column_budget(
+    r6_projection_report,
+) -> None:
+    assert r6_projection_report.max_table_column_count <= 8
 
 
 @pytest.mark.xfail(

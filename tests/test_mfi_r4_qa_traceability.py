@@ -87,7 +87,15 @@ def _result(*, claim: dict | None = None, flags: list[dict] | None = None) -> di
             "priority_market_names": [],
             "markets": [],
             "limitations": [],
-            "tables": {},
+            "metric_ledger": {},
+            "tables": {
+                "dimension_rows": [],
+                "regional_rows": [],
+                "subsection_rows": [],
+                "driver_rows": [],
+                "relevant_item_rows": [],
+                "priority_market_rows": [],
+            },
         },
         "claim_catalog": {
             "assessment.dimension.price.mean": {
@@ -213,8 +221,11 @@ def test_global_red_team_failure_is_listed_without_fake_claim_marker() -> None:
         for block in blocks
         if block.type == "table" and (block.meta or {}).get("title") == "QA findings"
     )
-    assert qa_table.meta["rows"][0]["values"]["claim_id"] == ""
-    assert qa_table.meta["rows"][0]["values"]["disposition"] == "global_unresolved"
+    assert qa_table.meta["rows"][0]["raw_values"]["claim_id"] == ""
+    assert (
+        qa_table.meta["rows"][0]["raw_values"]["disposition"]
+        == "global_unresolved"
+    )
 
 
 def test_unmatched_high_claim_id_is_promoted_to_global_delivery_notice() -> None:
