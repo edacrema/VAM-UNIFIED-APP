@@ -60,6 +60,7 @@ from .narrative import (
     build_correction_targets,
     build_qa_review,
     compact_catalog,
+    deduplicate_dimension_recommendations,
     dimension_catalog_ids,
     executive_catalog_ids,
     fallback_dimension_narrative,
@@ -67,6 +68,7 @@ from .narrative import (
     fallback_market_narrative,
     market_catalog_ids,
     material_repairable_flags,
+    NARRATIVE_DENSITY_POLICY,
     normalize_red_team_flags,
     parse_context_evidence,
     parse_dimension_narrative,
@@ -1508,6 +1510,15 @@ subsections (Food Quality: applicable question drivers), 2-4 explanatory
 drivers, relevant items when supplied, localized patterns, and limitations.
 Recommendations must cite evidence used by a finding.
 
+R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
+- non-priority: 1 key finding, 0 geographic patterns, 1 limitation, and
+  1 recommendation; do not return subdimension analysis;
+- priority: {NARRATIVE_DENSITY_POLICY.priority_findings} key findings,
+  {NARRATIVE_DENSITY_POLICY.priority_subdimensions} subdimension interpretations,
+  {NARRATIVE_DENSITY_POLICY.priority_geographic_patterns} geographic patterns,
+  {NARRATIVE_DENSITY_POLICY.priority_limitations} limitation, and
+  {NARRATIVE_DENSITY_POLICY.priority_recommendations} recommendations.
+
 PROHIBITIONS:
 {json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
@@ -1598,6 +1609,8 @@ Relevant targets:
         else:
             narratives[dimension] = drafted
 
+    narratives = deduplicate_dimension_recommendations(narratives, dimensions)
+
     updates = {
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
@@ -1667,7 +1680,9 @@ weak dimensions and matching market-scoped evidence. Every number must exactly
 match a `formatted_value` in CLAIM_CATALOG and cite the associated `metric_id`.
 Do not calculate or infer values. Every claim must declare metric_ids,
 document_ids, scope, and polarity. Recommendations must cite evidence used by a
-priority issue.
+priority issue. A limitation is optional and may be included only when it is
+specific to this market and cites market-scoped evidence. Do not repeat a
+generic assessment limitation.
 
 PROHIBITIONS:
 {json.dumps(list(NARRATIVE_PROHIBITIONS))}
@@ -1681,16 +1696,22 @@ CLAIM_CATALOG:
 CONSTRAINTS:
 {json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
 
+R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
+- {NARRATIVE_DENSITY_POLICY.market_priority_issues} priority issues;
+- {NARRATIVE_DENSITY_POLICY.market_recommendations} linked recommendations;
+- {NARRATIVE_DENSITY_POLICY.market_limitations} market-specific limitation.
+
 Return:
 {{
   "priority_issues": [CLAIM],
-  "recommended_interventions": [CLAIM]
+  "recommended_interventions": [CLAIM],
+  "limitations": [CLAIM]
 }}
 where CLAIM is:
 {{
   "claim_id": "stable id",
   "text": "...",
-  "claim_kind": "finding|recommendation",
+  "claim_kind": "finding|recommendation|limitation",
   "metric_ids": ["ledger ids"],
   "document_ids": [],
   "scope": "market",
@@ -1839,6 +1860,11 @@ CLAIM_CATALOG:
 
 CONSTRAINTS:
 {json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
+
+R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
+- one key finding for each supplied priority dimension;
+- {NARRATIVE_DENSITY_POLICY.executive_recommendations} recommendations;
+- {NARRATIVE_DENSITY_POLICY.executive_limitations} limitations.
 
 Return:
 {{

@@ -981,6 +981,13 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
             continue
 
         btype = block.get("type")
+        meta = block.get("meta")
+        layout = (
+            meta.get("mfi_layout")
+            if isinstance(meta, dict)
+            and isinstance(meta.get("mfi_layout"), dict)
+            else {}
+        )
 
         if btype == "heading":
             text = str(block.get("text") or "")
@@ -988,6 +995,10 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
             if level <= 1:
                 st.title(text)
             elif level == 2:
+                if layout.get("role") == "major_section" and idx > 1:
+                    divider = getattr(st, "divider", None)
+                    if callable(divider):
+                        divider()
                 st.header(text)
             elif level == 3:
                 st.subheader(text)
@@ -1076,7 +1087,6 @@ def render_report_blocks(blocks: Any, visualizations: Any = None) -> None:
             continue
 
         if btype == "table":
-            meta = block.get("meta")
             if isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
                 headers, rows = basket_definition_table_display(meta)
                 if headers and rows:

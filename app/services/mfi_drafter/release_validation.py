@@ -32,7 +32,8 @@ from .graph import node_mfi_graph_designer
 from .methodology import OFFICIAL_SCORE_DEFINITIONS
 from .narrative import (
     build_claim_catalog,
-    build_qa_review,
+        build_qa_review,
+        deduplicate_dimension_recommendations,
     fallback_dimension_narrative,
     fallback_executive_narrative,
     fallback_market_narrative,
@@ -339,6 +340,10 @@ def _deterministic_result(
         )
         for item in profile["dimensions"]
     }
+    dimension_narratives = deduplicate_dimension_recommendations(
+        dimension_narratives,
+        profile["dimensions"],
+    )
     market_narratives = {
         item["market_name"]: fallback_market_narrative(item)
         for item in profile["markets"]

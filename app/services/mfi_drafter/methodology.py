@@ -133,6 +133,52 @@ DIMENSION_DESCRIPTIONS: Mapping[str, str] = MappingProxyType(
     }
 )
 
+# Deterministic, dimension-specific review language for fallback narratives and for
+# replacing repeated LLM boilerplate. These statements intentionally stay within the
+# MFI evidence boundary: they request verification or monitoring and never prescribe a
+# transfer modality or infer an operational outcome.
+DIMENSION_REVIEW_GUIDANCE: Mapping[str, str] = MappingProxyType(
+    {
+        "Assortment": (
+            "Review the cited breadth and SKU-depth evidence to identify which "
+            "essential-goods groups require additional market verification."
+        ),
+        "Availability": (
+            "Review the cited category-availability and stock-out evidence to target "
+            "follow-up checks on the represented product groups."
+        ),
+        "Price": (
+            "Use the cited price-increase and price-stability evidence to target "
+            "additional price monitoring; the MFI result alone does not establish "
+            "affordability."
+        ),
+        "Resilience": (
+            "Review the cited replenishment, stock-duration, and supplier evidence to "
+            "target further verification of market resilience."
+        ),
+        "Competition": (
+            "Review the cited trader-competition and supply-control evidence to target "
+            "further verification of competitive conditions."
+        ),
+        "Infrastructure": (
+            "Review the cited market-condition and facility evidence to target "
+            "site-specific infrastructure verification."
+        ),
+        "Service": (
+            "Review the cited shopping and checkout-practice evidence to target "
+            "follow-up observation of the weakest retail practices."
+        ),
+        "Food Quality": (
+            "Review the cited applicable food-handling and protection questions to "
+            "target further quality-condition verification."
+        ),
+        "Access & Protection": (
+            "Review the cited access-barrier, threat, and security evidence to target "
+            "location-specific access and protection verification."
+        ),
+    }
+)
+
 NARRATIVE_PROMPT_CONSTRAINTS = (
     "Use only values and identifiers in the supplied deterministic claim catalog.",
     "Do not calculate, average, normalize, invert, rank, or transform values.",

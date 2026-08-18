@@ -395,11 +395,6 @@ def test_no_section_heading_is_left_empty(ratchet_report) -> None:
     assert ratchet_report.empty_section_titles == ()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: the same follow-up sentence is repeated for every dimension "
-    "(FIX-11, fixed in R8)",
-)
 def test_boilerplate_is_not_repeated_verbatim(ratchet_report) -> None:
     assert ratchet_report.max_boilerplate_repetition <= 1
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.services.market_monitor.i18n import format_decimal_value, format_month_label, t
 from app.services.mfi_drafter.methodology import (
@@ -42,6 +42,35 @@ class ReportBlock(BaseModel):
     meta: Optional[Dict[str, Any]] = None
 
 
+class MFIReportLayoutHint(BaseModel):
+    """Typed internal layout contract shared by MFI renderers."""
+
+    model_config = ConfigDict(frozen=True)
+
+    report_family: Literal["mfi"] = "mfi"
+    role: Literal[
+        "title",
+        "major_section",
+        "subsection",
+        "minor_heading",
+        "body",
+        "claim",
+        "evidence_note",
+        "definition",
+        "figure",
+        "table",
+        "notice",
+        "references",
+    ]
+    group_id: Optional[str] = None
+    page_break_before: bool = False
+    keep_with_next: bool = False
+    keep_together: bool = False
+    compact_after: bool = False
+    country: Optional[str] = None
+    methodology_version: Optional[str] = None
+
+
 _MFI_DIMENSIONS = [
     "Assortment",
     "Availability",
@@ -56,6 +85,14 @@ _MFI_DIMENSIONS = [
 
 
 _MFI_DIMENSION_DEFINITIONS: Dict[str, str] = dict(DIMENSION_DESCRIPTIONS)
+
+_MFI_MAJOR_PAGE_BREAK_HEADINGS = {
+    "Executive summary",
+    "MFI dimensions",
+    "Expanded priority-dimension evidence",
+    "Lowest-scoring assessed markets selected for review",
+    "Methodology, limitations, and QA notices",
+}
 
 
 _INSERT_FIGURE_RE = re.compile(r"\[INSERT GRAPH:\s*([A-Za-z0-9_\-]+)\s*\]", flags=re.IGNORECASE)
@@ -980,6 +1017,97 @@ def _mfi_context_limitation_text(code: str) -> str:
     }.get(code, "Context limitation: contextual evidence was unavailable.")
 
 
+def _apply_mfi_layout_contract(
+    blocks: List[ReportBlock],
+    *,
+    country: str,
+    methodology_version: str,
+) -> List[ReportBlock]:
+    """Attach explicit R8 layout roles without making renderers infer semantics."""
+    for index, block in enumerate(blocks):
+        meta = dict(block.meta or {})
+        next_block = blocks[index + 1] if index + 1 < len(blocks) else None
+        claim_id = str(meta.get("claim_id") or "").strip() or None
+        role: str
+        page_break_before = False
+        keep_with_next = False
+        keep_together = False
+        compact_after = False
+        if block.type == "heading":
+            if int(block.level or 1) <= 1:
+                role = "title"
+            elif int(block.level or 2) == 2:
+                role = "major_section"
+                page_break_before = str(block.text or "") in (
+                    _MFI_MAJOR_PAGE_BREAK_HEADINGS
+                )
+            elif int(block.level or 3) == 3:
+                role = "subsection"
+            else:
+                role = "minor_heading"
+            keep_with_next = True
+        elif block.type == "paragraph":
+            role = "claim" if claim_id else "body"
+            keep_with_next = bool(
+                claim_id
+                and next_block is not None
+                and next_block.type in {"evidence_note", "claim_warning"}
+                and str((next_block.meta or {}).get("claim_id") or "") == claim_id
+            )
+            keep_together = bool(claim_id)
+            compact_after = bool(claim_id)
+        elif block.type == "evidence_note":
+            role = "evidence_note"
+            keep_with_next = bool(
+                next_block is not None
+                and next_block.type == "claim_warning"
+                and str((next_block.meta or {}).get("claim_id") or "") == claim_id
+            )
+            keep_together = True
+            compact_after = True
+        elif block.type == "definition_box":
+            role = "definition"
+            keep_with_next = True
+            keep_together = True
+            compact_after = True
+        elif block.type == "figure":
+            role = "figure"
+            keep_with_next = bool(block.caption)
+            keep_together = True
+            compact_after = True
+        elif block.type == "table":
+            role = "table"
+            compact_after = True
+        elif block.type == "references":
+            role = "references"
+        elif block.type in {
+            "limitation_box",
+            "methodology_note",
+            "qa_warning",
+            "claim_warning",
+        }:
+            role = "notice"
+            keep_together = True
+            compact_after = True
+        else:
+            role = "body"
+        layout = MFIReportLayoutHint(
+            role=role,
+            group_id=claim_id,
+            page_break_before=page_break_before,
+            keep_with_next=keep_with_next,
+            keep_together=keep_together,
+            compact_after=compact_after,
+            country=country or None if role == "title" else None,
+            methodology_version=(
+                methodology_version if role == "title" else None
+            ),
+        )
+        meta["mfi_layout"] = layout.model_dump(mode="json")
+        block.meta = meta
+    return blocks
+
+
 def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     """Build the Phase 3 report solely from canonical profile and narratives."""
     country = str(result.get("country") or "").strip()
@@ -1231,6 +1359,13 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         definition = _MFI_DIMENSION_DEFINITIONS.get(dimension)
         if definition:
             blocks.append(ReportBlock(type="definition_box", text=definition))
+        _append_mfi_claim(
+            blocks,
+            narrative.get("summary"),
+            catalog=catalog,
+            documents=documents,
+            qa_context=qa_context,
+        )
         safe_name = re.sub(
             r"[^a-z0-9_]+",
             "_",
@@ -1245,13 +1380,6 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                     caption=f"{dimension} by assessed market with regional means",
                 )
             )
-        _append_mfi_claim(
-            blocks,
-            narrative.get("summary"),
-            catalog=catalog,
-            documents=documents,
-            qa_context=qa_context,
-        )
         for field in (
             "key_findings",
             "geographic_patterns",
@@ -1361,7 +1489,11 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         if narrative.get("region"):
             heading += f" ({narrative['region']})"
         blocks.append(ReportBlock(type="heading", text=heading, level=3))
-        for field in ("priority_issues", "recommended_interventions"):
+        for field in (
+            "priority_issues",
+            "recommended_interventions",
+            "limitations",
+        ):
             for claim in narrative.get(field, []) or []:
                 _append_mfi_claim(
                     blocks,
@@ -1492,4 +1624,10 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 meta={"qa_review": qa_review},
             )
         )
-    return blocks
+    return _apply_mfi_layout_contract(
+        blocks,
+        country=country,
+        methodology_version=str(
+            result.get("methodology_version") or METHODOLOGY_VERSION
+        ),
+    )

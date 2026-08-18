@@ -117,7 +117,8 @@ statistics. The inspector also records total evidence-note word volume.
 | artifact | Unweighted means of market rates worded as respondent shares (FIX-03) | R3 |
 | artifact | Markdown delimiters survive into the export (FIX-08) | R3 |
 | artifact, inspector | No claim-level validation marker; QA findings never tabulated (FIX-01) | R4 |
-| artifact, inspector | Boilerplate repeated verbatim across dimensions (FIX-11) | R8 |
+| artifact | Historical pre-R8 boilerplate remains in the immutable local artifact; regenerate in R9 (FIX-11) | R9 |
+| current renderer, inspector | Dimension boilerplate is replaced by bounded, dimension-specific guidance (FIX-11) | Closed in R8 |
 
 ### Not covered by automated measurement
 

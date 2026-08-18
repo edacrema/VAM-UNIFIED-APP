@@ -6,15 +6,174 @@ import re
 from typing import Any, Dict, List, Optional
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, Mm, Pt, RGBColor
 
 from app.services.market_monitor.i18n import t
 
 from .report_blocks import ReportBlock, basket_definition_table_display
+
+
+_MFI_STYLE_NAMES = {
+    "title": "MFI Title",
+    "major_section": "MFI Major Heading",
+    "subsection": "MFI Subsection Heading",
+    "minor_heading": "MFI Minor Heading",
+    "body": "MFI Body",
+    "claim": "MFI Claim",
+    "evidence_note": "MFI Evidence Note",
+    "definition": "MFI Definition",
+    "notice": "MFI Notice",
+    "caption": "MFI Caption",
+    "header": "MFI Header",
+    "footer": "MFI Footer",
+    "table_header": "MFI Table Header",
+    "table_body": "MFI Table Body",
+}
+
+
+def _mfi_layout(block: ReportBlock) -> Dict[str, Any]:
+    meta = block.meta or {}
+    layout = meta.get("mfi_layout") if isinstance(meta, dict) else None
+    return dict(layout) if isinstance(layout, dict) else {}
+
+
+def _is_mfi_document(blocks: List[ReportBlock]) -> bool:
+    return any(
+        _mfi_layout(block).get("report_family") == "mfi"
+        or (
+            isinstance(block.meta, dict)
+            and str(block.meta.get("table_kind") or "").startswith("mfi_")
+        )
+        for block in blocks
+    )
+
+
+def _set_style_font(style: Any, *, name: str, size: float, color: str) -> None:
+    style.font.name = name
+    style.font.size = Pt(size)
+    style.font.color.rgb = RGBColor.from_string(color)
+    style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:ascii"), name)
+    style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:hAnsi"), name)
+    style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), name)
+
+
+def _ensure_mfi_style(
+    doc: Document,
+    role: str,
+    *,
+    size: float,
+    color: str = "000000",
+    bold: bool = False,
+    italic: bool = False,
+    before: float = 0.0,
+    after: float = 0.0,
+    line_spacing: float = 1.0,
+    keep_with_next: bool = False,
+    keep_together: bool = False,
+    outline_level: Optional[int] = None,
+) -> Any:
+    name = _MFI_STYLE_NAMES[role]
+    try:
+        style = doc.styles[name]
+    except KeyError:
+        style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    _set_style_font(style, name="Arial", size=size, color=color)
+    style.font.bold = bold
+    style.font.italic = italic
+    fmt = style.paragraph_format
+    fmt.space_before = Pt(before)
+    fmt.space_after = Pt(after)
+    fmt.line_spacing = line_spacing
+    fmt.keep_with_next = keep_with_next
+    fmt.keep_together = keep_together
+    if outline_level is not None:
+        properties = style._element.get_or_add_pPr()
+        existing = properties.find(qn("w:outlineLvl"))
+        if existing is None:
+            existing = OxmlElement("w:outlineLvl")
+            properties.append(existing)
+        existing.set(qn("w:val"), str(int(outline_level)))
+    return style
+
+
+def _configure_mfi_styles(doc: Document) -> None:
+    _ensure_mfi_style(doc, "title", size=20, color="0072BC", bold=True, after=6, keep_with_next=True, outline_level=0)
+    _ensure_mfi_style(doc, "major_section", size=14, color="0072BC", bold=True, before=12, after=6, keep_with_next=True, outline_level=1)
+    _ensure_mfi_style(doc, "subsection", size=11, color="1F4D78", bold=True, before=8, after=4, keep_with_next=True, outline_level=2)
+    _ensure_mfi_style(doc, "minor_heading", size=9.5, color="1F4D78", bold=True, before=6, after=3, keep_with_next=True, outline_level=3)
+    _ensure_mfi_style(doc, "body", size=9, after=3, line_spacing=1.05)
+    _ensure_mfi_style(doc, "claim", size=9, after=2, line_spacing=1.05, keep_together=True)
+    _ensure_mfi_style(doc, "evidence_note", size=8, color="505050", italic=True, after=2, keep_together=True)
+    _ensure_mfi_style(doc, "definition", size=8.5, after=2, line_spacing=1.05, keep_with_next=True, keep_together=True)
+    _ensure_mfi_style(doc, "notice", size=8.5, after=2, line_spacing=1.05, keep_together=True)
+    _ensure_mfi_style(doc, "caption", size=8, color="505050", italic=True, after=4, keep_together=True)
+    _ensure_mfi_style(doc, "header", size=8, color="666666", after=0)
+    _ensure_mfi_style(doc, "footer", size=8, color="666666", after=0)
+    _ensure_mfi_style(doc, "table_header", size=7, color="FFFFFF", bold=True, after=0, keep_together=True)
+    _ensure_mfi_style(doc, "table_body", size=7, after=0, line_spacing=1.0, keep_together=True)
+
+
+def _append_word_field(paragraph: Any, instruction: str, placeholder: str = "1") -> None:
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" {instruction} "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    text = OxmlElement("w:t")
+    text.text = placeholder
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for element in (begin, instr, separate, text, end):
+        run._r.append(element)
+
+
+def _configure_mfi_document(doc: Document, context: Dict[str, Any]) -> None:
+    _configure_mfi_styles(doc)
+    country = str(context.get("country") or "").strip()
+    methodology = str(context.get("methodology_version") or "").strip()
+    for section in doc.sections:
+        section.page_width = Mm(210)
+        section.page_height = Mm(297)
+        section.top_margin = Inches(0.7)
+        section.right_margin = Inches(0.7)
+        section.bottom_margin = Inches(0.7)
+        section.left_margin = Inches(0.7)
+        section.header_distance = Inches(0.3)
+        section.footer_distance = Inches(0.3)
+        header = section.header.paragraphs[0]
+        header.style = _MFI_STYLE_NAMES["header"]
+        header.text = "MFI Drafter 2.0" + (f" - {country}" if country else "")
+        footer = section.footer.paragraphs[0]
+        footer.style = _MFI_STYLE_NAMES["footer"]
+        footer.paragraph_format.tab_stops.add_tab_stop(
+            Mm(174.4), WD_TAB_ALIGNMENT.RIGHT
+        )
+        footer.add_run(
+            f"Methodology: {methodology or 'databridge-current'}\tPage "
+        )
+        _append_word_field(footer, "PAGE")
+        footer.add_run(" of ")
+        _append_word_field(footer, "NUMPAGES")
+
+
+def _apply_mfi_paragraph_layout(paragraph: Any, layout: Dict[str, Any]) -> None:
+    if not layout:
+        return
+    paragraph.paragraph_format.page_break_before = bool(
+        layout.get("page_break_before")
+    )
+    paragraph.paragraph_format.keep_with_next = bool(layout.get("keep_with_next"))
+    paragraph.paragraph_format.keep_together = bool(layout.get("keep_together"))
+    if layout.get("compact_after"):
+        paragraph.paragraph_format.space_after = Pt(2)
 
 
 def _safe_filename(filename: str) -> str:
@@ -26,21 +185,32 @@ def _safe_filename(filename: str) -> str:
     return name
 
 
-def _add_text_lines(doc: Document, text: str) -> None:
+def _add_text_lines(
+    doc: Document,
+    text: str,
+    *,
+    style: Optional[str] = None,
+    layout: Optional[Dict[str, Any]] = None,
+) -> None:
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
         if not line:
             continue
 
         if line.startswith("- ") or line.startswith("* "):
-            doc.add_paragraph(line[2:].strip(), style="List Bullet")
+            paragraph = doc.add_paragraph(line[2:].strip(), style="List Bullet")
+            _apply_mfi_paragraph_layout(paragraph, layout or {})
             continue
 
         if re.match(r"^\d+\.\s+", line):
-            doc.add_paragraph(re.sub(r"^\d+\.\s+", "", line), style="List Number")
+            paragraph = doc.add_paragraph(
+                re.sub(r"^\d+\.\s+", "", line), style="List Number"
+            )
+            _apply_mfi_paragraph_layout(paragraph, layout or {})
             continue
 
-        doc.add_paragraph(line)
+        paragraph = doc.add_paragraph(line, style=style)
+        _apply_mfi_paragraph_layout(paragraph, layout or {})
 
 
 def _get_continuous_score_rgb(score: float) -> tuple[int, int, int]:
@@ -157,16 +327,26 @@ def _add_overview_table_to_document(doc: Document, *, meta: Dict[str, Any]) -> N
     doc.add_paragraph()
 
 
-def _add_definition_box(doc: Document, text: str) -> None:
+def _add_definition_box(
+    doc: Document,
+    text: str,
+    *,
+    mfi: bool = False,
+    layout: Optional[Dict[str, Any]] = None,
+) -> None:
     cleaned = (text or "").strip()
     if not cleaned:
         return
 
     table = doc.add_table(rows=1, cols=1)
     table.style = "Table Grid"
+    _set_table_row_cant_split(table.rows[0])
 
     cell = table.rows[0].cells[0]
     header_para = cell.paragraphs[0]
+    if mfi:
+        header_para.style = _MFI_STYLE_NAMES["definition"]
+        _apply_mfi_paragraph_layout(header_para, layout or {})
 
     header_run = header_para.add_run("Definition: ")
     header_run.bold = True
@@ -180,7 +360,8 @@ def _add_definition_box(doc: Document, text: str) -> None:
     shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="E6F3FF"/>')
     cell._tc.get_or_add_tcPr().append(shading)
 
-    doc.add_paragraph()
+    if not mfi:
+        doc.add_paragraph()
 
 
 def _add_basket_definitions_table_to_document(doc: Document, *, meta: Dict[str, Any]) -> None:
@@ -210,7 +391,12 @@ def _add_basket_definitions_table_to_document(doc: Document, *, meta: Dict[str, 
     doc.add_paragraph()
 
 
-def _add_mfi_presentation_table(doc: Document, *, meta: Dict[str, Any]) -> None:
+def _add_mfi_presentation_table(
+    doc: Document,
+    *,
+    meta: Dict[str, Any],
+    layout: Optional[Dict[str, Any]] = None,
+) -> None:
     """Render an already projected MFI table without inferring or formatting cells."""
     rows = meta.get("rows") or []
     if not isinstance(rows, list) or not rows:
@@ -237,7 +423,11 @@ def _add_mfi_presentation_table(doc: Document, *, meta: Dict[str, Any]) -> None:
         values.append(row["values"])
     title = str(meta.get("title") or "").strip()
     if title:
-        doc.add_heading(title, level=4)
+        title_paragraph = doc.add_paragraph(
+            title,
+            style=_MFI_STYLE_NAMES["minor_heading"],
+        )
+        title_paragraph.paragraph_format.keep_with_next = True
     table = doc.add_table(rows=len(values) + 1, cols=len(columns))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -255,6 +445,7 @@ def _add_mfi_presentation_table(doc: Document, *, meta: Dict[str, Any]) -> None:
         _set_table_cell_width(cell, widths[index])
         _set_cell_background(cell, (0, 114, 188))
         for paragraph in cell.paragraphs:
+            paragraph.style = _MFI_STYLE_NAMES["table_header"]
             paragraph.alignment = alignment.get(
                 str(column_specs[index].get("alignment") or "left"),
                 WD_ALIGN_PARAGRAPH.LEFT,
@@ -271,13 +462,13 @@ def _add_mfi_presentation_table(doc: Document, *, meta: Dict[str, Any]) -> None:
             _set_table_cell_width(cell, widths[column_index])
             cell.text = str(row[column])
             for paragraph in cell.paragraphs:
+                paragraph.style = _MFI_STYLE_NAMES["table_body"]
                 paragraph.alignment = alignment.get(
                     str(column_specs[column_index].get("alignment") or "left"),
                     WD_ALIGN_PARAGRAPH.LEFT,
                 )
                 for run in paragraph.runs:
                     run.font.size = Pt(7)
-    doc.add_paragraph()
 
 
 def _set_repeat_table_header(row: Any) -> None:
@@ -307,14 +498,20 @@ def _add_notice_box(
     label: str,
     fill: str,
     color: tuple[int, int, int],
+    mfi: bool = False,
+    layout: Optional[Dict[str, Any]] = None,
 ) -> None:
     cleaned = (text or "").strip()
     if not cleaned:
         return
     table = doc.add_table(rows=1, cols=1)
     table.style = "Table Grid"
+    _set_table_row_cant_split(table.rows[0])
     cell = table.rows[0].cells[0]
     paragraph = cell.paragraphs[0]
+    if mfi:
+        paragraph.style = _MFI_STYLE_NAMES["notice"]
+        _apply_mfi_paragraph_layout(paragraph, layout or {})
     label_run = paragraph.add_run(f"{label}: ")
     label_run.bold = True
     label_run.font.color.rgb = RGBColor(*color)
@@ -322,7 +519,8 @@ def _add_notice_box(
     text_run.font.size = Pt(9)
     shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill}"/>')
     cell._tc.get_or_add_tcPr().append(shading)
-    doc.add_paragraph()
+    if not mfi:
+        doc.add_paragraph()
 
 
 def build_docx_bytes_from_report_blocks(
@@ -335,16 +533,57 @@ def build_docx_bytes_from_report_blocks(
 ) -> bytes:
     doc = Document()
     visualizations = visualizations or {}
+    mfi_document = _is_mfi_document(report_blocks)
+    if mfi_document:
+        title_layout = next(
+            (
+                _mfi_layout(block)
+                for block in report_blocks
+                if _mfi_layout(block).get("role") == "title"
+            ),
+            {},
+        )
+        _configure_mfi_document(doc, title_layout)
 
     for block in report_blocks:
+        layout = _mfi_layout(block)
         if block.type == "heading":
             level = int(block.level or 1)
             level = min(max(level, 1), 9)
-            doc.add_heading(block.text or "", level=level)
+            if mfi_document and layout:
+                role = str(layout.get("role") or "subsection")
+                style_role = (
+                    role
+                    if role in {
+                        "title",
+                        "major_section",
+                        "subsection",
+                        "minor_heading",
+                    }
+                    else "subsection"
+                )
+                paragraph = doc.add_paragraph(
+                    block.text or "",
+                    style=_MFI_STYLE_NAMES[style_role],
+                )
+                _apply_mfi_paragraph_layout(paragraph, layout)
+            else:
+                doc.add_heading(block.text or "", level=level)
             continue
 
         if block.type == "paragraph":
-            _add_text_lines(doc, block.text or "")
+            role = str(layout.get("role") or "body")
+            style = (
+                _MFI_STYLE_NAMES["claim" if role == "claim" else "body"]
+                if mfi_document and layout
+                else None
+            )
+            _add_text_lines(
+                doc,
+                block.text or "",
+                style=style,
+                layout=layout,
+            )
             continue
 
         if block.type == "figure":
@@ -366,13 +605,23 @@ def build_docx_bytes_from_report_blocks(
 
             buf = io.BytesIO(img_bytes)
             p = doc.add_paragraph()
+            if mfi_document:
+                p.style = _MFI_STYLE_NAMES["body"]
             run = p.add_run()
             run.add_picture(buf, width=Inches(width))
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _apply_mfi_paragraph_layout(p, layout)
 
             if block.caption:
-                cap = doc.add_paragraph(block.caption)
+                cap = doc.add_paragraph(
+                    block.caption,
+                    style=(
+                        _MFI_STYLE_NAMES["caption"] if mfi_document else None
+                    ),
+                )
                 cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if mfi_document:
+                    cap.paragraph_format.keep_together = True
             continue
 
         if block.type == "references":
@@ -383,7 +632,14 @@ def build_docx_bytes_from_report_blocks(
             if not refs:
                 continue
 
-            doc.add_heading(t(language, "section.REFERENCES"), level=2)
+            if mfi_document:
+                heading = doc.add_paragraph(
+                    t(language, "section.REFERENCES"),
+                    style=_MFI_STYLE_NAMES["subsection"],
+                )
+                heading.paragraph_format.keep_with_next = True
+            else:
+                doc.add_heading(t(language, "section.REFERENCES"), level=2)
             for ref in refs:
                 if not isinstance(ref, dict):
                     continue
@@ -404,9 +660,19 @@ def build_docx_bytes_from_report_blocks(
                 if title:
                     parts.append(title)
 
-                doc.add_paragraph(" ".join(parts).strip(), style="List Number")
+                paragraph = doc.add_paragraph(
+                    " ".join(parts).strip(),
+                    style="List Number",
+                )
+                if mfi_document:
+                    paragraph.paragraph_format.space_after = Pt(2)
                 if url:
-                    doc.add_paragraph(url)
+                    paragraph = doc.add_paragraph(
+                        url,
+                        style=(
+                            _MFI_STYLE_NAMES["body"] if mfi_document else None
+                        ),
+                    )
             continue
 
         if block.type == "table":
@@ -416,7 +682,7 @@ def build_docx_bytes_from_report_blocks(
             elif isinstance(meta, dict) and meta.get("table_kind") == "basket_definitions":
                 _add_basket_definitions_table_to_document(doc, meta=meta)
             elif isinstance(meta, dict) and meta.get("table_kind") == "mfi_presentation":
-                _add_mfi_presentation_table(doc, meta=meta)
+                _add_mfi_presentation_table(doc, meta=meta, layout=layout)
             elif isinstance(meta, dict) and meta.get("table_kind") == "mfi_deterministic":
                 raise ValueError(
                     "Unprojected canonical MFI tables cannot be rendered in DOCX"
@@ -424,15 +690,25 @@ def build_docx_bytes_from_report_blocks(
             continue
 
         if block.type == "definition_box":
-            _add_definition_box(doc, block.text or "")
+            _add_definition_box(
+                doc,
+                block.text or "",
+                mfi=mfi_document,
+                layout=layout,
+            )
             continue
 
         if block.type == "evidence_note":
-            paragraph = doc.add_paragraph()
+            paragraph = doc.add_paragraph(
+                style=(
+                    _MFI_STYLE_NAMES["evidence_note"] if mfi_document else None
+                )
+            )
             run = paragraph.add_run(f"Evidence: {block.text or ''}")
             run.italic = True
             run.font.size = Pt(8)
             run.font.color.rgb = RGBColor(80, 80, 80)
+            _apply_mfi_paragraph_layout(paragraph, layout)
             continue
 
         if block.type == "limitation_box":
@@ -442,6 +718,8 @@ def build_docx_bytes_from_report_blocks(
                 label="Data limitation",
                 fill="FFF4CC",
                 color=(145, 94, 0),
+                mfi=mfi_document,
+                layout=layout,
             )
             continue
 
@@ -452,6 +730,8 @@ def build_docx_bytes_from_report_blocks(
                 label="Methodology",
                 fill="E6F3FF",
                 color=(0, 114, 188),
+                mfi=mfi_document,
+                layout=layout,
             )
             continue
 
@@ -462,6 +742,8 @@ def build_docx_bytes_from_report_blocks(
                 label="QA warning",
                 fill="FDE8E8",
                 color=(176, 0, 32),
+                mfi=mfi_document,
+                layout=layout,
             )
             continue
 
@@ -478,6 +760,8 @@ def build_docx_bytes_from_report_blocks(
                 label="Claim warning",
                 fill="FDE8E8" if is_withdrawn else "FFF4CC",
                 color=(176, 0, 32) if is_withdrawn else (145, 94, 0),
+                mfi=mfi_document,
+                layout=layout,
             )
             continue
 

@@ -348,6 +348,14 @@ def docx_heading_level(paragraph: Any) -> Optional[int]:
     name = str(getattr(style, "name", "") or "")
     if name == "Title":
         return 1
+    mfi_levels = {
+        "MFI Title": 1,
+        "MFI Major Heading": 2,
+        "MFI Subsection Heading": 3,
+        "MFI Minor Heading": 4,
+    }
+    if name in mfi_levels:
+        return mfi_levels[name]
     match = re.fullmatch(r"Heading (\d+)", name)
     if match:
         return int(match.group(1))

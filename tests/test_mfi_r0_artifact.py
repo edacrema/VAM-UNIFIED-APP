@@ -200,3 +200,10 @@ def test_coverage_is_not_restated_on_every_citation(
 )
 def test_boilerplate_is_not_repeated_verbatim(artifact_report) -> None:
     assert artifact_report.max_boilerplate_repetition <= 1
+
+
+def test_current_r8_renderer_does_not_repeat_dimension_boilerplate(
+    r7_context_evidence_report,
+) -> None:
+    """The immutable pre-R8 artifact remains historical until R9 regenerates it."""
+    assert r7_context_evidence_report.max_boilerplate_repetition <= 1

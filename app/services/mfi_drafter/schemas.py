@@ -859,6 +859,14 @@ class MFIMarketNarrative(BaseModel):
     recommended_interventions: List[MFINarrativeClaim] = Field(
         default_factory=list
     )
+    limitations: List[MFINarrativeClaim] = Field(
+        default_factory=list,
+        max_length=1,
+        description=(
+            "Optional market-relevant, metric-cited limitation. Generic assessment "
+            "limitations belong in the executive and methodology sections."
+        ),
+    )
     modality_consideration: Optional[MFINarrativeClaim] = None
 
 

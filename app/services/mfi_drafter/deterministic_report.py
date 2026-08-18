@@ -140,6 +140,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
     from .narrative import (
         build_claim_catalog,
         build_qa_review,
+        deduplicate_dimension_recommendations,
         fallback_dimension_narrative,
         fallback_executive_narrative,
         fallback_market_narrative,
@@ -156,6 +157,10 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         item["dimension"]: fallback_dimension_narrative(item, assessment_profile=profile)
         for item in profile["dimensions"]
     }
+    dimension_narratives = deduplicate_dimension_recommendations(
+        dimension_narratives,
+        profile["dimensions"],
+    )
     market_narratives = {
         item["market_name"]: fallback_market_narrative(item)
         for item in profile["markets"]

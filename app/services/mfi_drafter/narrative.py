@@ -6,6 +6,7 @@ are displayed, whether citations resolve, and which content requires repair.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from hashlib import sha256
 import re
 import unicodedata
@@ -14,7 +15,11 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from pydantic import ValidationError
 
 from .evidence_notes import compose_evidence_note
-from .methodology import DISPLAY_DIMENSIONS, METRIC_DEFINITIONS_BY_ID
+from .methodology import (
+    DIMENSION_REVIEW_GUIDANCE,
+    DISPLAY_DIMENSIONS,
+    METRIC_DEFINITIONS_BY_ID,
+)
 from .wording import (
     NEUTRAL_SCOPE_STATEMENT,
     affordability_claims,
@@ -45,6 +50,29 @@ from .visualization import format_market_coverage
 
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?%?")
 _MATERIAL_SEVERITIES = {"high", "medium"}
+
+
+@dataclass(frozen=True)
+class MFINarrativeDensityPolicy:
+    """Canonical R8 claim-count ceilings applied before validation."""
+
+    non_priority_findings: int = 1
+    non_priority_geographic_patterns: int = 0
+    non_priority_limitations: int = 1
+    non_priority_recommendations: int = 1
+    priority_findings: int = 3
+    priority_subdimensions: int = 2
+    priority_geographic_patterns: int = 2
+    priority_limitations: int = 1
+    priority_recommendations: int = 3
+    market_priority_issues: int = 3
+    market_recommendations: int = 3
+    market_limitations: int = 1
+    executive_recommendations: int = 3
+    executive_limitations: int = 3
+
+
+NARRATIVE_DENSITY_POLICY = MFINarrativeDensityPolicy()
 _CLAIM_FIELDS = (
     "summary",
     "key_findings",
@@ -53,9 +81,6 @@ _CLAIM_FIELDS = (
     "recommendations",
     "priority_issues",
     "recommended_interventions",
-    # Retained although nothing emits it: a rehydrated or legacy artifact that still
-    # carries the field must stay validated rather than bypass every check.
-    "modality_consideration",
     "scope_statement",
     "motivation",
     "limitations",
@@ -393,6 +418,26 @@ def parse_dimension_narrative(
     if not isinstance(payload, Mapping):
         return fallback
     try:
+        finding_limit = (
+            NARRATIVE_DENSITY_POLICY.priority_findings
+            if is_priority
+            else NARRATIVE_DENSITY_POLICY.non_priority_findings
+        )
+        geography_limit = (
+            NARRATIVE_DENSITY_POLICY.priority_geographic_patterns
+            if is_priority
+            else NARRATIVE_DENSITY_POLICY.non_priority_geographic_patterns
+        )
+        limitation_limit = (
+            NARRATIVE_DENSITY_POLICY.priority_limitations
+            if is_priority
+            else NARRATIVE_DENSITY_POLICY.non_priority_limitations
+        )
+        recommendation_limit = (
+            NARRATIVE_DENSITY_POLICY.priority_recommendations
+            if is_priority
+            else NARRATIVE_DENSITY_POLICY.non_priority_recommendations
+        )
         summary = _claim_from_payload(
             payload.get("summary"),
             claim_id=f"dimension.{_slug(dimension)}.summary",
@@ -404,27 +449,38 @@ def parse_dimension_narrative(
             prefix=f"dimension.{_slug(dimension)}.finding",
             claim_kind="finding",
             default_scope="assessment",
+            max_items=finding_limit,
         )
         geographic = _claim_list(
             payload.get("geographic_patterns"),
             prefix=f"dimension.{_slug(dimension)}.geography",
             claim_kind="geographic_pattern",
             default_scope="region",
+            max_items=geography_limit,
         )
         limitations = _claim_list(
             payload.get("data_limitations"),
             prefix=f"dimension.{_slug(dimension)}.limitation",
             claim_kind="limitation",
             default_scope="assessment",
+            max_items=limitation_limit,
         )
         recommendations = _claim_list(
             payload.get("recommendations"),
             prefix=f"dimension.{_slug(dimension)}.recommendation",
             claim_kind="recommendation",
             default_scope="assessment",
+            max_items=recommendation_limit,
         )
         subdimensions: list[MFISubdimensionNarrative] = []
-        for index, raw in enumerate(payload.get("subdimension_analysis", []) or []):
+        raw_subdimensions = (
+            (payload.get("subdimension_analysis", []) or [])
+            if is_priority
+            else []
+        )
+        for index, raw in enumerate(
+            raw_subdimensions[: NARRATIVE_DENSITY_POLICY.priority_subdimensions]
+        ):
             if not isinstance(raw, Mapping):
                 continue
             interpretation = _claim_from_payload(
@@ -483,13 +539,23 @@ def parse_market_narrative(
             prefix=f"market.{_slug(market_name)}.issue",
             claim_kind="finding",
             default_scope="market",
+            max_items=NARRATIVE_DENSITY_POLICY.market_priority_issues,
         )
         interventions = _claim_list(
             payload.get("recommended_interventions"),
             prefix=f"market.{_slug(market_name)}.intervention",
             claim_kind="recommendation",
             default_scope="market",
+            max_items=NARRATIVE_DENSITY_POLICY.market_recommendations,
         )
+        limitations = _claim_list(
+            payload.get("limitations"),
+            prefix=f"market.{_slug(market_name)}.limitation",
+            claim_kind="limitation",
+            default_scope="market",
+            max_items=NARRATIVE_DENSITY_POLICY.market_limitations,
+        )
+        limitations = [claim for claim in limitations if claim.metric_ids]
         # The prompt no longer requests a modality consideration, and any model that
         # supplies one anyway is answering a question the assessment cannot answer. The
         # scope caveat is stated once in the executive summary and the methodology note
@@ -506,6 +572,7 @@ def parse_market_narrative(
             ],
             priority_issues=issues,
             recommended_interventions=interventions,
+            limitations=limitations,
             modality_consideration=None,
         ).model_dump()
     except (TypeError, ValueError, ValidationError):
@@ -538,18 +605,23 @@ def parse_executive_narrative(
                 prefix="executive.finding",
                 claim_kind="finding",
                 default_scope="assessment",
+                max_items=len(
+                    assessment_profile.get("priority_dimension_names", []) or []
+                ),
             ),
             recommendations=_claim_list(
                 payload.get("recommendations"),
                 prefix="executive.recommendation",
                 claim_kind="recommendation",
                 default_scope="assessment",
+                max_items=NARRATIVE_DENSITY_POLICY.executive_recommendations,
             ),
             limitations=_claim_list(
                 payload.get("limitations"),
                 prefix="executive.limitation",
                 claim_kind="limitation",
                 default_scope="assessment",
+                max_items=NARRATIVE_DENSITY_POLICY.executive_limitations,
             ),
             # Deterministic regardless of what the model returned, so the report always
             # states its own scope exactly once.
@@ -704,7 +776,7 @@ def fallback_dimension_narrative(
     geographic: list[MFINarrativeClaim] = []
     localized = dimension_profile.get("localized_patterns") or {}
     lowest = list(localized.get("markets_where_lowest", []) or [])
-    if lowest:
+    if lowest and bool(dimension_profile.get("is_priority")):
         market_ids = [
             str(item.get("ledger_metric_id"))
             for item in localized.get("ordered_markets", []) or []
@@ -771,10 +843,7 @@ def fallback_dimension_narrative(
     )
     recommendation = MFINarrativeClaim(
         claim_id=f"dimension.{slug}.recommendation.1",
-        text=(
-            f"Use the cited {dimension} evidence to target further market "
-            "assessment and proportionate operational follow-up."
-        ),
+        text=DIMENSION_REVIEW_GUIDANCE[dimension],
         claim_kind="recommendation",
         metric_ids=recommendation_ids,
         scope="assessment",
@@ -787,7 +856,11 @@ def fallback_dimension_narrative(
         key_findings=findings,
         subdimension_analysis=subdimensions,
         geographic_patterns=geographic,
-        data_limitations=limitations[:2],
+        data_limitations=limitations[
+            : NARRATIVE_DENSITY_POLICY.priority_limitations
+            if bool(dimension_profile.get("is_priority"))
+            else NARRATIVE_DENSITY_POLICY.non_priority_limitations
+        ],
         recommendations=[recommendation],
     )
     _ = statistics
@@ -806,7 +879,7 @@ def fallback_market_narrative(
         item
         for item in market_profile.get("weak_dimensions", []) or []
         if isinstance(item, Mapping)
-    ]
+    ][: NARRATIVE_DENSITY_POLICY.market_priority_issues]
     issues = [
         MFINarrativeClaim(
             claim_id=f"market.{slug}.issue.{index + 1}",
@@ -846,11 +919,74 @@ def fallback_market_narrative(
                 polarity="neutral",
             )
         ],
+        limitations=[],
         # Deliberately absent: repeating one identical caveat in every market section is
         # the boilerplate the report already carries too much of, and a caveat that
         # appears only when drafting happens to fail is not a delivery contract.
         modality_consideration=None,
     ).model_dump()
+
+
+def deduplicate_dimension_recommendations(
+    dimension_narratives: Mapping[str, Mapping[str, Any]],
+    dimension_profiles: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Replace repeated recommendation boilerplate with cited dimension guidance.
+
+    The first occurrence is retained. Later normalized duplicates receive the
+    dimension-specific deterministic recommendation while preserving their stable claim
+    ID. If that replacement is already present in the same output, the duplicate claim is
+    dropped rather than adding more boilerplate.
+    """
+    result = deepcopy(dict(dimension_narratives))
+    profiles = {
+        str(profile.get("dimension")): profile
+        for profile in dimension_profiles
+        if isinstance(profile, Mapping) and profile.get("dimension")
+    }
+    seen: set[str] = set()
+    for dimension in DISPLAY_DIMENSIONS:
+        narrative = result.get(dimension)
+        if not isinstance(narrative, dict):
+            continue
+        recommendations = narrative.get("recommendations") or []
+        if not isinstance(recommendations, list):
+            continue
+        retained: list[dict[str, Any]] = []
+        for recommendation in recommendations:
+            if not isinstance(recommendation, dict):
+                continue
+            normalized = _normalized_narrative_text(recommendation.get("text"))
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                retained.append(recommendation)
+                continue
+            profile = profiles.get(dimension)
+            if not isinstance(profile, Mapping):
+                continue
+            fallback = fallback_dimension_narrative(
+                profile,
+                assessment_profile={"limitations": [], "metric_ledger": {}},
+            )
+            replacement = deepcopy((fallback.get("recommendations") or [None])[0])
+            if not isinstance(replacement, dict):
+                continue
+            replacement["claim_id"] = recommendation.get("claim_id")
+            replacement_normalized = _normalized_narrative_text(
+                replacement.get("text")
+            )
+            if not replacement_normalized or replacement_normalized in seen:
+                continue
+            seen.add(replacement_normalized)
+            retained.append(replacement)
+        narrative["recommendations"] = retained
+    return result
+
+
+def _normalized_narrative_text(value: Any) -> str:
+    return " ".join(
+        re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split()
+    )
 
 
 def fallback_executive_narrative(
@@ -1002,9 +1138,12 @@ def validate_structured_narratives(
 ]:
     """Validate, mark, and return detached narrative artifacts."""
     context_copy = deepcopy(list(context_evidence))
-    dimension_copy = deepcopy(dict(dimension_narratives))
-    market_copy = deepcopy(dict(market_narratives))
-    executive_copy = deepcopy(dict(executive_narrative))
+    dimension_copy, market_copy, executive_copy = apply_narrative_density_policy(
+        dimension_narratives=dimension_narratives,
+        market_narratives=market_narratives,
+        executive_narrative=executive_narrative,
+        assessment_profile=assessment_profile,
+    )
     known_documents = {
         str(item.get("doc_id")): item
         for item in documents
@@ -1312,6 +1451,98 @@ def validate_structured_narratives(
         context_copy,
         {"flags": flags},
     )
+
+
+def apply_narrative_density_policy(
+    *,
+    dimension_narratives: Mapping[str, Mapping[str, Any]],
+    market_narratives: Mapping[str, Mapping[str, Any]],
+    executive_narrative: Mapping[str, Any],
+    assessment_profile: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Bound every canonical artifact, including rehydrated correction state."""
+    dimensions = deepcopy(dict(dimension_narratives))
+    for narrative in dimensions.values():
+        if not isinstance(narrative, dict):
+            continue
+        priority = bool(narrative.get("is_priority"))
+        narrative["key_findings"] = list(narrative.get("key_findings") or [])[
+            : (
+                NARRATIVE_DENSITY_POLICY.priority_findings
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_findings
+            )
+        ]
+        narrative["subdimension_analysis"] = (
+            list(narrative.get("subdimension_analysis") or [])[
+                : NARRATIVE_DENSITY_POLICY.priority_subdimensions
+            ]
+            if priority
+            else []
+        )
+        narrative["geographic_patterns"] = list(
+            narrative.get("geographic_patterns") or []
+        )[
+            : (
+                NARRATIVE_DENSITY_POLICY.priority_geographic_patterns
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_geographic_patterns
+            )
+        ]
+        narrative["data_limitations"] = list(
+            narrative.get("data_limitations") or []
+        )[
+            : (
+                NARRATIVE_DENSITY_POLICY.priority_limitations
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_limitations
+            )
+        ]
+        narrative["recommendations"] = list(
+            narrative.get("recommendations") or []
+        )[
+            : (
+                NARRATIVE_DENSITY_POLICY.priority_recommendations
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_recommendations
+            )
+        ]
+    dimensions = deduplicate_dimension_recommendations(
+        dimensions,
+        assessment_profile.get("dimensions", []) or [],
+    )
+
+    markets = deepcopy(dict(market_narratives))
+    for narrative in markets.values():
+        if not isinstance(narrative, dict):
+            continue
+        narrative["priority_issues"] = list(
+            narrative.get("priority_issues") or []
+        )[: NARRATIVE_DENSITY_POLICY.market_priority_issues]
+        narrative["recommended_interventions"] = list(
+            narrative.get("recommended_interventions") or []
+        )[: NARRATIVE_DENSITY_POLICY.market_recommendations]
+        narrative["limitations"] = [
+            claim
+            for claim in list(narrative.get("limitations") or [])
+            if isinstance(claim, Mapping) and claim.get("metric_ids")
+        ][: NARRATIVE_DENSITY_POLICY.market_limitations]
+        narrative["modality_consideration"] = None
+
+    executive = deepcopy(dict(executive_narrative))
+    priority_count = len(
+        assessment_profile.get("priority_dimension_names", []) or []
+    )
+    executive["key_findings"] = list(
+        executive.get("key_findings") or []
+    )[:priority_count]
+    executive["recommendations"] = list(
+        executive.get("recommendations") or []
+    )[: NARRATIVE_DENSITY_POLICY.executive_recommendations]
+    executive["limitations"] = list(executive.get("limitations") or [])[
+        : NARRATIVE_DENSITY_POLICY.executive_limitations
+    ]
+    return dimensions, markets, executive
 
 
 def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:
@@ -1676,8 +1907,11 @@ def _claim_list(
     prefix: str,
     claim_kind: str,
     default_scope: str,
+    max_items: Optional[int] = None,
 ) -> list[MFINarrativeClaim]:
     values = payload if isinstance(payload, Sequence) and not isinstance(payload, str) else []
+    if max_items is not None:
+        values = values[: max(0, int(max_items))]
     claims: list[MFINarrativeClaim] = []
     for index, item in enumerate(values):
         try:
