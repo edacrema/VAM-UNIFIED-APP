@@ -209,6 +209,7 @@ def test_coverage_notes_are_matched_by_pattern_not_literal_text() -> None:
 
     assert report.coverage_note_total == 3
     assert report.coverage_note_repetition == {"27/27": 2, "12/27": 1}
+    assert report.evidence_note_word_count > report.evidence_note_count
     assert report.evidence_note_count == 3
 
 
@@ -390,11 +391,6 @@ def test_every_report_table_declares_its_columns(ratchet_report) -> None:
     assert ratchet_report.undeclared_column_table_count == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: the context heading is emitted with no content and no status "
-    "disclosure (FIX-07, fixed in R7)",
-)
 def test_no_section_heading_is_left_empty(ratchet_report) -> None:
     assert ratchet_report.empty_section_titles == ()
 
@@ -408,14 +404,11 @@ def test_boilerplate_is_not_repeated_verbatim(ratchet_report) -> None:
     assert ratchet_report.max_boilerplate_repetition <= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: complete fixed-metric coverage is restated on every citation "
-    "(FIX-09, fixed in R7)",
-)
 def test_coverage_notes_are_not_restated_on_every_citation(ratchet_report) -> None:
     repetition = ratchet_report.coverage_note_repetition
     assert max(repetition.values(), default=0) <= RATCHET_SPEC.market_count
+    assert ratchet_report.evidence_note_word_count > 0
+    assert ratchet_report.coverage_note_total < ratchet_report.evidence_note_count
 
 
 def test_unverified_claims_are_visibly_marked() -> None:

@@ -399,3 +399,4 @@ def test_local_benchmarks_build_phase4_release_evidence(tmp_path):
         assert rendered["llm_calls"] == 0
         assert rendered["generation_diagnostics"]["dimensions"]["llm"] == []
         assert rendered["generation_diagnostics"]["retrievers"] == {}
+        assert rendered["context_status"]["status"] == "not_attempted"

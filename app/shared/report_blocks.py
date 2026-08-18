@@ -10,6 +10,7 @@ from app.services.mfi_drafter.methodology import (
     DIMENSION_DESCRIPTIONS,
     METHODOLOGY_VERSION,
 )
+from app.services.mfi_drafter.evidence_notes import compose_evidence_note
 from app.services.mfi_drafter.table_projection import (
     build_mfi_presentation_table,
     build_mfi_qa_presentation_table,
@@ -522,32 +523,6 @@ def build_market_monitor_report_blocks(result: Dict[str, Any]) -> List[ReportBlo
     return blocks
 
 
-def _mfi_evidence_note(
-    claim: Dict[str, Any],
-    catalog: Dict[str, Any],
-    documents: Dict[str, Dict[str, Any]],
-) -> str:
-    parts: List[str] = []
-    for metric_id in claim.get("metric_ids", []) or []:
-        entry = catalog.get(str(metric_id))
-        if not isinstance(entry, dict):
-            continue
-        note = f"{entry.get('label')}: {entry.get('formatted_value')}"
-        if entry.get("scope"):
-            note += f"; scope: {str(entry['scope']).replace('_', ' ')}"
-        if entry.get("coverage_label"):
-            note += f"; coverage: {entry['coverage_label']}"
-        parts.append(note)
-    for document_id in claim.get("document_ids", []) or []:
-        document = documents.get(str(document_id))
-        if not isinstance(document, dict):
-            continue
-        label = document.get("title") or document.get("source") or document_id
-        date = document.get("date")
-        parts.append(f"Context source: {label}" + (f" ({date})" if date else ""))
-    return " | ".join(parts)
-
-
 _MFI_QA_SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 _MFI_QA_ARTIFACT_ORDER = {
     "context": 0,
@@ -754,7 +729,7 @@ def _append_mfi_claim(
             },
         )
     )
-    note = _mfi_evidence_note(claim, catalog, documents)
+    note = compose_evidence_note(claim, catalog, documents)
     if note:
         blocks.append(
             ReportBlock(
@@ -954,6 +929,57 @@ def _assert_mfi_qa_traceability(
             raise ValueError("Withdrawn narrative text reached reader-facing report blocks")
 
 
+_MFI_CONTEXT_DISCLOSURES = {
+    "no_results": (
+        "No contextual documents were retrieved for the selected country and period."
+    ),
+    "retrieval_failed": (
+        "Context retrieval was unavailable; interpretation relies only on the MFI "
+        "assessment."
+    ),
+    "classification_failed": (
+        "Context classification was unavailable after documents were retrieved; "
+        "interpretation relies only on the MFI assessment."
+    ),
+    "no_accepted_statements": (
+        "Documents were retrieved, but none met the evidence-classification "
+        "requirements."
+    ),
+    "not_attempted": (
+        "Context retrieval was not run for this report; interpretation relies only on "
+        "the MFI assessment."
+    ),
+}
+
+
+def _mfi_context_statement_is_accepted(
+    statement: Dict[str, Any], documents: Dict[str, Dict[str, Any]]
+) -> bool:
+    if statement.get("classification") == "unrelated" or statement.get("substituted"):
+        return False
+    return any(
+        str(document_id) in documents
+        for document_id in statement.get("document_ids", []) or []
+    )
+
+
+def _mfi_context_limitation_text(code: str) -> str:
+    return {
+        "context_retrieval_unavailable": (
+            "Context limitation: contextual-document retrieval was unavailable for all "
+            "configured sources."
+        ),
+        "context_partial_retrieval_unavailable": (
+            "Context limitation: one or more contextual-document sources were "
+            "unavailable; available cited evidence is retained."
+        ),
+        "context_classification_unavailable": (
+            "Context limitation: retrieved documents could not be classified against "
+            "the context-evidence contract."
+        ),
+    }.get(code, "Context limitation: contextual evidence was unavailable.")
+
+
 def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     """Build the Phase 3 report solely from canonical profile and narratives."""
     country = str(result.get("country") or "").strip()
@@ -964,6 +990,9 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
     dimension_narratives = result.get("dimension_narratives") or {}
     market_narratives = result.get("market_narratives") or {}
     executive = result.get("executive_summary_narrative") or {}
+    context_status = result.get("context_status") or {}
+    if hasattr(context_status, "model_dump"):
+        context_status = context_status.model_dump()
     references = result.get("document_references") or []
     documents = {
         str(item.get("doc_id")): item
@@ -1024,11 +1053,49 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         )
 
     blocks.append(ReportBlock(type="heading", text="Context and sources", level=2))
-    for statement in context_evidence:
-        if (
-            isinstance(statement, dict)
-            and statement.get("classification") != "unrelated"
-        ):
+    accepted_context = [
+        statement
+        for statement in context_evidence
+        if isinstance(statement, dict)
+        and _mfi_context_statement_is_accepted(statement, documents)
+    ]
+    visible_context = [
+        statement
+        for statement in context_evidence
+        if isinstance(statement, dict)
+        and (
+            statement in accepted_context
+            or (
+                statement.get("classification") != "unrelated"
+                and bool(statement.get("substituted"))
+            )
+        )
+    ]
+    context_state = str(context_status.get("status") or "").strip()
+    if context_state == "available" and not accepted_context:
+        context_state = "no_accepted_statements" if documents else "no_results"
+    elif context_state not in {"available", *_MFI_CONTEXT_DISCLOSURES}:
+        context_state = "available" if accepted_context else "not_attempted"
+    disclosure = _MFI_CONTEXT_DISCLOSURES.get(context_state)
+    if disclosure:
+        blocks.append(
+            ReportBlock(
+                type="paragraph",
+                text=disclosure,
+                meta={"context_status": context_state},
+            )
+        )
+    limitation_code = str(context_status.get("limitation_code") or "").strip()
+    if limitation_code:
+        blocks.append(
+            ReportBlock(
+                type="limitation_box",
+                text=_mfi_context_limitation_text(limitation_code),
+                meta={"code": limitation_code},
+            )
+        )
+    for statement in visible_context:
+        if isinstance(statement, dict):
             _append_mfi_claim(
                 blocks,
                 {
@@ -1038,13 +1105,25 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                     "document_ids": statement.get("document_ids", []),
                     "validation_status": statement.get("validation_status"),
                     "substituted": statement.get("substituted", False),
+                    "scope": "context",
                 },
                 catalog=catalog,
                 documents=documents,
                 qa_context=qa_context,
             )
-    if references:
-        blocks.append(ReportBlock(type="references", references=references))
+    cited_document_ids = {
+        str(document_id)
+        for statement in accepted_context
+        for document_id in statement.get("document_ids", []) or []
+    }
+    cited_references = [
+        reference
+        for reference in references
+        if isinstance(reference, dict)
+        and str(reference.get("doc_id") or "") in cited_document_ids
+    ]
+    if cited_references:
+        blocks.append(ReportBlock(type="references", references=cited_references))
 
     blocks.append(
         ReportBlock(type="heading", text="Assessed-market MFI profile", level=2)

@@ -614,6 +614,136 @@ class MFIContextEvidenceStatement(BaseModel):
     substituted: bool = False
 
 
+MFIContextRetrieverState = Literal[
+    "completed",
+    "no_results",
+    "failed",
+    "not_attempted",
+]
+MFIContextOverallState = Literal[
+    "available",
+    "no_results",
+    "retrieval_failed",
+    "classification_failed",
+    "no_accepted_statements",
+    "not_attempted",
+]
+MFIContextLimitationCode = Literal[
+    "context_retrieval_unavailable",
+    "context_partial_retrieval_unavailable",
+    "context_classification_unavailable",
+]
+
+
+class MFIContextRetrieverStatus(BaseModel):
+    """Stable public outcome for one contextual-document provider."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: MFIContextRetrieverState
+    retrieved_document_count: int = Field(ge=0)
+
+
+class MFIContextStatus(BaseModel):
+    """Deterministic, provider-independent context availability disclosure."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: MFIContextOverallState
+    retrievers: Dict[str, MFIContextRetrieverStatus] = Field(default_factory=dict)
+    total_deduplicated_documents_retrieved: int = Field(ge=0)
+    statements_classified: int = Field(ge=0)
+    final_accepted_statements: int = Field(ge=0)
+    extraction_mode: Literal[
+        "not_started",
+        "llm",
+        "fallback",
+        "failed",
+        "not_applicable",
+        "offline",
+    ] = "not_started"
+    limitation_code: Optional[MFIContextLimitationCode] = None
+
+    @model_validator(mode="after")
+    def validate_context_status(self) -> "MFIContextStatus":
+        ordered = {
+            key: self.retrievers[key]
+            for key in sorted(self.retrievers, key=str.casefold)
+        }
+        object.__setattr__(self, "retrievers", ordered)
+        retrieved_sum = sum(
+            item.retrieved_document_count for item in ordered.values()
+        )
+        if retrieved_sum != self.total_deduplicated_documents_retrieved:
+            raise ValueError(
+                "total_deduplicated_documents_retrieved must equal the sum of "
+                "per-source retrieved_document_count values"
+            )
+        if self.final_accepted_statements > self.statements_classified:
+            raise ValueError(
+                "final_accepted_statements cannot exceed statements_classified"
+            )
+        failed_sources = sum(item.status == "failed" for item in ordered.values())
+        expected_limitation: Optional[str] = None
+        if self.status == "available" and (
+            self.final_accepted_statements < 1
+            or self.total_deduplicated_documents_retrieved < 1
+        ):
+            raise ValueError(
+                "available context requires a retrieved document and accepted statement"
+            )
+        if self.status == "no_results":
+            if self.total_deduplicated_documents_retrieved or failed_sources:
+                raise ValueError("no_results requires zero documents and no failed source")
+            if self.statements_classified:
+                raise ValueError("no_results cannot contain classified statements")
+        elif self.status == "retrieval_failed":
+            if self.total_deduplicated_documents_retrieved or not failed_sources:
+                raise ValueError(
+                    "retrieval_failed requires zero documents and a failed source"
+                )
+            if self.statements_classified:
+                raise ValueError("retrieval_failed cannot contain classified statements")
+            expected_limitation = "context_retrieval_unavailable"
+        elif self.status == "classification_failed":
+            if self.total_deduplicated_documents_retrieved < 1:
+                raise ValueError("classification_failed requires retrieved documents")
+            if self.final_accepted_statements:
+                raise ValueError(
+                    "classification_failed cannot contain accepted statements"
+                )
+            expected_limitation = "context_classification_unavailable"
+        elif self.status == "no_accepted_statements":
+            if self.total_deduplicated_documents_retrieved < 1:
+                raise ValueError(
+                    "no_accepted_statements requires retrieved documents"
+                )
+            if self.final_accepted_statements:
+                raise ValueError(
+                    "no_accepted_statements cannot contain accepted statements"
+                )
+        elif self.status == "not_attempted":
+            if self.total_deduplicated_documents_retrieved:
+                raise ValueError("not_attempted cannot contain retrieved documents")
+            if self.statements_classified or any(
+                item.status != "not_attempted" for item in ordered.values()
+            ):
+                raise ValueError(
+                    "not_attempted requires every source and classifier to be unattempted"
+                )
+        if (
+            expected_limitation is None
+            and failed_sources
+            and self.total_deduplicated_documents_retrieved
+        ):
+            expected_limitation = "context_partial_retrieval_unavailable"
+        if self.limitation_code != expected_limitation:
+            raise ValueError(
+                "limitation_code is inconsistent with the context outcome"
+            )
+        return self
+
+
 class MFIClaimCatalogEntry(BaseModel):
     """Closed deterministic value that narrative claims may cite."""
 
@@ -643,6 +773,14 @@ class MFIClaimCatalogEntry(BaseModel):
     #: parsing it back out of the formatted coverage label.
     represented_market_count: Optional[int] = None
     assessed_market_count: Optional[int] = None
+    representation_kind: Literal[
+        "fixed_metric",
+        "item",
+        "applicability",
+        "none",
+    ] = "none"
+    representation_complete: bool = False
+    representation_required: bool = False
 
 
 class MFINarrativeClaim(BaseModel):
@@ -969,6 +1107,16 @@ class GenerateMFIReportOutput(BaseModel):
     )
 
     # Canonical structured narratives and verification.
+    context_status: MFIContextStatus = Field(
+        default_factory=lambda: MFIContextStatus(
+            status="not_attempted",
+            retrievers={},
+            total_deduplicated_documents_retrieved=0,
+            statements_classified=0,
+            final_accepted_statements=0,
+            extraction_mode="offline",
+        )
+    )
     context_evidence: List[MFIContextEvidenceStatement] = Field(default_factory=list)
     dimension_narratives: Dict[str, MFIDimensionNarrative] = Field(
         default_factory=dict

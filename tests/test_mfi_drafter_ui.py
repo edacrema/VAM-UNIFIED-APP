@@ -98,7 +98,7 @@ shared.render_onboarding_sidebar_button = lambda **kwargs: None
 shared.render_instructions_sidebar_button = lambda **kwargs: None
 shared.render_bug_report_sidebar_link = lambda **kwargs: None
 shared.render_bug_report_header_link = lambda **kwargs: None
-shared.render_report_delivery = lambda **kwargs: None
+shared.render_report_delivery = lambda **kwargs: kwargs["render_technical_details"]()
 shared.render_report_blocks = lambda *args, **kwargs: None
 shared.render_mfi_raw_table_downloads = lambda *args, **kwargs: None
 shared.request_json = backend.request_json
@@ -259,4 +259,42 @@ def test_phase3_mean_priorities_limitations_and_qa_are_visible(monkeypatch):
     )
     assert any(
         "unresolved material issues" in error.value for error in app.error
+    )
+
+
+def test_r7_context_status_is_informational_or_warning_in_technical_details(monkeypatch):
+    neutral_backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        result={
+            "run_id": "mfi-run-neutral",
+            "country": "South Sudan",
+            "report_blocks": [],
+            "context_status": {
+                "status": "no_results",
+                "limitation_code": None,
+            },
+        },
+    )
+    neutral = _app(monkeypatch, neutral_backend)
+    neutral = _element(neutral.button, "Generate report").click().run(timeout=20)
+    assert any(
+        "Context evidence status: no results" in item.value for item in neutral.info
+    )
+
+    failure_backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        result={
+            "run_id": "mfi-run-failure",
+            "country": "South Sudan",
+            "report_blocks": [],
+            "context_status": {
+                "status": "retrieval_failed",
+                "limitation_code": "context_retrieval_unavailable",
+            },
+        },
+    )
+    failed = _app(monkeypatch, failure_backend)
+    failed = _element(failed.button, "Generate report").click().run(timeout=20)
+    assert any(
+        "context_retrieval_unavailable" in item.value for item in failed.warning
     )

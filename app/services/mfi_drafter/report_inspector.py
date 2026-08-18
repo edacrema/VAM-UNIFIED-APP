@@ -241,6 +241,7 @@ class StructuralReport:
 
     # Repetition (FIX-09, FIX-11).
     evidence_note_count: int = 0
+    evidence_note_word_count: int = 0
     coverage_note_total: int = 0
     coverage_note_repetition: Mapping[str, int] = field(default_factory=dict)
     repeated_phrases: tuple[RepeatedPhrase, ...] = ()
@@ -300,6 +301,7 @@ class StructuralReport:
             "pooled_population_phrase_count": self.pooled_population_phrase_count,
             "pooled_population_samples": list(self.pooled_population_samples),
             "evidence_note_count": self.evidence_note_count,
+            "evidence_note_word_count": self.evidence_note_word_count,
             "coverage_note_total": self.coverage_note_total,
             "coverage_note_repetition": dict(self.coverage_note_repetition),
             "max_boilerplate_repetition": self.max_boilerplate_repetition,
@@ -691,6 +693,7 @@ def inspect_report_blocks(
     claim_status: Counter[str] = Counter()
     claim_paragraphs = 0
     evidence_notes = 0
+    evidence_note_words = 0
     qa_warnings = 0
     qa_rows = 0
 
@@ -716,6 +719,7 @@ def inspect_report_blocks(
 
         if block_type == "evidence_note":
             evidence_notes += 1
+            evidence_note_words += len(re.findall(r"\b[\w'-]+\b", text))
             paragraph_parts.append(text)
             continue
 
@@ -776,6 +780,7 @@ def inspect_report_blocks(
         "qa_warning_block_count": qa_warnings,
         "qa_table_row_count": qa_rows,
         "evidence_note_count": evidence_notes,
+        "evidence_note_word_count": evidence_note_words,
     }
     report = StructuralReport(**metrics)
     if profile is not None:
@@ -852,6 +857,7 @@ def _inspect_document(document: Any, *, config: InspectorConfig) -> StructuralRe
     qa_warnings = 0
     qa_rows = 0
     evidence_notes = 0
+    evidence_note_words = 0
     body_index = 0
     last_heading: Optional[str] = None
 
@@ -866,6 +872,7 @@ def _inspect_document(document: Any, *, config: InspectorConfig) -> StructuralRe
                 last_heading = text.strip()
             elif text.strip().startswith("Evidence:"):
                 evidence_notes += 1
+                evidence_note_words += len(re.findall(r"\b[\w'-]+\b", text))
             paragraph_parts.append(text)
             body_index += 1
             continue
@@ -896,6 +903,7 @@ def _inspect_document(document: Any, *, config: InspectorConfig) -> StructuralRe
         "qa_warning_block_count": qa_warnings,
         "qa_table_row_count": qa_rows,
         "evidence_note_count": evidence_notes,
+        "evidence_note_word_count": evidence_note_words,
     }
     return StructuralReport(**metrics)
 

@@ -13,7 +13,8 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
-from .methodology import DISPLAY_DIMENSIONS
+from .evidence_notes import compose_evidence_note
+from .methodology import DISPLAY_DIMENSIONS, METRIC_DEFINITIONS_BY_ID
 from .wording import (
     NEUTRAL_SCOPE_STATEMENT,
     affordability_claims,
@@ -79,6 +80,21 @@ def build_claim_catalog(
         formatted = _format_catalog_value(value, unit, statistic)
         coverage = raw.get("coverage")
         coverage_label = _coverage_label(coverage)
+        source_metric_ids = [
+            str(item) for item in raw.get("source_metric_ids", []) if item
+        ]
+        (
+            representation_kind,
+            representation_complete,
+            representation_required,
+        ) = _claim_representation(
+            statistic=statistic,
+            coverage=coverage,
+            representation_basis=str(
+                raw.get("representation_basis") or "all_assessed_markets"
+            ),
+            source_metric_ids=source_metric_ids,
+        )
         scope = _canonical_scope(
             str(raw.get("evidence_scope") or ""),
             market_name=raw.get("market_name"),
@@ -98,9 +114,7 @@ def build_claim_catalog(
             market_name=_optional_text(raw.get("market_name")),
             region=_optional_text(raw.get("region")),
             coverage_label=coverage_label,
-            source_metric_ids=[
-                str(item) for item in raw.get("source_metric_ids", []) if item
-            ],
+            source_metric_ids=source_metric_ids,
             aggregation_method=raw.get("aggregation_method")
             or "unweighted_market_mean",
             population_basis=raw.get("population_basis") or "descriptive",
@@ -120,6 +134,9 @@ def build_claim_catalog(
             assessed_market_count=_optional_count(
                 coverage, "total_assessed_market_count"
             ),
+            representation_kind=representation_kind,
+            representation_complete=representation_complete,
+            representation_required=representation_required,
         )
         catalog[metric_id] = entry.model_dump()
     return catalog
@@ -131,6 +148,47 @@ def _optional_count(coverage: Any, key: str) -> Optional[int]:
         return None
     value = coverage.get(key)
     return int(value) if isinstance(value, (int, float)) else None
+
+
+def _claim_representation(
+    *,
+    statistic: str,
+    coverage: Any,
+    representation_basis: str,
+    source_metric_ids: Sequence[str],
+) -> tuple[str, bool, bool]:
+    """Classify disclosure needs without changing the underlying ledger entry."""
+    available = _optional_count(coverage, "available_market_count")
+    total = _optional_count(coverage, "total_assessed_market_count")
+    if available is None or total is None:
+        return "none", False, False
+    definitions = [
+        METRIC_DEFINITIONS_BY_ID[metric_id]
+        for metric_id in source_metric_ids
+        if metric_id in METRIC_DEFINITIONS_BY_ID
+    ]
+    if any(definition.role == "item_driver" for definition in definitions):
+        kind = "item"
+    elif representation_basis == "applicable_assessed_markets" or any(
+        definition.applicability_rule == "quality_applicability"
+        for definition in definitions
+    ):
+        kind = "applicability"
+    else:
+        kind = "fixed_metric"
+    complete = available == total and int(coverage.get("missing_count") or 0) == 0
+    normalized_statistic = statistic.casefold()
+    explicit_representation_value = (
+        "coverage" in normalized_statistic
+        or normalized_statistic in {"count", "denominator", "numerator"}
+        or normalized_statistic.endswith("_count")
+    )
+    required = (
+        kind in {"item", "applicability"}
+        or not complete
+        or explicit_representation_value
+    )
+    return kind, complete, required
 
 
 def compact_catalog(
@@ -1495,34 +1553,8 @@ def evidence_note(
     catalog: Mapping[str, Mapping[str, Any]],
     documents: Mapping[str, Mapping[str, Any]],
 ) -> str:
-    """Render one readable evidence note without exposing raw IDs."""
-    parts: list[str] = []
-    for metric_id in claim.get("metric_ids", []) or []:
-        entry = catalog.get(str(metric_id))
-        if not isinstance(entry, Mapping):
-            continue
-        detail = f"{entry.get('label')}: {entry.get('formatted_value')}"
-        scope = str(entry.get("scope") or "")
-        if scope:
-            detail += f"; scope: {scope.replace('_', ' ')}"
-        if entry.get("coverage_label"):
-            detail += f"; coverage: {entry.get('coverage_label')}"
-        parts.append(detail)
-    for document_id in claim.get("document_ids", []) or []:
-        document = documents.get(str(document_id))
-        if not isinstance(document, Mapping):
-            continue
-        label = str(document.get("title") or document.get("source") or document_id)
-        date = str(document.get("date") or "")
-        parts.append(f"Context source: {label}" + (f" ({date})" if date else ""))
-    if not parts:
-        return ""
-    prefix = (
-        "Evidence — "
-        if claim.get("validation_status") != "unverified"
-        else "Unverified evidence — "
-    )
-    return prefix + " | ".join(parts)
+    """Compatibility wrapper around the canonical pure composer."""
+    return compose_evidence_note(claim, catalog, documents)
 
 
 def legacy_narrative_aliases(

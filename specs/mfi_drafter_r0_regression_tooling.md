@@ -103,6 +103,12 @@ either renderer; every visible analytical cell retains ledger linkage, all table
 at most eight columns, and complete canonical rows remain available through the Technical
 details JSON/CSV downloads.
 
+**FIX-07 (empty context section) and FIX-09 (repetitive coverage notes)** are closed in
+R7. Every report now discloses a stable retrieval/classification outcome, while one shared
+evidence-note composer states claim scope once and emits representation only for items,
+applicability-dependent evidence, incomplete fixed metrics, and explicit coverage/count
+statistics. The inspector also records total evidence-note word volume.
+
 ### Current ledger
 
 | Test location | Defect | Owning phase |
@@ -111,7 +117,6 @@ details JSON/CSV downloads.
 | artifact | Unweighted means of market rates worded as respondent shares (FIX-03) | R3 |
 | artifact | Markdown delimiters survive into the export (FIX-08) | R3 |
 | artifact, inspector | No claim-level validation marker; QA findings never tabulated (FIX-01) | R4 |
-| all three | Context heading emitted empty; coverage restated per citation (FIX-07, FIX-09) | R7 |
 | artifact, inspector | Boilerplate repeated verbatim across dimensions (FIX-11) | R8 |
 
 ### Not covered by automated measurement

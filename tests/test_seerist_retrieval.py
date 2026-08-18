@@ -258,6 +258,10 @@ def test_mfi_context_retrieval_falls_back_to_reliefweb_when_seerist_unavailable(
 
     assert result["context_counts"] == {"Seerist": 0, "ReliefWeb": 1, "total": 1}
     assert len(result["contextual_documents"]) == 1
-    assert "warnings" in result
-    assert "Seerist retrieval unavailable for South Sudan" in result["warnings"][0]
+    assert "warnings" not in result
+    assert (
+        result["context_status"]["limitation_code"]
+        == "context_partial_retrieval_unavailable"
+    )
+    assert result["context_status"]["retrievers"]["Seerist"]["status"] == "failed"
     assert result["retriever_traces"][1]["error"] == "Missing SEERIST_API_KEY."

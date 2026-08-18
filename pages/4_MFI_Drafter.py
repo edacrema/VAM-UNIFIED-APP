@@ -137,6 +137,7 @@ if isinstance(result, dict):
     assessment_profile = result.get("assessment_profile") or {}
     limitations = assessment_profile.get("limitations") or []
     qa_review = result.get("qa_review") or {}
+    context_status = result.get("context_status") or {}
 
     overview_columns = st.columns(3)
     mean_score = result.get("mean_mfi_across_assessed_markets")
@@ -233,6 +234,19 @@ if isinstance(result, dict):
         st.json(result.get("release_control") or release_control)
         st.markdown("**Generation diagnostics**")
         st.json(result.get("generation_diagnostics") or {})
+        st.markdown("**Context status**")
+        context_label = str(context_status.get("status") or "not_attempted").replace(
+            "_", " "
+        )
+        context_message = f"Context evidence status: {context_label}."
+        if context_status.get("limitation_code"):
+            st.warning(
+                f"{context_message} Limitation code: "
+                f"{context_status['limitation_code']}."
+            )
+        else:
+            st.info(context_message)
+        st.json(context_status)
         if result.get("warnings"):
             st.markdown("**Generation notices**")
             for warning in result.get("warnings") or []:

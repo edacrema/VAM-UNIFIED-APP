@@ -32,6 +32,11 @@ from langchain_core.messages import HumanMessage
 from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .analysis import build_assessment_profile
+from .context_status import (
+    not_attempted_context_status,
+    reconcile_context_status,
+    resolve_context_status,
+)
 from .features import require_mfi_analysis_v2
 from .schemas import (
     MFI_DIMENSIONS,
@@ -126,6 +131,7 @@ class MFIReportState(TypedDict):
     seerist_documents: List[Dict[str, Any]]
     reliefweb_documents: List[Dict[str, Any]]
     context_evidence: List[Dict[str, Any]]
+    context_status: Dict[str, Any]
     context_counts: Dict[str, int]
     retriever_traces: List[Dict[str, Any]]
     
@@ -189,6 +195,7 @@ def create_initial_state(
             "dimensions": {"llm": [], "fallback": []},
             "markets": {"llm": [], "fallback": []},
             "context_extraction_mode": "not_started",
+            "context_classification_status": "not_started",
             "executive_summary_mode": "not_started",
             "red_team_status": "not_started",
             "correction_attempts": 0,
@@ -208,6 +215,7 @@ def create_initial_state(
         seerist_documents=[],
         reliefweb_documents=[],
         context_evidence=[],
+        context_status=not_attempted_context_status().model_dump(),
         context_counts={"Seerist": 0, "ReliefWeb": 0, "total": 0},
         retriever_traces=[],
         visualizations={},
@@ -243,6 +251,7 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("dimensions", {"llm": [], "fallback": []})
     diagnostics.setdefault("markets", {"llm": [], "fallback": []})
     diagnostics.setdefault("context_extraction_mode", "not_started")
+    diagnostics.setdefault("context_classification_status", "not_started")
     diagnostics.setdefault("executive_summary_mode", "not_started")
     diagnostics.setdefault("red_team_status", "not_started")
     diagnostics.setdefault("correction_attempts", 0)
@@ -830,7 +839,6 @@ def node_context_retrieval(state: MFIReportState) -> dict:
 
     docs: List[Dict[str, Any]] = []
     retriever_traces: List[Dict[str, Any]] = []
-    warnings: List[str] = []
 
     country = state.get("country", "")
     start_date = state.get("data_collection_start", "")
@@ -866,8 +874,6 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         seerist_docs = seerist_docs[:8]
     if getattr(seerist, "last_trace", None):
         retriever_traces.append(seerist.last_trace)
-        if seerist.last_trace.get("error"):
-            warnings.append(f"Seerist retrieval unavailable for {country}: {seerist.last_trace['error']}")
 
     combined = list(rw_docs) + list(seerist_docs)
     seen_keys = set()
@@ -914,6 +920,12 @@ def node_context_retrieval(state: MFIReportState) -> dict:
             retriever_status[name] = "completed"
         else:
             retriever_status[name] = "no_results"
+    context_status = resolve_context_status(
+        retriever_statuses=retriever_status,
+        documents=docs,
+        statements=[],
+        extraction_mode="not_started",
+    )
 
     updates = {
         "contextual_documents": docs,
@@ -921,12 +933,11 @@ def node_context_retrieval(state: MFIReportState) -> dict:
         "seerist_documents": list(seerist_docs),
         "reliefweb_documents": list(rw_docs),
         "context_counts": context_counts,
+        "context_status": context_status.model_dump(),
         "retriever_traces": retriever_traces,
         "generation_diagnostics": diagnostics,
         "current_node": "context_retrieval",
     }
-    if warnings:
-        updates["warnings"] = warnings
     return updates
 
 # NODE: CONTEXT EXTRACTOR
@@ -939,8 +950,21 @@ def node_context_extractor(state: MFIReportState) -> dict:
     if not docs:
         diagnostics = _generation_diagnostics(state)
         diagnostics["context_extraction_mode"] = "not_applicable"
+        diagnostics["context_classification_status"] = "not_attempted"
+        existing_status = state.get("context_status") or {}
+        context_status = (
+            not_attempted_context_status()
+            if existing_status.get("status") == "not_attempted"
+            else resolve_context_status(
+                retriever_statuses=diagnostics.get("retrievers", {}),
+                documents=[],
+                statements=[],
+                extraction_mode="not_applicable",
+            )
+        )
         return {
             "context_evidence": [],
+            "context_status": context_status.model_dump(),
             "generation_diagnostics": diagnostics,
             "current_node": "context_extractor",
         }
@@ -979,9 +1003,14 @@ Output JSON:
     "classification": "corroborating|potentially_explanatory|unrelated",
     "document_ids": ["supplied-id"]}}
 ]}}"""
+    classification_failed = False
     try:
         response = get_model().invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
+        if not isinstance(result, dict) or not isinstance(
+            result.get("statements"), list
+        ):
+            raise ValueError("Context classifier returned an invalid response schema")
         context_evidence, parse_flags = parse_context_evidence(
             result,
             documents=docs,
@@ -992,10 +1021,26 @@ Output JSON:
         context_evidence = []
         parse_flags = []
         llm_calls = 0
+        classification_failed = True
     diagnostics = _generation_diagnostics(state)
     diagnostics["context_extraction_mode"] = "llm" if llm_calls else "fallback"
+    diagnostics["context_classification_status"] = (
+        "failed" if classification_failed else "completed"
+    )
+    context_status = resolve_context_status(
+        retriever_statuses=diagnostics.get("retrievers", {}),
+        documents=docs,
+        statements=context_evidence,
+        extraction_mode=(
+            "failed"
+            if classification_failed
+            else diagnostics["context_extraction_mode"]
+        ),
+        classification_failed=classification_failed,
+    )
     updates = {
         "context_evidence": context_evidence,
+        "context_status": context_status.model_dump(),
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
         "current_node": "context_extractor",
@@ -2484,6 +2529,11 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         list(state.get("context_evidence", []) or []),
         material,
     )
+    context_status = reconcile_context_status(
+        state.get("context_status") or not_attempted_context_status().model_dump(),
+        documents=list(state.get("contextual_documents", []) or []),
+        statements=context_evidence,
+    )
     substitutions.extend(context_substitutions)
     unmatched = unmatched_high_claim_ids(combined, substitutions)
 
@@ -2566,6 +2616,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             executive_narrative, flag_ids_by_claim, flag_codes_by_claim
         ),
         "context_evidence": context_evidence,
+        "context_status": context_status.model_dump(),
         "qa_review": review,
         "correction_history": correction_history,
         "generation_diagnostics": diagnostics,
@@ -2734,6 +2785,10 @@ def run_mfi_report_generation(
                 if isinstance(item, dict) and item.get("code")
             ),
             "mfi_retriever_status": diagnostics.get("retrievers", {}),
+            "mfi_context_status": (result.get("context_status") or {}).get("status"),
+            "mfi_context_limitation_code": (
+                result.get("context_status") or {}
+            ).get("limitation_code"),
         },
     )
     return result

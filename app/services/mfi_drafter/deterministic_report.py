@@ -24,6 +24,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
 
+from .context_status import not_attempted_context_status
 from .report_inspector import ChartTitle, InspectorConfig, _parse_chart_title
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -185,6 +186,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "dimensions": {"llm": [], "fallback": sorted(dimension_narratives, key=str.casefold)},
         "markets": {"llm": [], "fallback": sorted(market_narratives, key=str.casefold)},
         "context_extraction_mode": "not_applicable",
+        "context_classification_status": "not_attempted",
         "executive_summary_mode": "fallback",
         "red_team_status": "not_started",
         "correction_attempts": 0,
@@ -216,6 +218,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
             }
             for market in profile["markets"]
         ],
+        "context_status": not_attempted_context_status().model_dump(),
         "context_evidence": context,
         "dimension_narratives": dimension_narratives,
         "market_narratives": market_narratives,

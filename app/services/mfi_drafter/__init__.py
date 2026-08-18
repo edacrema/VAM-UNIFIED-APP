@@ -36,6 +36,8 @@ __all__ = [
     "MFIAssessmentProfile",
     "MFIReleaseControl",
     "MFIGenerationDiagnostics",
+    "MFIContextRetrieverStatus",
+    "MFIContextStatus",
     "build_assessment_profile",
 ]
 
@@ -83,6 +85,8 @@ def __getattr__(name: str):
         "MFIAssessmentProfile",
         "MFIReleaseControl",
         "MFIGenerationDiagnostics",
+        "MFIContextRetrieverStatus",
+        "MFIContextStatus",
     }:
         return getattr(import_module(".schemas", __name__), name)
     raise AttributeError(name)

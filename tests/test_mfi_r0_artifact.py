@@ -115,6 +115,12 @@ def r6_projection_report() -> StructuralReport:
     return inspect_docx_bytes(build_report_run(render_figures=False).docx)
 
 
+@pytest.fixture(scope="module")
+def r7_context_evidence_report() -> StructuralReport:
+    """Exercise current R7 disclosures; stored artifacts may predate remediation."""
+    return inspect_docx_bytes(build_report_run(render_figures=False).docx)
+
+
 def test_artifact_is_a_real_report(artifact_report) -> None:
     """Guard against a vacuous pass: every later zero must mean something."""
     assert artifact_report.paragraph_char_count > 10_000
@@ -173,24 +179,18 @@ def test_exported_tables_stay_within_the_readable_column_budget(
     assert r6_projection_report.max_table_column_count <= 8
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: the context heading is exported with no content and no status "
-    "disclosure (FIX-07, fixed in R7)",
-)
-def test_no_exported_section_is_empty(artifact_report) -> None:
-    assert artifact_report.empty_section_titles == ()
+def test_no_exported_section_is_empty(r7_context_evidence_report) -> None:
+    assert r7_context_evidence_report.empty_section_titles == ()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: complete fixed-metric coverage is restated on every citation "
-    "(FIX-09, fixed in R7)",
-)
-def test_coverage_is_not_restated_on_every_citation(artifact_report) -> None:
+def test_coverage_is_not_restated_on_every_citation(
+    r7_context_evidence_report,
+) -> None:
     """A coverage label repeated once per citation is noise, not traceability."""
-    repetition = artifact_report.coverage_note_repetition
-    assert max(repetition.values(), default=0) <= artifact_report.evidence_note_count
+    repetition = r7_context_evidence_report.coverage_note_repetition
+    assert max(repetition.values(), default=0) <= (
+        r7_context_evidence_report.evidence_note_count
+    )
 
 
 @pytest.mark.xfail(

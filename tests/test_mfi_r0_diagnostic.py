@@ -228,10 +228,5 @@ def test_diagnostic_tables_stay_within_the_readable_column_budget(
     assert diagnostic_report.max_table_column_count <= 8
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R0 ledger: the context heading is emitted with no content and no status "
-    "disclosure (FIX-07, fixed in R7)",
-)
 def test_diagnostic_context_section_is_not_empty(diagnostic_report) -> None:
     assert diagnostic_report.empty_section_titles == ()

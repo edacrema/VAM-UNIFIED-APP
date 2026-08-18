@@ -132,6 +132,13 @@ def test_direct_runner_uses_supplied_immutable_snapshot(monkeypatch, caplog):
     assert result["release_control"]["deployment_revision"] == "candidate-7"
     assert "generation started" in caplog.text
     assert "generation completed" in caplog.text
+    completed = next(
+        record
+        for record in caplog.records
+        if getattr(record, "mfi_event", None) == "generation_completed"
+    )
+    assert completed.mfi_context_status == "not_attempted"
+    assert completed.mfi_context_limitation_code is None
 
 
 @pytest.fixture

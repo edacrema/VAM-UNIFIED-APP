@@ -25,6 +25,7 @@ from app.shared.docx_export import build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import ReportBlock, build_mfi_report_blocks
 
 from .analysis import MFIAnalysisConfig, build_assessment_profile
+from .context_status import not_attempted_context_status
 from .data_loader import load_mfi_from_csv
 from .features import MFI_DRAFTER_SERVICE_NAME
 from .graph import node_mfi_graph_designer
@@ -376,6 +377,7 @@ def _deterministic_result(
             "fallback": sorted(market_narratives, key=str.casefold),
         },
         "context_extraction_mode": "not_applicable",
+        "context_classification_status": "not_attempted",
         "executive_summary_mode": "fallback",
         "red_team_status": "not_started",
         "correction_attempts": 0,
@@ -409,6 +411,7 @@ def _deterministic_result(
             }
             for market in profile["markets"]
         ],
+        "context_status": not_attempted_context_status().model_dump(),
         "context_evidence": context,
         "dimension_narratives": dimension_narratives,
         "market_narratives": market_narratives,

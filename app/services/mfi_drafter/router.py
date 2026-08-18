@@ -12,6 +12,7 @@ import logging
 from .graph import run_mfi_report_generation
 from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .compatibility import canonical_and_legacy_response_fields
+from .context_status import not_attempted_context_status
 from .features import (
     MFIAnalysisVersionDisabled,
     mfi_release_control,
@@ -89,6 +90,7 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {
         "release_control": state.get("release_control", {}),
         "generation_diagnostics": state.get("generation_diagnostics", {}),
+        "context_status": state.get("context_status", {}),
     }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
@@ -145,6 +147,10 @@ def _build_mfi_output(
         assessment_profile=response_fields["assessment_profile"],
         narrative_schema_version=result.get("narrative_schema_version", "2.0"),
         market_score_distribution=response_fields["market_score_distribution"],
+        context_status=(
+            result.get("context_status")
+            or not_attempted_context_status().model_dump()
+        ),
         context_evidence=result.get("context_evidence", []),
         dimension_narratives=result.get("dimension_narratives", {}),
         market_narratives=result.get("market_narratives", {}),
@@ -683,6 +689,7 @@ def get_service_info():
             "narrative_schema_version": "Version of the structured narrative contract",
             "market_score_distribution": "Neutral ordered assessed-market scores",
             "context_evidence": "Classified, source-linked contextual statements",
+            "context_status": "Stable retrieval, classification, and accepted-context status",
             "dimension_narratives": "Metric-cited structured dimension narratives",
             "market_narratives": "Metric-cited structured market narratives",
             "executive_summary_narrative": "Metric-cited structured executive summary",
