@@ -45,7 +45,7 @@ def _document(doc_id: str = "doc-1", source: str = "ReliefWeb") -> dict:
 
 
 def _statement(
-    statement_id: str = "context-1",
+    statement_id: str = "context.statement.1",
     *,
     document_ids: list[str] | None = None,
     classification: str = "corroborating",
@@ -236,7 +236,7 @@ def test_finalize_qa_reconciles_withdrawn_context_to_no_accepted_statements() ->
         "code": "unsupported_causal_claim",
         "severity": "high",
         "artifact_type": "context",
-        "artifact_id": "context-1",
+        "artifact_id": "context.statement.1",
         "field_name": "text",
         "claim_id": None,
         "message": "The contextual statement asserted causality.",
@@ -281,7 +281,7 @@ def test_finalize_qa_reconciles_withdrawn_context_to_no_accepted_statements() ->
         for index, block in enumerate(blocks)
         if block.type == "paragraph"
         and isinstance(block.meta, dict)
-        and block.meta.get("claim_id") == "context-1"
+        and block.meta.get("claim_id") == "context.statement.1"
     )
     assert blocks[context_claim_index + 1].type == "claim_warning"
 
@@ -467,7 +467,7 @@ def test_partial_retrieval_keeps_valid_context_and_adds_stable_limitation() -> N
     assert any(
         block.type == "paragraph"
         and isinstance(block.meta, dict)
-        and block.meta.get("claim_id") == "context-1"
+        and block.meta.get("claim_id") == "context.statement.1"
         for block in blocks
     )
 

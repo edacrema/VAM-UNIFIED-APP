@@ -33,7 +33,10 @@ from app.shared.live_outputs import (
     create_databridges_artifacts,
     create_document_previews_with_artifacts,
 )
-from app.shared.report_blocks import build_market_monitor_report_blocks, build_mfi_report_blocks
+from app.shared.report_blocks import (
+    build_market_monitor_report_blocks,
+    resolve_mfi_report_blocks,
+)
 from app.shared.countries import supported_country_options
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
@@ -458,7 +461,12 @@ def _build_mfi_report_output(
         "market_recommendations": response_fields["market_recommendations"],
         "country_context": response_fields["country_context"],
         "document_references": result.get("document_references", []),
-        "report_blocks": build_mfi_report_blocks(result_for_blocks),
+        "report_blocks": resolve_mfi_report_blocks(
+            result_for_blocks,
+            country=country,
+            data_collection_start=data_collection_start,
+            data_collection_end=data_collection_end,
+        ),
         "visualizations": result.get("visualizations", {}),
         "warnings": result.get("warnings", []),
         "llm_calls": result.get("llm_calls", 0),
@@ -1265,7 +1273,8 @@ def _mfi_drafter_generate_from_csv_async(
         "deterministic_claim_validator": 92,
         "red_team": 96,
         "targeted_correction": 94,
-        "finalize_qa": 99,
+        "finalize_qa": 97,
+        "finalize_delivery": 99,
     }
 
     def run_in_background() -> None:
@@ -1387,7 +1396,8 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
         "deterministic_claim_validator": 92,
         "red_team": 96,
         "targeted_correction": 94,
-        "finalize_qa": 99,
+        "finalize_qa": 97,
+        "finalize_delivery": 99,
     }
 
     def run_in_background() -> None:
@@ -1544,7 +1554,7 @@ def _mfi_drafter_export_docx(run_id: str, *, json_body: Any) -> LocalResponse:
 
     result = run.result or {}
     try:
-        report_blocks = build_mfi_report_blocks(result)
+        report_blocks = resolve_mfi_report_blocks(result)
         docx_bytes = build_docx_bytes_from_report_blocks(
             report_blocks,
             visualizations=result.get("visualizations", {}),
@@ -1659,6 +1669,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
             {"id": "red_team", "name": "Red Team QA", "description": "Semantic quality assurance"},
             {"id": "targeted_correction", "name": "Targeted Correction", "description": "Repairs affected fields only"},
             {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes claim and QA status"},
+            {"id": "finalize_delivery", "name": "Validate Delivery", "description": "Validates and stores reader-facing report blocks"},
         ],
         "mfi_dimensions": MFI_DIMENSIONS,
     }

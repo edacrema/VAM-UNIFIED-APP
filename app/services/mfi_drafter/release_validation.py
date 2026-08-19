@@ -22,7 +22,7 @@ import pandas as pd
 from pydantic import BaseModel, Field, model_validator
 
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
-from app.shared.report_blocks import ReportBlock, build_mfi_report_blocks
+from app.shared.report_blocks import ReportBlock, resolve_mfi_report_blocks
 
 from .analysis import MFIAnalysisConfig, build_assessment_profile
 from .context_status import not_attempted_context_status
@@ -437,7 +437,7 @@ def _deterministic_result(
     }
     visualizations = node_mfi_graph_designer(result).get("visualizations", {})
     result["visualizations"] = visualizations
-    blocks = build_mfi_report_blocks(result)
+    blocks = resolve_mfi_report_blocks(result)
     result["report_blocks"] = [block.model_dump() for block in blocks]
     docx = build_docx_bytes_from_report_blocks(
         blocks,

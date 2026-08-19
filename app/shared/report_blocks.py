@@ -42,6 +42,35 @@ class ReportBlock(BaseModel):
     meta: Optional[Dict[str, Any]] = None
 
 
+def resolve_mfi_report_blocks(
+    result: Dict[str, Any],
+    *,
+    country: Optional[str] = None,
+    data_collection_start: Optional[str] = None,
+    data_collection_end: Optional[str] = None,
+) -> List[ReportBlock]:
+    """Return the persisted validated delivery payload, or build legacy results once.
+
+    New runs store their validated blocks before completion.  The fallback exists only
+    for earlier valid completed results that predate that field; it deliberately does
+    not attempt to rewrite claim identities or recover failed runs.
+    """
+    stored = result.get("report_blocks")
+    if isinstance(stored, list) and stored:
+        return [
+            item if isinstance(item, ReportBlock) else ReportBlock.model_validate(item)
+            for item in stored
+        ]
+    prepared = dict(result)
+    if country is not None:
+        prepared["country"] = country
+    if data_collection_start is not None:
+        prepared["data_collection_start"] = data_collection_start
+    if data_collection_end is not None:
+        prepared["data_collection_end"] = data_collection_end
+    return build_mfi_report_blocks(prepared)
+
+
 class MFIReportLayoutHint(BaseModel):
     """Typed internal layout contract shared by MFI renderers."""
 

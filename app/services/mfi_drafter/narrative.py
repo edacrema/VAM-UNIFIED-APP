@@ -14,6 +14,15 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
+from .claim_identity import (
+    canonical_claim_index,
+    canonicalize_narrative_identities,
+    context_statement_id,
+    dimension_claim_id,
+    executive_claim_id,
+    market_claim_id,
+    subdimension_claim_id,
+)
 from .evidence_notes import compose_evidence_note
 from .methodology import (
     DIMENSION_REVIEW_GUIDANCE,
@@ -338,6 +347,7 @@ def parse_context_evidence(
     payload: Any,
     *,
     documents: Sequence[Mapping[str, Any]],
+    expected_statement_ids: Optional[Sequence[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate LLM context classifications and retain only known documents."""
     known = {
@@ -368,9 +378,11 @@ def parse_context_evidence(
         supplied_ids = [str(item) for item in raw.get("document_ids", []) if item]
         invalid = [item for item in supplied_ids if item not in known]
         valid_ids = [item for item in supplied_ids if item in known]
-        statement_id = str(
-            raw.get("statement_id")
-            or f"context-{index + 1}-{_short_hash(text)}"
+        statement_id = (
+            str(expected_statement_ids[index])
+            if expected_statement_ids is not None
+            and index < len(expected_statement_ids)
+            else context_statement_id(index + 1)
         )
         flags: list[str] = []
         if invalid or not valid_ids:
@@ -440,7 +452,7 @@ def parse_dimension_narrative(
         )
         summary = _claim_from_payload(
             payload.get("summary"),
-            claim_id=f"dimension.{_slug(dimension)}.summary",
+            claim_id=dimension_claim_id(dimension, "summary", 1),
             claim_kind="summary",
             scope="assessment",
         )
@@ -486,8 +498,7 @@ def parse_dimension_narrative(
             interpretation = _claim_from_payload(
                 raw.get("interpretation"),
                 claim_id=(
-                    f"dimension.{_slug(dimension)}.subdimension."
-                    f"{index + 1}.interpretation"
+                    subdimension_claim_id(dimension, index + 1)
                 ),
                 claim_kind="finding",
                 scope="assessment",
@@ -536,21 +547,21 @@ def parse_market_narrative(
     try:
         issues = _claim_list(
             payload.get("priority_issues"),
-            prefix=f"market.{_slug(market_name)}.issue",
+            prefix=market_claim_id(market_name, "issue", 1).rsplit(".", 1)[0],
             claim_kind="finding",
             default_scope="market",
             max_items=NARRATIVE_DENSITY_POLICY.market_priority_issues,
         )
         interventions = _claim_list(
             payload.get("recommended_interventions"),
-            prefix=f"market.{_slug(market_name)}.intervention",
+            prefix=market_claim_id(market_name, "intervention", 1).rsplit(".", 1)[0],
             claim_kind="recommendation",
             default_scope="market",
             max_items=NARRATIVE_DENSITY_POLICY.market_recommendations,
         )
         limitations = _claim_list(
             payload.get("limitations"),
-            prefix=f"market.{_slug(market_name)}.limitation",
+            prefix=market_claim_id(market_name, "limitation", 1).rsplit(".", 1)[0],
             claim_kind="limitation",
             default_scope="market",
             max_items=NARRATIVE_DENSITY_POLICY.market_limitations,
@@ -591,7 +602,7 @@ def parse_executive_narrative(
         motivation = (
             _claim_from_payload(
                 payload.get("motivation"),
-                claim_id="executive.motivation",
+                claim_id=executive_claim_id("motivation", 1),
                 claim_kind="summary",
                 scope="assessment",
             )
@@ -638,7 +649,6 @@ def fallback_dimension_narrative(
 ) -> dict[str, Any]:
     """Build a fully deterministic, cited dimension narrative."""
     dimension = str(dimension_profile["dimension"])
-    slug = _slug(dimension)
     mean_id = _find_id(
         dimension_profile.get("ledger_metric_ids", []), suffix=".mean"
     )
@@ -647,7 +657,7 @@ def fallback_dimension_narrative(
     )
     metric_ids = [item for item in (mean_id, rank_id) if item]
     summary = MFINarrativeClaim(
-        claim_id=f"dimension.{slug}.summary",
+        claim_id=dimension_claim_id(dimension, "summary", 1),
         text=(
             f"The average {dimension} score across assessed markets and its "
             "relative position are reported in the evidence note below."
@@ -666,7 +676,7 @@ def fallback_dimension_narrative(
     ]
     findings.append(
         MFINarrativeClaim(
-            claim_id=f"dimension.{slug}.finding.1",
+            claim_id=dimension_claim_id(dimension, "finding", 1),
             text=(
                 f"{dimension} varied across the included assessed markets; the "
                 "minimum, maximum, and interquartile spread are reported below."
@@ -760,7 +770,7 @@ def fallback_dimension_narrative(
                         else None
                     ),
                     interpretation=MFINarrativeClaim(
-                        claim_id=f"dimension.{slug}.subdimension.{index + 1}.interpretation",
+                        claim_id=subdimension_claim_id(dimension, index + 1),
                         text=(
                             f"This evidence is among the weakest available "
                             f"{dimension} components and should guide deeper review."
@@ -786,7 +796,7 @@ def fallback_dimension_narrative(
         ]
         geographic.append(
             MFINarrativeClaim(
-                claim_id=f"dimension.{slug}.geography.1",
+                claim_id=dimension_claim_id(dimension, "geography", 1),
                 text=(
                     f"{dimension} was the lowest-scoring dimension in one or more "
                     "assessed markets listed in the deterministic profile."
@@ -806,7 +816,7 @@ def fallback_dimension_narrative(
         if ordered_markets:
             geographic.append(
                 MFINarrativeClaim(
-                    claim_id=f"dimension.{slug}.geography.1",
+                    claim_id=dimension_claim_id(dimension, "geography", 1),
                     text=(
                         f"The lowest assessed-market {dimension} observation is "
                         "identified in the localized evidence below."
@@ -826,7 +836,7 @@ def fallback_dimension_narrative(
     ):
         limitations.append(
             MFINarrativeClaim(
-                claim_id=f"dimension.{slug}.limitation.{index + 1}",
+                claim_id=dimension_claim_id(dimension, "limitation", index + 1),
                 text=str(limitation.get("message") or ""),
                 claim_kind="limitation",
                 metric_ids=_limitation_claim_ids(
@@ -842,7 +852,7 @@ def fallback_dimension_narrative(
         else metric_ids
     )
     recommendation = MFINarrativeClaim(
-        claim_id=f"dimension.{slug}.recommendation.1",
+        claim_id=dimension_claim_id(dimension, "recommendation", 1),
         text=DIMENSION_REVIEW_GUIDANCE[dimension],
         claim_kind="recommendation",
         metric_ids=recommendation_ids,
@@ -871,7 +881,6 @@ def fallback_market_narrative(
     market_profile: Mapping[str, Any],
 ) -> dict[str, Any]:
     market_name = str(market_profile["market_name"])
-    slug = _slug(market_name)
     overall_id = _find_id(
         market_profile.get("ledger_metric_ids", []), suffix=".stored"
     )
@@ -882,7 +891,7 @@ def fallback_market_narrative(
     ][: NARRATIVE_DENSITY_POLICY.market_priority_issues]
     issues = [
         MFINarrativeClaim(
-            claim_id=f"market.{slug}.issue.{index + 1}",
+            claim_id=market_claim_id(market_name, "issue", index + 1),
             text=(
                 f"{item.get('dimension')} is among the market's lowest-scoring "
                 "dimensions and warrants review."
@@ -908,7 +917,7 @@ def fallback_market_narrative(
         priority_issues=issues,
         recommended_interventions=[
             MFINarrativeClaim(
-                claim_id=f"market.{slug}.intervention.1",
+                claim_id=market_claim_id(market_name, "intervention", 1),
                 text=(
                     "Review the cited market-side weakness with local teams and "
                     "triangulate it with operational and feasibility evidence."
@@ -994,7 +1003,7 @@ def fallback_executive_narrative(
 ) -> dict[str, Any]:
     priority = list(assessment_profile.get("priority_dimension_names", []) or [])
     motivation = MFINarrativeClaim(
-        claim_id="executive.motivation",
+        claim_id=executive_claim_id("motivation", 1),
         text=(
             "This report summarizes functionality across the included assessed "
             "markets and identifies relative priorities for deeper analysis."
@@ -1017,7 +1026,7 @@ def fallback_executive_narrative(
         )
         findings.append(
             MFINarrativeClaim(
-                claim_id=f"executive.finding.{index + 1}",
+                claim_id=executive_claim_id("finding", index + 1),
                 text=(
                     f"{dimension} is a priority dimension for deeper analysis "
                     "under the relative assessment-profile rule."
@@ -1034,7 +1043,7 @@ def fallback_executive_narrative(
         )
     limitations = [
         MFINarrativeClaim(
-            claim_id=f"executive.limitation.{index + 1}",
+            claim_id=executive_claim_id("limitation", index + 1),
             text=str(item.get("message") or ""),
             claim_kind="limitation",
             metric_ids=_limitation_claim_ids(item, assessment_profile),
@@ -1054,7 +1063,7 @@ def fallback_executive_narrative(
         key_findings=findings,
         recommendations=[
             MFINarrativeClaim(
-                claim_id="executive.recommendation.1",
+                claim_id=executive_claim_id("recommendation", 1),
                 text=(
                     "Prioritize deeper review of the cited dimensions and use "
                     "their subsection, driver, and geographic evidence to design "
@@ -1080,7 +1089,7 @@ def _scope_statement_claim() -> MFINarrativeClaim:
     deterministic suites a live guard on that rule.
     """
     return MFINarrativeClaim(
-        claim_id="assessment.scope_statement",
+        claim_id=executive_claim_id("scope_statement", 1),
         text=NEUTRAL_SCOPE_STATEMENT,
         claim_kind="limitation",
         metric_ids=[],
@@ -1143,6 +1152,17 @@ def validate_structured_narratives(
         market_narratives=market_narratives,
         executive_narrative=executive_narrative,
         assessment_profile=assessment_profile,
+    )
+    (
+        dimension_copy,
+        market_copy,
+        executive_copy,
+        context_copy,
+    ) = canonicalize_narrative_identities(
+        dimension_narratives=dimension_copy,
+        market_narratives=market_copy,
+        executive_narrative=executive_copy,
+        context_evidence=context_copy,
     )
     known_documents = {
         str(item.get("doc_id")): item
@@ -1714,10 +1734,24 @@ def apply_unresolved_claim_policy(
     markets = deepcopy(dict(market_narratives))
     executive = deepcopy(dict(executive_narrative))
 
+    # Resolve by the canonical structural index, never by "first claim with this
+    # string".  The identity contract makes this one-to-one; an internal breach is
+    # intentionally allowed to propagate to the graph's global fallback policy.
+    claim_index = canonical_claim_index(dimensions, markets, executive)
+
     for location, claim in _iter_claims(dimensions, markets, executive):
         claim_id = str(claim.get("claim_id") or "")
-        matched = high_by_claim.pop(claim_id, None)
+        matched = high_by_claim.get(claim_id)
         if not matched:
+            continue
+        canonical_location = claim_index.get(claim_id)
+        if canonical_location is None:
+            continue
+        if (
+            canonical_location.artifact_type != str(location.get("artifact_type"))
+            or canonical_location.artifact_id != str(location.get("artifact_id"))
+            or canonical_location.field_name != str(location.get("field_name"))
+        ):
             continue
         replacement = withdrawn_text(claim.get("claim_kind"))
         records.append(
@@ -1891,7 +1925,7 @@ def _claim_from_payload(
     if not text:
         raise ValueError("Narrative claim text is required")
     return MFINarrativeClaim(
-        claim_id=str(raw.get("claim_id") or claim_id),
+        claim_id=claim_id,
         text=text,
         claim_kind=claim_kind,
         metric_ids=[str(item) for item in raw.get("metric_ids", []) if item],

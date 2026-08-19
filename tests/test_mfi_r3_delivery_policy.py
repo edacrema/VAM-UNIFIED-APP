@@ -213,7 +213,9 @@ def test_finalize_withdraws_and_records_without_calling_a_model(
             "dimension_narratives": dimensions,
             "market_narratives": markets,
             "executive_summary_narrative": executive,
-            "deterministic_flags": [_flag("dim.price.1", "high")],
+            "deterministic_flags": [
+                _flag("dimension.price.finding.1", "high")
+            ],
             "red_team_flags": [],
             "correction_attempts": 3,
         }
@@ -226,7 +228,9 @@ def test_finalize_withdraws_and_records_without_calling_a_model(
 
     diagnostics = update["generation_diagnostics"]
     assert len(diagnostics["claim_substitutions"]) == 1
-    assert diagnostics["claim_substitutions"][0]["claim_id"] == "dim.price.1"
+    assert diagnostics["claim_substitutions"][0]["claim_id"] == (
+        "dimension.price.finding.1"
+    )
     assert diagnostics["unmatched_high_claim_ids"] == []
     assert any("withdrawn" in warning for warning in update["warnings"])
 
@@ -245,7 +249,12 @@ def test_finalize_leaves_a_clean_run_alone(narratives) -> None:
         }
     )
 
-    assert update["dimension_narratives"] == dimensions
+    assert update["dimension_narratives"]["Price"]["key_findings"][0][
+        "claim_id"
+    ] == "dimension.price.finding.1"
+    assert update["dimension_narratives"]["Price"]["key_findings"][0][
+        "text"
+    ] == dimensions["Price"]["key_findings"][0]["text"]
     assert update["generation_diagnostics"]["claim_substitutions"] == []
     assert update["warnings"] == []
 
@@ -262,7 +271,9 @@ def test_flag_identifiers_are_kept_apart_from_flag_codes(narratives) -> None:
             "dimension_narratives": dimensions,
             "market_narratives": markets,
             "executive_summary_narrative": executive,
-            "deterministic_flags": [_flag("dim.price.1", "high")],
+            "deterministic_flags": [
+                _flag("dimension.price.finding.1", "high")
+            ],
             "red_team_flags": [],
             "correction_attempts": 3,
         }
@@ -271,7 +282,8 @@ def test_flag_identifiers_are_kept_apart_from_flag_codes(narratives) -> None:
     finding = update["dimension_narratives"]["Price"]["key_findings"][0]
     assert finding["validation_flags"] == ["unsupported_modality_conclusion"]
     assert finding["validation_flag_ids"] == [
-        "deterministic-unsupported_modality_conclusion-dim.price.1"
+        "deterministic-unsupported_modality_conclusion-"
+        "dimension.price.finding.1"
     ]
 
 

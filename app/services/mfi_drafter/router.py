@@ -40,7 +40,7 @@ from app.shared.live_outputs import (
 )
 
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
-from app.shared.report_blocks import build_mfi_report_blocks
+from app.shared.report_blocks import resolve_mfi_report_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -164,13 +164,11 @@ def _build_mfi_output(
         market_recommendations=response_fields["market_recommendations"],
         country_context=response_fields["country_context"],
         document_references=result.get("document_references", []),
-        report_blocks=build_mfi_report_blocks(
-            {
-                **(result or {}),
-                "country": country,
-                "data_collection_start": data_collection_start,
-                "data_collection_end": data_collection_end,
-            }
+        report_blocks=resolve_mfi_report_blocks(
+            result,
+            country=country,
+            data_collection_start=data_collection_start,
+            data_collection_end=data_collection_end,
         ),
         visualizations=result.get("visualizations", {}),
         warnings=result.get("warnings", []),
@@ -355,7 +353,8 @@ async def generate_mfi_report_from_csv_async(
         "deterministic_claim_validator": 92,
         "red_team": 96,
         "targeted_correction": 94,
-        "finalize_qa": 99,
+        "finalize_qa": 97,
+        "finalize_delivery": 99,
     }
 
     def run_in_background():
@@ -492,7 +491,8 @@ async def generate_mfi_report_async(
         "deterministic_claim_validator": 92,
         "red_team": 96,
         "targeted_correction": 94,
-        "finalize_qa": 99,
+        "finalize_qa": 97,
+        "finalize_delivery": 99,
     }
     
     def run_in_background():
@@ -608,7 +608,7 @@ async def export_mfi_docx(
 
     result = run.result or {}
     try:
-        report_blocks = build_mfi_report_blocks(result)
+        report_blocks = resolve_mfi_report_blocks(result)
         docx_bytes = build_docx_bytes_from_report_blocks(
             report_blocks,
             visualizations=result.get("visualizations", {}),
@@ -718,7 +718,8 @@ def get_service_info():
             {"id": "deterministic_claim_validator", "name": "Claim Validator", "description": "Validates every claim against the closed catalog"},
             {"id": "red_team", "name": "Red Team QA", "description": "Semantic quality assurance"},
             {"id": "targeted_correction", "name": "Targeted Correction", "description": "Repairs only affected narrative fields"},
-            {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes warnings and claim status"}
+            {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes warnings and claim status"},
+            {"id": "finalize_delivery", "name": "Validate Delivery", "description": "Validates and stores reader-facing report blocks"},
         ],
         "mfi_dimensions": MFI_DIMENSIONS
     }

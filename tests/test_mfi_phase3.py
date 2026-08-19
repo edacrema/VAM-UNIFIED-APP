@@ -478,7 +478,7 @@ def test_correction_attempt_limit_and_unresolved_delivery_warning():
         "artifact_type": "executive_summary",
         "artifact_id": "executive_summary",
         "field_name": "motivation",
-        "claim_id": "executive.motivation",
+        "claim_id": "executive.motivation.1",
         "message": "Invalid claim.",
         "recommendation": "Repair it.",
         "metric_ids": [],
@@ -516,7 +516,7 @@ def test_correction_attempt_limit_and_unresolved_delivery_warning():
             "market_narratives": {},
             "executive_summary_narrative": {
                 "motivation": {
-                    "claim_id": "executive.motivation",
+                    "claim_id": "model-owned-id-is-ignored",
                     "text": "Invalid claim.",
                     "validation_status": "pending",
                     "validation_flags": [],
@@ -547,6 +547,7 @@ def test_graph_reruns_both_validators_after_targeted_repair():
     assert ("red_team", "targeted_correction") in edges
     assert ("targeted_correction", "dimension_drafter") in edges
     assert ("red_team", "finalize_qa") in edges
+    assert ("finalize_qa", "finalize_delivery") in edges
 
 
 def test_report_hierarchy_evidence_notes_and_docx_match(phase3_bundle):

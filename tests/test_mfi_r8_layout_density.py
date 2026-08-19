@@ -11,6 +11,7 @@ from docx import Document
 from pydantic import ValidationError
 
 from app.services.mfi_drafter import graph
+from app.services.mfi_drafter.claim_identity import context_token
 from app.services.mfi_drafter.methodology import (
     DIMENSION_REVIEW_GUIDANCE,
     DISPLAY_DIMENSIONS,
@@ -197,9 +198,9 @@ def test_dimension_parser_enforces_priority_and_non_priority_ceilings() -> None:
     )
     assert len(priority["key_findings"]) == 3
     assert [claim["claim_id"] for claim in priority["key_findings"]] == [
-        "claim.finding.1",
-        "claim.finding.2",
-        "claim.finding.3",
+        "dimension.price.finding.1",
+        "dimension.price.finding.2",
+        "dimension.price.finding.3",
     ]
     assert len(priority["subdimension_analysis"]) == 2
     assert len(priority["geographic_patterns"]) == 2
@@ -225,9 +226,9 @@ def test_market_and_executive_parsers_enforce_canonical_ceilings() -> None:
     market = parse_market_narrative(payload, market_profile=_market_profile())
     assert len(market["priority_issues"]) == 3
     assert [claim["claim_id"] for claim in market["priority_issues"]] == [
-        "claim.finding.1",
-        "claim.finding.2",
-        "claim.finding.3",
+        f"market.{context_token('Alpha')}.issue.1",
+        f"market.{context_token('Alpha')}.issue.2",
+        f"market.{context_token('Alpha')}.issue.3",
     ]
     assert len(market["recommended_interventions"]) == 3
     assert len(market["limitations"]) == 1

@@ -103,7 +103,8 @@ def test_direct_runner_stops_before_graph_or_llm(monkeypatch):
 def test_direct_runner_uses_supplied_immutable_snapshot(monkeypatch, caplog):
     class FakeAgent:
         @staticmethod
-        def invoke(state):
+        def invoke(state, config=None):
+            assert config == {"recursion_limit": 100}
             return {
                 **state,
                 "qa_review": {"status": "passed"},

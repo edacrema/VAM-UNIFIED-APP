@@ -7,7 +7,6 @@ or replaced here.
 """
 from __future__ import annotations
 
-from hashlib import sha256
 from math import ceil
 import re
 from statistics import median
@@ -16,6 +15,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel
 
+from .claim_identity import context_token as _context_token
 from .methodology import (
     ANALYSIS_SCHEMA_VERSION,
     DISPLAY_DIMENSIONS,
@@ -2095,9 +2095,3 @@ def _slug(value: str) -> str:
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii").casefold()
     slug = re.sub(r"[^a-z0-9]+", "_", ascii_value).strip("_")
     return slug or "unnamed"
-
-
-def _context_token(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", str(value)).strip()
-    digest = sha256(normalized.encode("utf-8")).hexdigest()[:8]
-    return f"{_slug(normalized)}_{digest}"

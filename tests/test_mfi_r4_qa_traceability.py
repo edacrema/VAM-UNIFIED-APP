@@ -374,7 +374,7 @@ def test_high_context_statement_is_withdrawn_but_kept_in_technical_diagnostics()
         code="unsupported_causal_claim",
         claim_id=None,
         artifact_type="context",
-        artifact_id="context-1",
+        artifact_id="context.statement.1",
         field_name="text",
     )
     final = graph.node_finalize_qa(
@@ -388,7 +388,7 @@ def test_high_context_statement_is_withdrawn_but_kept_in_technical_diagnostics()
             "executive_summary_narrative": {},
             "context_evidence": [
                 {
-                    "statement_id": "context-1",
+                    "statement_id": "context.statement.1",
                     "text": rejected,
                     "classification": "potentially_explanatory",
                     "document_ids": ["doc-1"],
@@ -413,3 +413,8 @@ def test_public_schema_preserves_r4_audit_fields() -> None:
     diagnostics = definitions["MFIGenerationDiagnostics"]["properties"]
     assert "claim_substitutions" in diagnostics
     assert "unmatched_high_claim_ids" in diagnostics
+    assert "claim_identity_authority" in diagnostics
+    assert "claim_identity_version" in diagnostics
+    assert "ignored_model_identifier_count" in diagnostics
+    assert "identity_fallback_artifacts" in diagnostics
+    assert "delivery_contract_status" in diagnostics

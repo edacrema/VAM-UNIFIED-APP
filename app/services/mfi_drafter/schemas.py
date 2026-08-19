@@ -1039,6 +1039,15 @@ class MFIGenerationDiagnostics(BaseModel):
     retrievers: Dict[str, str] = Field(default_factory=dict)
     claim_substitutions: List[Dict[str, Any]] = Field(default_factory=list)
     unmatched_high_claim_ids: List[str] = Field(default_factory=list)
+    claim_identity_authority: Literal["application"] = "application"
+    claim_identity_version: Literal["mfi-claim-id-v1"] = "mfi-claim-id-v1"
+    ignored_model_identifier_count: int = Field(default=0, ge=0)
+    identity_fallback_artifacts: List[str] = Field(default_factory=list)
+    delivery_contract_status: Literal[
+        "not_validated",
+        "validated",
+        "fallback_validated",
+    ] = "not_validated"
 
 
 class MFIMarketScoreDistributionEntry(BaseModel):

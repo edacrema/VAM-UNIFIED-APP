@@ -145,7 +145,7 @@ def test_mock_data_is_typed_and_cannot_masquerade_as_databridge():
 
 def test_router_adds_deprecated_alias_only_to_serialized_copy(monkeypatch):
     result = _canonical_result()
-    monkeypatch.setattr(router, "build_mfi_report_blocks", lambda _result: [])
+    monkeypatch.setattr(router, "resolve_mfi_report_blocks", lambda *_args, **_kwargs: [])
 
     output = router._build_mfi_output(
         result=result,
@@ -166,7 +166,11 @@ def test_router_adds_deprecated_alias_only_to_serialized_copy(monkeypatch):
 
 def test_dispatcher_adds_deprecated_alias_only_to_serialized_copy(monkeypatch):
     result = _canonical_result()
-    monkeypatch.setattr(dispatcher, "build_mfi_report_blocks", lambda _result: [])
+    monkeypatch.setattr(
+        dispatcher,
+        "resolve_mfi_report_blocks",
+        lambda *_args, **_kwargs: [],
+    )
 
     output = dispatcher._build_mfi_report_output(
         result=result,

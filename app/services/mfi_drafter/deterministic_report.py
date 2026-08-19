@@ -249,7 +249,7 @@ def run_deterministic_report(
 ) -> DeterministicReportRun:
     """Execute analysis, narratives, figures, blocks, and export from a loaded payload."""
     from app.shared.docx_export import build_docx_bytes_from_report_blocks
-    from app.shared.report_blocks import build_mfi_report_blocks
+    from app.shared.report_blocks import resolve_mfi_report_blocks
 
     from . import graph
 
@@ -281,7 +281,7 @@ def run_deterministic_report(
     result["visualizations"] = visualizations
 
     started = perf_counter()
-    blocks = build_mfi_report_blocks(result)
+    blocks = resolve_mfi_report_blocks(result)
     result["report_blocks"] = [block.model_dump() for block in blocks]
     docx = build_docx_bytes_from_report_blocks(blocks, visualizations=visualizations)
     timings["render"] = perf_counter() - started

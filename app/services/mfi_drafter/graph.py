@@ -32,6 +32,14 @@ from langchain_core.messages import HumanMessage
 from app.shared.llm import get_model
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .analysis import build_assessment_profile
+from .claim_identity import (
+    CLAIM_IDENTITY_AUTHORITY,
+    CLAIM_IDENTITY_VERSION,
+    MFIClaimIdentityError,
+    assert_claim_identity_contract,
+    canonicalize_narrative_identities,
+    count_model_identifiers,
+)
 from .context_status import (
     not_attempted_context_status,
     reconcile_context_status,
@@ -153,6 +161,7 @@ class MFIReportState(TypedDict):
     correction_targets: List[Dict[str, Any]]
     correction_history: List[Dict[str, Any]]
     claim_substitutions: List[Dict[str, Any]]
+    report_blocks: List[Dict[str, Any]]
     warnings: Annotated[List[str], operator.add]
     run_id: str
     correction_attempts: int
@@ -205,6 +214,11 @@ def create_initial_state(
             "unresolved_medium_count": 0,
             "unresolved_low_count": 0,
             "retrievers": {},
+            "claim_identity_authority": CLAIM_IDENTITY_AUTHORITY,
+            "claim_identity_version": CLAIM_IDENTITY_VERSION,
+            "ignored_model_identifier_count": 0,
+            "identity_fallback_artifacts": [],
+            "delivery_contract_status": "not_validated",
         },
         excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
         methodology_warnings=(csv_data or {}).get("methodology_warnings", []),
@@ -236,6 +250,7 @@ def create_initial_state(
         correction_targets=[],
         correction_history=[],
         claim_substitutions=[],
+        report_blocks=[],
         warnings=[],
         run_id=f"mfi_{uuid.uuid4().hex[:8]}",
         correction_attempts=0,
@@ -263,6 +278,11 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("retrievers", {})
     diagnostics.setdefault("claim_substitutions", [])
     diagnostics.setdefault("unmatched_high_claim_ids", [])
+    diagnostics.setdefault("claim_identity_authority", CLAIM_IDENTITY_AUTHORITY)
+    diagnostics.setdefault("claim_identity_version", CLAIM_IDENTITY_VERSION)
+    diagnostics.setdefault("ignored_model_identifier_count", 0)
+    diagnostics.setdefault("identity_fallback_artifacts", [])
+    diagnostics.setdefault("delivery_contract_status", "not_validated")
     return diagnostics
 
 
@@ -277,6 +297,14 @@ def _record_artifact_mode(
     if artifact_id not in values:
         values.append(artifact_id)
     values.sort(key=lambda value: str(value).casefold())
+
+
+def _record_ignored_model_identifiers(
+    diagnostics: Dict[str, Any], payload: Any
+) -> None:
+    diagnostics["ignored_model_identifier_count"] = int(
+        diagnostics.get("ignored_model_identifier_count", 0) or 0
+    ) + count_model_identifiers(payload)
 
 
 def robust_json_parse(response: Any) -> Optional[Dict]:
@@ -1001,8 +1029,7 @@ DOCUMENTS:
 
 Output JSON:
 {{"statements": [
-  {{"statement_id": "context-1", "text": "...",
-    "classification": "corroborating|potentially_explanatory|unrelated",
+  {{"text": "...", "classification": "corroborating|potentially_explanatory|unrelated",
     "document_ids": ["supplied-id"]}}
 ]}}"""
     classification_failed = False
@@ -1013,6 +1040,7 @@ Output JSON:
             result.get("statements"), list
         ):
             raise ValueError("Context classifier returned an invalid response schema")
+        ignored_model_identifiers = count_model_identifiers(result)
         context_evidence, parse_flags = parse_context_evidence(
             result,
             documents=docs,
@@ -1023,8 +1051,12 @@ Output JSON:
         context_evidence = []
         parse_flags = []
         llm_calls = 0
+        ignored_model_identifiers = 0
         classification_failed = True
     diagnostics = _generation_diagnostics(state)
+    diagnostics["ignored_model_identifier_count"] = int(
+        diagnostics.get("ignored_model_identifier_count", 0) or 0
+    ) + ignored_model_identifiers
     diagnostics["context_extraction_mode"] = "llm" if llm_calls else "fallback"
     diagnostics["context_classification_status"] = (
         "failed" if classification_failed else "completed"
@@ -1541,7 +1573,6 @@ Return:
 }}
 where CLAIM is:
 {{
-  "claim_id": "stable id",
   "text": "...",
   "claim_kind": "summary|finding|geographic_pattern|limitation|recommendation",
   "metric_ids": ["ledger ids"],
@@ -1562,6 +1593,7 @@ Relevant targets:
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
+            _record_ignored_model_identifiers(diagnostics, result)
             llm_calls += 1
             deterministic_fallback = fallback_dimension_narrative(
                 dimension_profile,
@@ -1709,7 +1741,6 @@ Return:
 }}
 where CLAIM is:
 {{
-  "claim_id": "stable id",
   "text": "...",
   "claim_kind": "finding|recommendation|limitation",
   "metric_ids": ["ledger ids"],
@@ -1730,6 +1761,7 @@ Relevant targets:
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             result = robust_json_parse(response)
+            _record_ignored_model_identifiers(diagnostics, result)
             llm_calls += 1
             deterministic_fallback = fallback_market_narrative(market_profile)
             drafted = parse_market_narrative(
@@ -1873,8 +1905,8 @@ Return:
   "recommendations": [CLAIM],
   "limitations": [CLAIM]
 }}
-where CLAIM contains `claim_id`, `text`, `claim_kind`, `metric_ids`,
-`document_ids`, `scope`, and `polarity`.
+where CLAIM contains `text`, `claim_kind`, `metric_ids`, `document_ids`,
+`scope`, and `polarity`. Claim identities are assigned by the application.
 """
     if repairing:
         prompt += f"""
@@ -1885,9 +1917,11 @@ Preserve all unlisted fields. Previous artifact:
 Relevant targets:
 {json.dumps(relevant_targets)}
 """
+    model_identifier_count = 0
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         result = robust_json_parse(response)
+        model_identifier_count = count_model_identifiers(result)
         deterministic_fallback = fallback_executive_narrative(profile)
         drafted = parse_executive_narrative(result, assessment_profile=profile)
         llm_calls = 1
@@ -1912,6 +1946,9 @@ Relevant targets:
                 merged[field_name] = drafted[field_name]
         drafted = merged
     diagnostics = _generation_diagnostics(state)
+    diagnostics["ignored_model_identifier_count"] = int(
+        diagnostics.get("ignored_model_identifier_count", 0) or 0
+    ) + model_identifier_count
     if (
         diagnostics.get("executive_summary_mode") != "fallback"
         or executive_mode == "fallback"
@@ -1941,32 +1978,132 @@ Relevant targets:
 # NODE: RED TEAM (QA)
 # ============================================================================
 
+def _identity_failure_flag(error: MFIClaimIdentityError) -> Dict[str, Any]:
+    artifacts = ", ".join(error.artifacts) or "unknown artifact"
+    return {
+        "flag_id": "system-claim-identity-contract-failure",
+        "source": "system",
+        "code": "claim_identity_contract_failure",
+        "severity": "high",
+        "artifact_type": "global",
+        "artifact_id": None,
+        "field_name": None,
+        "claim_id": None,
+        "message": (
+            "Narrative identity validation failed for an internal artifact; "
+            "deterministic fallback content was used."
+        ),
+        "recommendation": (
+            "Review the deterministic fallback and technical identity diagnostics."
+        ),
+        "metric_ids": [],
+        "document_ids": [],
+        "expected_value": CLAIM_IDENTITY_VERSION,
+        "actual_value": artifacts,
+        "repairable": False,
+    }
+
+
+def _deterministic_identity_fallbacks(
+    state: MFIReportState,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], List[str]]:
+    """Build a fully application-owned narrative set after an internal ID breach."""
+    profile = state.get("assessment_profile") or {}
+    dimensions = {
+        str(item["dimension"]): fallback_dimension_narrative(
+            item,
+            assessment_profile=profile,
+        )
+        for item in profile.get("dimensions", []) or []
+        if isinstance(item, dict) and item.get("dimension")
+    }
+    priority_names = set(profile.get("priority_market_names", []) or [])
+    markets = {
+        str(item["market_name"]): fallback_market_narrative(item)
+        for item in profile.get("markets", []) or []
+        if isinstance(item, dict) and item.get("market_name") in priority_names
+    }
+    executive = fallback_executive_narrative(profile)
+    # Context is omitted under an internal identity breach because a high-severity
+    # statement may itself be the malformed artifact. Raw statements remain in the
+    # technical graph trace; none is allowed back into reader-facing fallback content.
+    had_context = bool(state.get("context_evidence", []) or [])
+    context: List[Dict[str, Any]] = []
+    dimensions, markets, executive, context = canonicalize_narrative_identities(
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=context,
+        preserve_context_ids=False,
+    )
+    artifacts = [
+        *[f"dimension:{name}" for name in dimensions],
+        *[f"market:{name}" for name in markets],
+        "executive_summary",
+    ]
+    if had_context:
+        artifacts.append("context")
+    return dimensions, markets, executive, context, artifacts
+
 def node_deterministic_claim_validator(state: MFIReportState) -> dict:
     """Validate every narrative claim against the closed evidence catalog."""
     logger.info("[ClaimValidator] Validating structured claims")
-    (
-        validation,
-        dimensions,
-        markets,
-        executive,
-        context,
-        flag_payload,
-    ) = validate_structured_narratives(
-        context_evidence=state.get("context_evidence", []),
-        dimension_narratives=state.get("dimension_narratives", {}),
-        market_narratives=state.get("market_narratives", {}),
-        executive_narrative=state.get("executive_summary_narrative", {}),
-        claim_catalog=state.get("claim_catalog", {}),
-        assessment_profile=state.get("assessment_profile") or {},
-        documents=state.get("contextual_documents", []),
-    )
+    identity_flag: Optional[Dict[str, Any]] = None
+    diagnostics = _generation_diagnostics(state)
+    try:
+        (
+            validation,
+            dimensions,
+            markets,
+            executive,
+            context,
+            flag_payload,
+        ) = validate_structured_narratives(
+            context_evidence=state.get("context_evidence", []),
+            dimension_narratives=state.get("dimension_narratives", {}),
+            market_narratives=state.get("market_narratives", {}),
+            executive_narrative=state.get("executive_summary_narrative", {}),
+            claim_catalog=state.get("claim_catalog", {}),
+            assessment_profile=state.get("assessment_profile") or {},
+            documents=state.get("contextual_documents", []),
+        )
+    except MFIClaimIdentityError as exc:
+        identity_flag = _identity_failure_flag(exc)
+        dimensions, markets, executive, context, artifacts = (
+            _deterministic_identity_fallbacks(state)
+        )
+        diagnostics["identity_fallback_artifacts"] = sorted(
+            set(diagnostics.get("identity_fallback_artifacts", [])) | set(artifacts)
+        )
+        (
+            validation,
+            dimensions,
+            markets,
+            executive,
+            context,
+            flag_payload,
+        ) = validate_structured_narratives(
+            context_evidence=context,
+            dimension_narratives=dimensions,
+            market_narratives=markets,
+            executive_narrative=executive,
+            claim_catalog=state.get("claim_catalog", {}),
+            assessment_profile=state.get("assessment_profile") or {},
+            documents=state.get("contextual_documents", []),
+        )
+    flags = list(flag_payload.get("flags", []))
+    if identity_flag is not None:
+        flags.append(identity_flag)
+        validation["flags"] = [*validation.get("flags", []), identity_flag]
+        validation["status"] = "failed"
     return {
         "claim_validation": validation,
         "dimension_narratives": dimensions,
         "market_narratives": markets,
         "executive_summary_narrative": executive,
         "context_evidence": context,
-        "deterministic_flags": flag_payload.get("flags", []),
+        "deterministic_flags": flags,
+        "generation_diagnostics": diagnostics,
         "current_node": "deterministic_claim_validator",
     }
 
@@ -2350,11 +2487,12 @@ TARGETS:
 
 Return {{"statements": [{{"statement_id": "...", "text": "...",
 "classification": "...", "document_ids": ["..."]}}]}}.
+Each returned statement_id must exactly match a canonical statement_id in the
+targeted CURRENT_CONTEXT. Do not create or rename identifiers.
 """
     try:
         response = get_model().invoke([HumanMessage(content=prompt)])
         payload = robust_json_parse(response)
-        repaired, _flags = parse_context_evidence(payload, documents=documents)
         targeted_ids = {
             str(target.get("artifact_id"))
             for target in context_targets
@@ -2363,6 +2501,33 @@ Return {{"statements": [{{"statement_id": "...", "text": "...",
         }
         has_global = any(
             target.get("artifact_type") == "global" for target in context_targets
+        )
+        current_ids = [
+            str(statement.get("statement_id"))
+            for statement in state.get("context_evidence", [])
+            if isinstance(statement, dict) and statement.get("statement_id")
+        ]
+        expected_ids = (
+            current_ids
+            if has_global or not targeted_ids
+            else [value for value in current_ids if value in targeted_ids]
+        )
+        raw_statements = (
+            payload.get("statements", []) if isinstance(payload, dict) else []
+        )
+        returned_ids = [
+            str(statement.get("statement_id") or "")
+            for statement in raw_statements
+            if isinstance(statement, dict)
+        ]
+        if returned_ids != expected_ids:
+            raise ValueError(
+                "Context correction must preserve the supplied canonical statement IDs"
+            )
+        repaired, _flags = parse_context_evidence(
+            payload,
+            documents=documents,
+            expected_statement_ids=expected_ids,
         )
         if has_global or not targeted_ids:
             updates["context_evidence"] = repaired
@@ -2518,8 +2683,46 @@ def _visible_qa_claim_ids(*values: Any) -> set[str]:
 
 def node_finalize_qa(state: MFIReportState) -> dict:
     """Finalize delivery, retaining visible warnings for unresolved material QA."""
+    deterministic_flags = list(state.get("deterministic_flags", []) or [])
+    diagnostics = _generation_diagnostics(state)
+    try:
+        (
+            canonical_dimensions,
+            canonical_markets,
+            canonical_executive,
+            canonical_context,
+        ) = canonicalize_narrative_identities(
+            dimension_narratives=state.get("dimension_narratives", {}),
+            market_narratives=state.get("market_narratives", {}),
+            executive_narrative=state.get("executive_summary_narrative", {}),
+            context_evidence=state.get("context_evidence", []),
+        )
+    except MFIClaimIdentityError as exc:
+        (
+            canonical_dimensions,
+            canonical_markets,
+            canonical_executive,
+            canonical_context,
+            artifacts,
+        ) = _deterministic_identity_fallbacks(state)
+        identity_flag = _identity_failure_flag(exc)
+        if not any(
+            flag.get("code") == identity_flag["code"]
+            for flag in deterministic_flags
+            if isinstance(flag, dict)
+        ):
+            deterministic_flags.append(identity_flag)
+        diagnostics["identity_fallback_artifacts"] = sorted(
+            set(diagnostics.get("identity_fallback_artifacts", [])) | set(artifacts)
+        )
+    assert_claim_identity_contract(
+        canonical_dimensions,
+        canonical_markets,
+        canonical_executive,
+        canonical_context,
+    )
     combined = [
-        *state.get("deterministic_flags", []),
+        *deterministic_flags,
         *state.get("red_team_flags", []),
     ]
     material = [
@@ -2546,13 +2749,13 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         executive_narrative,
         substitutions,
     ) = apply_unresolved_claim_policy(
-        dimension_narratives=state.get("dimension_narratives", {}),
-        market_narratives=state.get("market_narratives", {}),
-        executive_narrative=state.get("executive_summary_narrative", {}),
+        dimension_narratives=canonical_dimensions,
+        market_narratives=canonical_markets,
+        executive_narrative=canonical_executive,
         flags=combined,
     )
     context_evidence, context_substitutions = _apply_context_qa_policy(
-        list(state.get("context_evidence", []) or []),
+        canonical_context,
         material,
     )
     context_status = reconcile_context_status(
@@ -2569,7 +2772,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         close_pending_execution=True,
     )
     review = build_qa_review(
-        state.get("deterministic_flags", []),
+        deterministic_flags,
         state.get("red_team_flags", []),
         correction_attempts=state.get("correction_attempts", 0),
         correction_history=correction_history,
@@ -2620,7 +2823,6 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         for flag in review.get("flags", [])
         if isinstance(flag, dict)
     )
-    diagnostics = _generation_diagnostics(state)
     diagnostics.update(
         {
             "correction_attempts": state.get("correction_attempts", 0),
@@ -2647,10 +2849,144 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         "correction_history": correction_history,
         "generation_diagnostics": diagnostics,
         "claim_substitutions": substitutions,
+        "deterministic_flags": deterministic_flags,
         "correction_targets": [],
         "warnings": warnings,
         "current_node": "finalize_qa",
     }
+
+
+def _globalize_material_delivery_flags(
+    flags: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    globalized: List[Dict[str, Any]] = []
+    for raw in flags:
+        flag = deepcopy(raw)
+        if str(flag.get("severity")) in {"high", "medium"}:
+            original = "/".join(
+                str(value)
+                for value in (
+                    flag.get("artifact_type"),
+                    flag.get("artifact_id"),
+                    flag.get("field_name"),
+                    flag.get("claim_id"),
+                )
+                if value
+            )
+            flag["artifact_type"] = "global"
+            flag["artifact_id"] = None
+            flag["field_name"] = None
+            flag["claim_id"] = None
+            if original and not flag.get("actual_value"):
+                flag["actual_value"] = original
+        globalized.append(flag)
+    return globalized
+
+
+def node_finalize_delivery(state: MFIReportState) -> dict:
+    """Build and validate the canonical reader payload before run completion."""
+    from app.shared.report_blocks import build_mfi_report_blocks
+
+    diagnostics = _generation_diagnostics(state)
+    payload = dict(state)
+    assert_claim_identity_contract(
+        payload.get("dimension_narratives", {}),
+        payload.get("market_narratives", {}),
+        payload.get("executive_summary_narrative", {}),
+        payload.get("context_evidence", []),
+    )
+    fallback_used = bool(diagnostics.get("identity_fallback_artifacts"))
+    try:
+        blocks = build_mfi_report_blocks(payload)
+    except ValueError as exc:
+        if "must map to one visible marker or global notice" not in str(exc):
+            raise
+        # A delivery mapping defect is itself material, but it must never turn a
+        # completed run into a result-retrieval 500. Withdraw all drafted artifacts,
+        # preserve every original flag as a global finding, and validate once more.
+        dimensions, markets, executive, context, artifacts = (
+            _deterministic_identity_fallbacks(state)
+        )
+        deterministic_flags = _globalize_material_delivery_flags(
+            list(state.get("deterministic_flags", []) or [])
+        )
+        red_team_flags = _globalize_material_delivery_flags(
+            list(state.get("red_team_flags", []) or [])
+        )
+        identity_flag = _identity_failure_flag(
+            MFIClaimIdentityError(
+                "Material QA mapping failed during delivery validation.",
+                artifacts=artifacts,
+            )
+        )
+        if not any(
+            flag.get("code") == identity_flag["code"]
+            for flag in deterministic_flags
+            if isinstance(flag, dict)
+        ):
+            deterministic_flags.append(identity_flag)
+        review = build_qa_review(
+            deterministic_flags,
+            red_team_flags,
+            correction_attempts=state.get("correction_attempts", 0),
+            correction_history=state.get("correction_history", []),
+        )
+        diagnostics["identity_fallback_artifacts"] = sorted(
+            set(diagnostics.get("identity_fallback_artifacts", [])) | set(artifacts)
+        )
+        payload.update(
+            {
+                "dimension_narratives": dimensions,
+                "market_narratives": markets,
+                "executive_summary_narrative": executive,
+                "context_evidence": context,
+                "deterministic_flags": deterministic_flags,
+                "red_team_flags": red_team_flags,
+                "qa_review": review,
+                "claim_substitutions": [],
+                "context_status": reconcile_context_status(
+                    state.get("context_status")
+                    or not_attempted_context_status().model_dump(),
+                    documents=list(state.get("contextual_documents", []) or []),
+                    statements=context,
+                ).model_dump(),
+            }
+        )
+        blocks = build_mfi_report_blocks(payload)
+        fallback_used = True
+    diagnostics["delivery_contract_status"] = (
+        "fallback_validated" if fallback_used else "validated"
+    )
+    updates = {
+        key: payload[key]
+        for key in (
+            "dimension_narratives",
+            "market_narratives",
+            "executive_summary_narrative",
+            "context_evidence",
+            "context_status",
+            "deterministic_flags",
+            "red_team_flags",
+            "qa_review",
+            "claim_substitutions",
+        )
+        if key in payload and payload.get(key) != state.get(key)
+    }
+    updates.update(
+        {
+            "generation_diagnostics": diagnostics,
+            "report_blocks": [block.model_dump(mode="json") for block in blocks],
+            "current_node": "finalize_delivery",
+        }
+    )
+    if fallback_used and not state.get("generation_diagnostics", {}).get(
+        "identity_fallback_artifacts"
+    ):
+        updates["warnings"] = [
+            "An internal narrative identity issue was replaced with deterministic "
+            "fallback content; consult the final QA findings table."
+        ]
+    return updates
 
 
 def build_graph(on_step: Optional[OnStepCallback] = None):
@@ -2704,6 +3040,10 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
         wrap_node("targeted_correction", node_prepare_correction),
     )
     graph.add_node("finalize_qa", wrap_node("finalize_qa", node_finalize_qa))
+    graph.add_node(
+        "finalize_delivery",
+        wrap_node("finalize_delivery", node_finalize_delivery),
+    )
     
     # Set entry point
     graph.set_entry_point("mfi_data_agent")
@@ -2729,7 +3069,8 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
         },
     )
     graph.add_edge("targeted_correction", "dimension_drafter")
-    graph.add_edge("finalize_qa", END)
+    graph.add_edge("finalize_qa", "finalize_delivery")
+    graph.add_edge("finalize_delivery", END)
     
     return graph.compile()
 
@@ -2774,7 +3115,10 @@ def run_mfi_report_generation(
     
     agent = build_graph(on_step=on_step)
     try:
-        result = agent.invoke(initial_state)
+        # Three bounded correction cycles plus final delivery exceed LangGraph's
+        # conservative default of 25 supersteps in the worst case.  The graph's own
+        # MAX_CORRECTION_ATTEMPTS remains the controlling limit.
+        result = agent.invoke(initial_state, config={"recursion_limit": 100})
     except Exception:
         logger.exception(
             "MFI Drafter 2.0 generation failed",
@@ -2815,6 +3159,21 @@ def run_mfi_report_generation(
             "mfi_context_limitation_code": (
                 result.get("context_status") or {}
             ).get("limitation_code"),
+            "mfi_claim_identity_authority": diagnostics.get(
+                "claim_identity_authority"
+            ),
+            "mfi_claim_identity_version": diagnostics.get(
+                "claim_identity_version"
+            ),
+            "mfi_ignored_model_identifier_count": diagnostics.get(
+                "ignored_model_identifier_count", 0
+            ),
+            "mfi_identity_fallback_artifacts": diagnostics.get(
+                "identity_fallback_artifacts", []
+            ),
+            "mfi_delivery_contract_status": diagnostics.get(
+                "delivery_contract_status"
+            ),
         },
     )
     return result
