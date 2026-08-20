@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from app.shared.llm_observability import LLMCallError
 
 from app.services.mfi_drafter import graph, router
 from app.services.mfi_drafter.features import (
@@ -365,7 +366,7 @@ def _synthetic_analyzed_state():
     return state
 
 
-def test_drafting_fallback_is_visible_and_disqualifying(monkeypatch):
+def test_drafting_transport_failure_interrupts_enabled_stage(monkeypatch):
     state = _synthetic_analyzed_state()
 
     class FailingModel:
@@ -374,12 +375,10 @@ def test_drafting_fallback_is_visible_and_disqualifying(monkeypatch):
             raise RuntimeError("offline")
 
     monkeypatch.setattr(graph, "get_model", lambda: FailingModel())
-    update = graph.node_dimension_drafter(state)
-
-    diagnostics = update["generation_diagnostics"]
-    assert len(diagnostics["dimensions"]["fallback"]) == 9
-    assert diagnostics["dimensions"]["llm"] == []
-    assert "Deterministic narrative fallback" in update["warnings"][0]
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_dimension_drafter(state)
+    assert caught.value.failure_code == "llm_transport_error"
+    assert caught.value.node == "dimension_drafter"
 
 
 def test_final_qa_records_unresolved_counts():

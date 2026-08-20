@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, asdict
 
 from app.shared.report_blocks import ReportBlock
+from app.shared.llm_observability import LLMRunDiagnostics
 from .methodology import (
     ANALYSIS_SCHEMA_VERSION,
     CSV_DIMENSION_TO_DISPLAY,
@@ -1093,6 +1094,12 @@ class GenerateMFIReportOutput(BaseModel):
     release_control: MFIReleaseControl
     generation_diagnostics: MFIGenerationDiagnostics = Field(
         default_factory=MFIGenerationDiagnostics
+    )
+    llm_diagnostics: LLMRunDiagnostics = Field(
+        default_factory=lambda: LLMRunDiagnostics(
+            service="mfi-drafter",
+            run_id="unknown",
+        )
     )
     excluded_market_records: List[MFIExcludedMarketRecord] = Field(default_factory=list)
     methodology_warnings: List[MFIMethodologyWarning] = Field(default_factory=list)

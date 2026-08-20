@@ -556,9 +556,12 @@ def test_analysis_node_makes_no_llm_call_and_market_selector_uses_profile(monkey
 
     class _Response:
         content = (
-            '{"priority_issues":["relative weakness"],'
-            '"recommended_interventions":["monitor"],'
-            '"modality_considerations":"Review."}'
+            '{"priority_issues":[{"text":"relative weakness",'
+            '"metric_ids":[],"document_ids":[],"scope":"market",'
+            '"polarity":"unfavorable"}],'
+            '"recommended_interventions":[{"text":"monitor",'
+            '"metric_ids":[],"document_ids":[],"scope":"market",'
+            '"polarity":"neutral"}],"limitations":[]}'
         )
 
     class _Model:

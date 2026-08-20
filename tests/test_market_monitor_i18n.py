@@ -107,15 +107,9 @@ def test_phase5_basket_chart_and_table_labels_are_localized():
     ) == "Tendencia del costo de Canasta urbana - Nacional - Guatemala"
 
 
-def test_fuel_fallback_narrative_localizes_french_numbers_and_terms():
+def test_deterministic_fuel_narrative_localizes_french_numbers_and_terms():
     module = market_graph.FuelEnergyModule()
-
-    class FailingLLM:
-        def invoke(self, *_args, **_kwargs):
-            raise RuntimeError("offline")
-
-    result = module.generate_section(
-        {
+    state = {
             "country": "Democratic Republic of the Congo",
             "time_period": "2026-06",
             "language": "fr",
@@ -134,12 +128,9 @@ def test_fuel_fallback_narrative_localizes_french_numbers_and_terms():
                 ],
                 "regional_disparities": [],
             },
-        },
-        FailingLLM(),
-    )
+        }
 
-    narrative = result["narrative"]
+    narrative = module._fallback_narrative(state, state["fuel_energy_data"])
     assert "1 120,0 CDF/Litre" in narrative
     assert "1,8 %" in narrative
     assert "juin 2026" in narrative
-    assert result["section_title"] == "Carburants et energie"

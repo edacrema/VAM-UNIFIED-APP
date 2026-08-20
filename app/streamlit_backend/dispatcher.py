@@ -38,6 +38,7 @@ from app.shared.report_blocks import (
     resolve_mfi_report_blocks,
 )
 from app.shared.countries import supported_country_options
+from app.shared.llm_observability import LLMCallError, observability_config
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
 from app.services.mfi_drafter.data_loader import (
@@ -378,6 +379,7 @@ def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "release_control": state.get("release_control", {}),
         "generation_diagnostics": state.get("generation_diagnostics", {}),
         "context_status": state.get("context_status", {}),
+        "llm_diagnostics": state.get("llm_diagnostics", {}),
     }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
@@ -431,6 +433,10 @@ def _build_mfi_report_output(
             or mfi_release_control().model_dump()
         ),
         "generation_diagnostics": result.get("generation_diagnostics", {}),
+        "llm_diagnostics": result.get("llm_diagnostics") or {
+            "service": "mfi-drafter",
+            "run_id": run_id,
+        },
         "excluded_market_records": result.get("excluded_market_records", []),
         "methodology_warnings": result.get("methodology_warnings", []),
         "survey_metadata": result.get("survey_metadata", {}),
@@ -512,6 +518,10 @@ def _build_market_monitor_output(
         "labour_market_data": result.get("labour_market_data"),
         "warnings": result.get("warnings", []),
         "llm_calls": result.get("llm_calls", 0),
+        "llm_diagnostics": result.get("llm_diagnostics") or {
+            "service": "market-monitor",
+            "run_id": run_id,
+        },
         "success": True,
     }
 
@@ -1106,6 +1116,7 @@ def _dispatch_mfi_drafter(
                 "service": "mfi-drafter",
                 "generation_enabled": control.enabled,
                 "release_control": control.model_dump(),
+                "llm_observability": observability_config().model_dump(),
             }
         )
     if method == "GET" and parts == ["dimensions"]:
@@ -1135,6 +1146,8 @@ def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
             markets=markets,
             release_control=release_control,
         )
+    except LLMCallError as exc:
+        raise LocalHTTPException(502, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1181,6 +1194,8 @@ def _mfi_drafter_generate_from_csv(
         )
     except ValueError as exc:
         raise LocalHTTPException(400, str(exc))
+    except LLMCallError as exc:
+        raise LocalHTTPException(502, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1281,6 +1296,9 @@ def _mfi_drafter_generate_from_csv_async(
         try:
             update_run(run_id, status="running", error=None, traceback=None)
 
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
+
             def on_step(node_name: str, _state: dict) -> None:
                 progress = progress_map.get(node_name)
                 if progress is not None:
@@ -1354,14 +1372,21 @@ def _mfi_drafter_generate_from_csv_async(
                 csv_data=csv_data,
                 on_step=on_step,
                 release_control=release_control,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
         except Exception as exc:
-            tb_str = traceback.format_exc()
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
-            set_run_failed(run_id, error=str(exc), traceback=tb_str, current_node=current_node)
+            tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
+            current_node = (
+                exc.node
+                if isinstance(exc, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
+            error = json.dumps(exc.to_public_dict(), sort_keys=True) if isinstance(exc, LLMCallError) else str(exc)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()
     preview = {
@@ -1403,6 +1428,9 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
     def run_in_background() -> None:
         try:
             update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             def on_step(node_name: str, _state: dict) -> None:
                 progress = progress_map.get(node_name)
@@ -1476,14 +1504,21 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
                 markets=json_body.get("markets"),
                 on_step=on_step,
                 release_control=release_control,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
         except Exception as exc:
-            tb_str = traceback.format_exc()
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
-            set_run_failed(run_id, error=str(exc), traceback=tb_str, current_node=current_node)
+            tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
+            current_node = (
+                exc.node
+                if isinstance(exc, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
+            error = json.dumps(exc.to_public_dict(), sort_keys=True) if isinstance(exc, LLMCallError) else str(exc)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()
     return _json_response({"run_id": run_id, "status": "pending"})
@@ -1590,6 +1625,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "version": "2.0.0",
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
+        "llm_observability": observability_config().model_dump(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -1759,7 +1795,13 @@ def _dispatch_market_monitor(
     if method == "GET" and parts == ["info"]:
         return _json_response(_market_monitor_info())
     if method == "GET" and parts == ["health"]:
-        return _json_response({"status": "healthy", "service": "market-monitor"})
+        return _json_response(
+            {
+                "status": "healthy",
+                "service": "market-monitor",
+                "llm_observability": observability_config().model_dump(),
+            }
+        )
     if method == "GET" and parts == ["countries"]:
         return _market_monitor_countries()
     if method == "GET" and parts == ["commodities"]:
@@ -1877,6 +1919,8 @@ def _market_monitor_generate(*, json_body: Any) -> LocalResponse:
         raise LocalHTTPException(400, str(exc))
     except PriceDataGateError as exc:
         raise LocalHTTPException(exc.status_code, exc.to_dict())
+    except LLMCallError as exc:
+        raise LocalHTTPException(502, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1938,6 +1982,9 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
     def run_in_background() -> None:
         try:
             update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             run_basket_selection = basket_selection
             if not input_data.use_mock_data and basket_selection is not None:
@@ -2072,6 +2119,8 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
                 basket_selection=run_basket_selection,
                 language=input_data.language,
                 on_step=on_step,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
 
             result = attach_basket_selection_to_result(result, run_basket_selection)
@@ -2095,11 +2144,16 @@ def _market_monitor_generate_async(*, json_body: Any) -> LocalResponse:
             )
             set_run_completed(run_id, result=result)
         except Exception as exc:
-            tb_str = traceback.format_exc()
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
+            current_node = (
+                exc.node
+                if isinstance(exc, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
             if isinstance(exc, PriceDataGateError):
                 update_run(run_id, metadata={"price_gap_report": exc.gap_report.to_dict()})
-            set_run_failed(run_id, error=str(exc), traceback=tb_str, current_node=current_node)
+            error = json.dumps(exc.to_public_dict(), sort_keys=True) if isinstance(exc, LLMCallError) else str(exc)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()
     return _json_response({"run_id": run_id, "status": "pending"})
@@ -2210,6 +2264,7 @@ def _market_monitor_info() -> Dict[str, Any]:
         "market trend analysis, visualizations, and narrative sections. "
         "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
+        "llm_observability": observability_config().model_dump(),
         "features": {
             "second_food_basket": {
                 "enabled": second_basket_enabled,

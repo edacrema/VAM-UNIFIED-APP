@@ -23,6 +23,7 @@ from app.services.mfi_drafter.narrative import (
 from app.services.mfi_drafter.router import _build_mfi_output
 from app.streamlit_backend.dispatcher import _build_mfi_report_output
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
+from app.shared.llm_observability import LLMCallError
 from app.shared.report_blocks import build_mfi_report_blocks
 
 
@@ -380,7 +381,7 @@ def test_deterministic_validator_makes_no_llm_call(monkeypatch, phase3_bundle):
     assert update["claim_validation"]["status"] == "passed"
 
 
-def test_schema_failure_uses_complete_deterministic_fallback(
+def test_schema_failure_interrupts_enabled_llm_stage(
     monkeypatch, phase3_bundle
 ):
     class InvalidModel:
@@ -389,6 +390,7 @@ def test_schema_failure_uses_complete_deterministic_fallback(
 
     monkeypatch.setattr(graph, "get_model", lambda: InvalidModel())
     state = {
+        "run_id": "phase3-invalid-schema",
         "assessment_profile": phase3_bundle["profile"],
         "claim_catalog": phase3_bundle["catalog"],
         "dimension_narratives": {},
@@ -397,19 +399,10 @@ def test_schema_failure_uses_complete_deterministic_fallback(
         "correction_targets": [],
         "llm_calls": 0,
     }
-    state.update(graph.node_dimension_drafter(state))
-    state.update(graph.node_market_recommendations_drafter(state))
-    state.update(graph.node_executive_summary_drafter(state))
-    state.update(
-        {
-            "context_evidence": [],
-            "contextual_documents": [],
-        }
-    )
-    validation = graph.node_deterministic_claim_validator(state)
-    assert validation["claim_validation"]["status"] == "passed"
-    assert len(validation["dimension_narratives"]) == 9
-    assert validation["executive_summary_narrative"]["key_findings"]
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_dimension_drafter(state)
+    assert caught.value.failure_code == "llm_invalid_json"
+    assert caught.value.node == "dimension_drafter"
 
 
 def test_dimension_prompt_is_closed_catalog_and_field_repair_is_targeted(

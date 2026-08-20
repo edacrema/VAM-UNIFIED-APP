@@ -368,7 +368,7 @@ def test_red_team_receives_basket_ground_truth_and_normalizes_flags(monkeypatch)
                         "section": "made-up-section",
                         "claim": "MEB Côte costs 70 while Panier pastoral costs 120",
                         "issue_type": "basket_identity_error",
-                        "severity": "HIGH",
+                        "severity": "high",
                         "details": "The values are swapped.",
                         "recommendation": "Restore the immutable role values.",
                     }

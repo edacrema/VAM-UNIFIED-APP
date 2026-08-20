@@ -7,6 +7,7 @@ from streamlit_shared import (
     render_instructions_sidebar_button,
     render_onboarding_sidebar_button,
     render_mfi_raw_table_downloads,
+    render_llm_diagnostics,
     render_report_delivery,
     render_report_blocks,
     render_wfp_sidebar_logo,
@@ -234,6 +235,8 @@ if isinstance(result, dict):
         st.json(result.get("release_control") or release_control)
         st.markdown("**Generation diagnostics**")
         st.json(result.get("generation_diagnostics") or {})
+        st.markdown("**LLM call diagnostics**")
+        render_llm_diagnostics(result.get("llm_diagnostics") or {})
         st.markdown("**Context status**")
         context_label = str(context_status.get("status") or "not_attempted").replace(
             "_", " "

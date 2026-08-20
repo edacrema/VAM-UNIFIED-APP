@@ -9,6 +9,7 @@ from pydantic import BaseModel, ValidationError
 from typing import Optional, List, Any, Dict
 from dataclasses import is_dataclass, asdict
 from datetime import date, datetime
+import json
 import logging
 import threading
 import traceback
@@ -65,6 +66,7 @@ from app.shared.live_outputs import (
 
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import build_market_monitor_report_blocks
+from app.shared.llm_observability import LLMCallError, observability_config
 from .i18n import resolve_report_language, t
 
 logger = logging.getLogger(__name__)
@@ -242,6 +244,10 @@ async def generate_market_monitor(input_data: GenerateReportInput):
             labour_market_data=result.get("labour_market_data"),
             warnings=result.get("warnings", []),
             llm_calls=result.get("llm_calls", 0),
+            llm_diagnostics=result.get("llm_diagnostics") or {
+                "service": "market-monitor",
+                "run_id": result.get("run_id", "unknown"),
+            },
             success=True
         )
 
@@ -257,6 +263,9 @@ async def generate_market_monitor(input_data: GenerateReportInput):
         raise HTTPException(status_code=409, detail=str(e))
     except (BasketValidationError, BasketScopeValidationError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except LLMCallError as e:
+        logger.error("Report generation stopped: %s", e)
+        raise HTTPException(status_code=502, detail=e.to_public_dict())
     except Exception as e:
         logger.error(f"Report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -321,6 +330,9 @@ async def generate_market_monitor_async(
     def run_in_background():
         try:
             update_run(run_id, status="running", error=None, traceback=None)
+
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             run_basket_selection = basket_selection
             if not input_data.use_mock_data and basket_selection is not None:
@@ -460,7 +472,9 @@ async def generate_market_monitor_async(
                 previous_report_text=input_data.previous_report_text,
                 use_mock_data=input_data.use_mock_data,
                 language=input_data.language,
-                on_step=on_step
+                on_step=on_step,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
 
             result = attach_basket_selection_to_result(result, run_basket_selection)
@@ -485,13 +499,21 @@ async def generate_market_monitor_async(
             set_run_completed(run_id, result=result)
 
         except Exception as e:
-            tb_str = traceback.format_exc()
-            logger.exception(f"Report generation failed for {run_id}: {e}")
+            tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
+            if isinstance(e, LLMCallError):
+                logger.error("Report generation stopped for %s: %s", run_id, e)
+            else:
+                logger.exception(f"Report generation failed for {run_id}: {e}")
 
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
+            current_node = (
+                e.node
+                if isinstance(e, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
             if isinstance(e, PriceDataGateError):
                 update_run(run_id, metadata={"price_gap_report": e.gap_report.to_dict()})
-            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
+            error = json.dumps(e.to_public_dict(), sort_keys=True) if isinstance(e, LLMCallError) else str(e)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     background_tasks.add_task(run_in_background)
 
@@ -626,6 +648,10 @@ async def get_report_result(run_id: str):
         labour_market_data=result.get("labour_market_data"),
         warnings=result.get("warnings", []) or run.warnings,
         llm_calls=result.get("llm_calls", 0),
+        llm_diagnostics=result.get("llm_diagnostics") or {
+            "service": "market-monitor",
+            "run_id": run_id,
+        },
         success=True
     )
 
@@ -684,6 +710,7 @@ def get_service_info():
     Returns service metadata for the frontend.
     """
     second_basket_enabled = market_monitor_second_basket_enabled()
+    trace_config = observability_config()
     return {
         "id": "market-monitor",
         "name": "Market Monitor Generator",
@@ -691,6 +718,7 @@ def get_service_info():
                        "market trend analysis, visualizations, and narrative sections. "
                        "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
+        "llm_observability": trace_config.model_dump(),
         "features": {
             "second_food_basket": {
                 "enabled": second_basket_enabled,
@@ -875,7 +903,11 @@ def get_service_info():
 @router.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "market-monitor"}
+    return {
+        "status": "healthy",
+        "service": "market-monitor",
+        "llm_observability": observability_config().model_dump(),
+    }
 
 
 @router.get("/dataset/status")

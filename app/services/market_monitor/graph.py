@@ -34,6 +34,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.shared.llm import get_model
+from app.shared.llm_observability import (
+    LLMCallError,
+    TraceSink,
+    get_trace_session,
+    llm_trace_session,
+    log_llm_run_summary,
+)
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 
 from .data_loader import (
@@ -159,6 +166,7 @@ class MarketReportState(TypedDict):
     run_id: str
     correction_attempts: int
     llm_calls: int
+    llm_diagnostics: Dict[str, Any]
     current_node: str
 
 
@@ -176,6 +184,7 @@ def create_initial_state(
     language: str = "en",
     locale: str = "en_US",
     language_source: str = "default",
+    run_id: Optional[str] = None,
 ) -> MarketReportState:
     """Crea stato iniziale per il grafo."""
     selection = dict(basket_selection or {})
@@ -234,9 +243,10 @@ def create_initial_state(
         qa_review={"status": "not_recorded", "correction_attempts": 0, "flags": []},
         correction_targets=[],
         warnings=[],
-        run_id=f"run_{uuid.uuid4().hex[:8]}",
+        run_id=run_id or f"run_{uuid.uuid4().hex[:8]}",
         correction_attempts=0,
         llm_calls=0,
+        llm_diagnostics={},
         current_node="init"
     )
 
@@ -244,28 +254,6 @@ def create_initial_state(
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-
-def robust_json_parse(response: Any) -> Optional[Dict]:
-    """Helper per pulire e parsare l'output JSON dell'LLM."""
-    if hasattr(response, 'content'):
-        raw_output = response.content
-    elif isinstance(response, str):
-        raw_output = response
-    else:
-        return None
-
-    try:
-        raw_output = re.sub(r"```json\s*", "", raw_output)
-        raw_output = re.sub(r"```", "", raw_output).strip()
-        
-        start_index = raw_output.find('{')
-        end_index = raw_output.rfind('}')
-        if start_index == -1 or end_index == -1:
-            return None
-        return json.loads(raw_output[start_index:end_index+1])
-    except json.JSONDecodeError:
-        return None
-
 
 def _state_language(state: Dict[str, Any]) -> str:
     return str(state.get("language") or "en").strip().lower() or "en"
@@ -283,6 +271,13 @@ def _normalize_output_text(text: Any, state: Dict[str, Any]) -> tuple[str, List[
     refs = state.get("document_references") or []
     titles = [str(ref.get("title") or "") for ref in refs if isinstance(ref, dict)]
     return normalize_generated_text(text, _state_language(state), reference_titles=titles)
+
+
+def _validated_prose(text: str, state: Dict[str, Any]) -> str:
+    normalized, _warnings = _normalize_output_text(text, state)
+    if not normalized.strip():
+        raise ValueError("LLM prose is empty after normalization")
+    return normalized
 
 
 def _plain_or_localized_number(value: Any, language: str, *, decimals: int = 1) -> str:
@@ -1238,18 +1233,22 @@ class ExchangeRateModule(ReportModule):
         }
         prompt = render_prompt("exchange_rate", language, prompt_context)
         
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            narrative = response.content if hasattr(response, 'content') else str(response)
-            narrative, _warnings = _normalize_output_text(narrative, state)
-        except Exception as e:
-            logger.error(f"Error generating narrative: {e}")
-            narrative = t(
-                language,
-                "fallback.exchange",
-                currency=exchange_data.get("currency_code", "LCU"),
-                rate=format_decimal_value(exchange_data.get("current_rate"), language, decimals=1),
-            )
+        trace = get_trace_session(
+            service="market-monitor",
+            run_id=str(state.get("run_id") or "market-monitor-direct"),
+            initial=state.get("llm_diagnostics"),
+        )
+        traced = trace.invoke_text(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="module_orchestrator",
+            operation="market_monitor.exchange_rate_module.v1",
+            artifact_type="module",
+            artifact_id=self.module_id,
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=lambda text: _validated_prose(text, state),
+        )
+        narrative = traced.value
         
         return {
             "section_title": t(language, "module.exchange_rate"),
@@ -1306,13 +1305,22 @@ class FuelEnergyModule(ReportModule):
             },
         )
 
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            narrative = response.content if hasattr(response, "content") else str(response)
-            narrative, _warnings = _normalize_output_text(narrative, state)
-        except Exception as e:
-            logger.error(f"Fuel & Energy narrative generation failed: {e}")
-            narrative = self._fallback_narrative(state, fuel_data)
+        trace = get_trace_session(
+            service="market-monitor",
+            run_id=str(state.get("run_id") or "market-monitor-direct"),
+            initial=state.get("llm_diagnostics"),
+        )
+        traced = trace.invoke_text(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="module_orchestrator",
+            operation="market_monitor.fuel_energy_module.v1",
+            artifact_type="module",
+            artifact_id=self.module_id,
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=lambda text: _validated_prose(text, state),
+        )
+        narrative = traced.value
 
         return {
             "section_title": t(language, "module.fuel_energy"),
@@ -1416,13 +1424,22 @@ class LivestockAnimalProductsModule(ReportModule):
             },
         )
 
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            narrative = response.content if hasattr(response, "content") else str(response)
-            narrative, _warnings = _normalize_output_text(narrative, state)
-        except Exception as e:
-            logger.error(f"Livestock & Animal Products narrative generation failed: {e}")
-            narrative = self._fallback_narrative(state, data)
+        trace = get_trace_session(
+            service="market-monitor",
+            run_id=str(state.get("run_id") or "market-monitor-direct"),
+            initial=state.get("llm_diagnostics"),
+        )
+        traced = trace.invoke_text(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="module_orchestrator",
+            operation="market_monitor.livestock_module.v1",
+            artifact_type="module",
+            artifact_id=self.module_id,
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=lambda text: _validated_prose(text, state),
+        )
+        narrative = traced.value
 
         return {
             "section_title": t(language, "module.livestock_animal_products"),
@@ -1524,13 +1541,22 @@ class LabourMarketModule(ReportModule):
             },
         )
 
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            narrative = response.content if hasattr(response, "content") else str(response)
-            narrative, _warnings = _normalize_output_text(narrative, state)
-        except Exception as e:
-            logger.error(f"Labour Market narrative generation failed: {e}")
-            narrative = self._fallback_narrative(state, data)
+        trace = get_trace_session(
+            service="market-monitor",
+            run_id=str(state.get("run_id") or "market-monitor-direct"),
+            initial=state.get("llm_diagnostics"),
+        )
+        traced = trace.invoke_text(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="module_orchestrator",
+            operation="market_monitor.labour_module.v1",
+            artifact_type="module",
+            artifact_id=self.module_id,
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=lambda text: _validated_prose(text, state),
+        )
+        narrative = traced.value
 
         return {
             "section_title": t(language, "module.labour_market"),
@@ -2625,8 +2651,18 @@ def node_event_mapper(state: MarketReportState) -> dict:
     
     llm = get_model()
     documents = state.get("documents", [])
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     
     if not documents:
+        trace.record_skip(
+            node="event_mapper",
+            operation="market_monitor.event_extraction.v1",
+            reason="no_contextual_documents",
+        )
         # Fallback events
         events = [{
             "event_id": "evt_fallback",
@@ -2636,7 +2672,11 @@ def node_event_mapper(state: MarketReportState) -> dict:
             "date": state["time_period"] + "-01",
             "source_ids": []
         }]
-        return {"events": events, "current_node": "event_mapper"}
+        return {
+            "events": events,
+            "llm_diagnostics": trace.snapshot(),
+            "current_node": "event_mapper",
+        }
     
     # Prepare context
     context = "\n\n".join([
@@ -2666,15 +2706,31 @@ Return JSON with events:
   ]
 }}"""
     
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
-        events = result.get("events", []) if result else []
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Event extraction failed: {e}")
-        events = []
-        llm_calls = 0
+    def _validate_events(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        events = result.get("events")
+        if not isinstance(events, list):
+            raise ValueError("events must be a list")
+        for index, event in enumerate(events):
+            if not isinstance(event, dict):
+                raise ValueError(f"events[{index}] must be an object")
+            for field in ("event_id", "category", "statement", "location", "date"):
+                if not str(event.get(field) or "").strip():
+                    raise ValueError(f"events[{index}].{field} is required")
+            if not isinstance(event.get("source_ids"), list):
+                raise ValueError(f"events[{index}].source_ids must be a list")
+        return events
+
+    traced = trace.invoke_json(
+        model=llm,
+        messages=[HumanMessage(content=prompt)],
+        node="event_mapper",
+        operation="market_monitor.event_extraction.v1",
+        artifact_type="context",
+        artifact_id="events",
+        validator=_validate_events,
+    )
+    events = traced.value
+    llm_calls = 1
     
     if not events:
         events = [{
@@ -2689,6 +2745,7 @@ Return JSON with events:
     return {
         "events": events,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "event_mapper"
     }
 
@@ -2705,6 +2762,11 @@ def node_trend_analyst(state: MarketReportState) -> dict:
     stats = state.get("data_statistics", {})
     events = state.get("events", [])
     basket_context = build_basket_context(state)
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     
     prompt = f"""Analyze the market trend based on these inputs.
 
@@ -2753,26 +2815,41 @@ Return JSON:
     "outlook": "Forecast for next month..."
 }}"""
     
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        trend_analysis = robust_json_parse(response)
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Trend analysis failed: {e}")
-        trend_analysis = {
-            "trajectory": "unknown",
-            "key_market_drivers": [],
-            "note": "Trend analysis failed - no drivers inferred",
-            "commodity_analysis": {},
-            "regional_analysis": {},
-            "outlook": "Trend analysis unavailable due to an internal error."
-        }
-        llm_calls = 0
+    def _validate_trend(result: Dict[str, Any]) -> Dict[str, Any]:
+        if result.get("trajectory") not in {
+            "increasing_prices",
+            "decreasing_prices",
+            "stable",
+            "volatile",
+        }:
+            raise ValueError("trajectory is missing or invalid")
+        for field in ("key_market_drivers",):
+            if not isinstance(result.get(field), list):
+                raise ValueError(f"{field} must be a list")
+        for field in ("commodity_analysis", "regional_analysis", "basket_analysis"):
+            if not isinstance(result.get(field), dict):
+                raise ValueError(f"{field} must be an object")
+        if not isinstance(result.get("outlook"), str) or not result["outlook"].strip():
+            raise ValueError("outlook must be non-empty text")
+        return result
+
+    traced = trace.invoke_json(
+        model=llm,
+        messages=[HumanMessage(content=prompt)],
+        node="trend_analyst",
+        operation="market_monitor.trend_analysis.v1",
+        artifact_type="analysis",
+        artifact_id="trend_analysis",
+        validator=_validate_trend,
+    )
+    trend_analysis = traced.value
+    llm_calls = 1
     trend_analysis = _trend_with_basket_identity(trend_analysis, basket_context)
     
     return {
         "trend_analysis": trend_analysis,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "trend_analyst"
     }
 
@@ -2786,9 +2863,31 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
     logger.info("[ModuleOrchestrator] Running optional modules")
     
     enabled_modules = state.get("enabled_modules", [])
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     language = _state_language(state)
     targets = set(state.get("correction_targets") or [])
     correction_mode = bool(targets)
+
+    if not correction_mode:
+        operation_ids = {
+            "exchange_rate": "market_monitor.exchange_rate_module.v1",
+            "fuel_energy": "market_monitor.fuel_energy_module.v1",
+            "livestock_animal_products": "market_monitor.livestock_module.v1",
+            "labour_market": "market_monitor.labour_module.v1",
+        }
+        for module_id, operation in operation_ids.items():
+            if module_id not in enabled_modules:
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation=operation,
+                    reason="optional_module_disabled",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
 
     if correction_mode and "GLOBAL" not in targets:
         targeted_modules = {
@@ -2799,7 +2898,10 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
         enabled_modules = [module_id for module_id in enabled_modules if module_id in targeted_modules]
     
     if not enabled_modules:
-        return {"current_node": "module_orchestrator"}
+        return {
+            "current_node": "module_orchestrator",
+            "llm_diagnostics": trace.snapshot(),
+        }
     
     llm = None
     module_sections = dict(state.get("module_sections") or {})
@@ -2816,21 +2918,49 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             currency_code = str(state.get("currency_code") or "").strip().upper()
             if not currency_code or currency_code == "USD":
                 warnings.append(t(language, "warning.skip_exchange_usd"))
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation="market_monitor.exchange_rate_module.v1",
+                    reason="currency_is_usd_or_missing",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
                 continue
         if module_id == "fuel_energy":
             fuel_data = state.get("fuel_energy_data") or {}
             if not fuel_data.get("available") or not fuel_data.get("series"):
                 warnings.append(t(language, "warning.skip_fuel_missing"))
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation="market_monitor.fuel_energy_module.v1",
+                    reason="module_data_unavailable",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
                 continue
         if module_id == "livestock_animal_products":
             animal_data = state.get("livestock_animal_products_data") or {}
             if not animal_data.get("available") or not animal_data.get("series"):
                 warnings.append(t(language, "warning.skip_livestock_missing"))
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation="market_monitor.livestock_module.v1",
+                    reason="module_data_unavailable",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
                 continue
         if module_id == "labour_market":
             labour_data = state.get("labour_market_data") or {}
             if not labour_data.get("available") or not labour_data.get("series"):
                 warnings.append(t(language, "warning.skip_labour_missing"))
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation="market_monitor.labour_module.v1",
+                    reason="module_data_unavailable",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
                 continue
         
         try:
@@ -2838,6 +2968,19 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             module = module_class()
             
             if not module.validate_inputs(state):
+                operation = {
+                    "exchange_rate": "market_monitor.exchange_rate_module.v1",
+                    "fuel_energy": "market_monitor.fuel_energy_module.v1",
+                    "livestock_animal_products": "market_monitor.livestock_module.v1",
+                    "labour_market": "market_monitor.labour_module.v1",
+                }.get(module_id, f"market_monitor.{module_id}_module.v1")
+                trace.record_skip(
+                    node="module_orchestrator",
+                    operation=operation,
+                    reason="required_inputs_unavailable",
+                    artifact_type="module",
+                    artifact_id=module_id,
+                )
                 if module_id == "exchange_rate":
                     missing = [
                         f
@@ -2863,6 +3006,8 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
             
             logger.info(f"Module '{module_id}' completed successfully")
             
+        except LLMCallError:
+            raise
         except Exception as e:
             logger.error(f"Module '{module_id}' failed: {e}")
             if module_id == "exchange_rate":
@@ -2884,6 +3029,7 @@ def node_module_orchestrator(state: MarketReportState) -> dict:
     if warnings:
         updates["warnings"] = warnings
     updates["llm_calls"] = state.get("llm_calls", 0) + llm_calls
+    updates["llm_diagnostics"] = trace.snapshot()
     updates["current_node"] = "module_orchestrator"
     
     return updates
@@ -2907,6 +3053,11 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     exchange_data = state.get("exchange_rate_data", {}) or {}
     currency_code = _state_currency_code(state)
     basket_context = build_basket_context(state)
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
  
     validation_warnings: List[str] = []
     if exchange_data and exchange_data.get("trend") == "stable":
@@ -2951,18 +3102,28 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
         },
     )
     
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
-        highlights = result.get("HIGHLIGHTS", "") if result else ""
-        highlights, normalization_warnings = _normalize_output_text(highlights, state)
-        validation_warnings.extend(normalization_warnings)
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Highlights generation failed: {e}")
-        title_period = state["time_period"] if language == "en" else _report_month_for_prompt(state)
-        highlights = f"{t(language, 'report.title')} - {state['country']} - {title_period}"
-        llm_calls = 0
+    def _validate_highlights(result: Dict[str, Any]) -> Dict[str, Any]:
+        value = result.get("HIGHLIGHTS")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("HIGHLIGHTS must be non-empty text")
+        normalized, warnings = _normalize_output_text(value, state)
+        if not normalized.strip():
+            raise ValueError("HIGHLIGHTS is empty after normalization")
+        return {"text": normalized, "warnings": warnings}
+
+    traced = trace.invoke_json(
+        model=llm,
+        messages=[HumanMessage(content=prompt)],
+        node="highlights_drafter",
+        operation="market_monitor.highlights_drafting.v1",
+        artifact_type="report_section",
+        artifact_id="HIGHLIGHTS",
+        correction_attempt=int(state.get("correction_attempts", 0) or 0),
+        validator=_validate_highlights,
+    )
+    highlights = traced.value["text"]
+    validation_warnings.extend(traced.value["warnings"])
+    llm_calls = 1
     
     sections = dict(state.get("report_draft_sections") or {})
     sections["HIGHLIGHTS"] = highlights
@@ -2970,6 +3131,7 @@ def node_highlights_drafter(state: MarketReportState) -> dict:
     updates: Dict[str, Any] = {
         "report_draft_sections": sections,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "highlights_drafter"
     }
     if validation_warnings:
@@ -3016,6 +3178,12 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
     ]
     result: Dict[str, Any] = {}
     llm_calls = 0
+    normalization_warnings: List[str] = []
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     if sections_to_generate:
         prompt = render_prompt(
             "narrative",
@@ -3034,16 +3202,36 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
                 "correction_flags_json": _json_for_prompt(correction_flags),
             },
         )
-        try:
-            response = get_model().invoke([HumanMessage(content=prompt)])
-            result = robust_json_parse(response) or {}
-            llm_calls = 1
-        except Exception as e:
-            logger.error(f"Narrative generation failed: {e}")
+        def _validate_sections(payload: Dict[str, Any]) -> Dict[str, Any]:
+            normalized_sections: Dict[str, str] = {}
+            warnings: List[str] = []
+            for section in sections_to_generate:
+                value = payload.get(section)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{section} must be non-empty text")
+                normalized, section_warnings = _normalize_output_text(value, state)
+                if not normalized.strip():
+                    raise ValueError(f"{section} is empty after normalization")
+                normalized_sections[section] = normalized
+                warnings.extend(section_warnings)
+            return {"sections": normalized_sections, "warnings": warnings}
+
+        traced = trace.invoke_json(
+            model=get_model(),
+            messages=[HumanMessage(content=prompt)],
+            node="narrative_drafter",
+            operation="market_monitor.narrative_drafting.v1",
+            artifact_type="report",
+            artifact_id="core_sections",
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=_validate_sections,
+        )
+        result = traced.value["sections"]
+        normalization_warnings.extend(traced.value["warnings"])
+        llm_calls = 1
 
     sections = dict(state.get("report_draft_sections") or {})
     if result:
-        normalization_warnings: List[str] = []
         for key, value in result.items():
             if key not in sections_to_generate:
                 continue
@@ -3053,8 +3241,6 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
                 normalization_warnings.extend(warnings)
             else:
                 sections[key] = value
-    else:
-        normalization_warnings = []
     
     # Add module sections
     for module_id, section_text in module_sections.items():
@@ -3079,6 +3265,7 @@ def node_narrative_drafter(state: MarketReportState) -> dict:
     updates = {
         "report_draft_sections": sections,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "narrative_drafter"
     }
     if normalization_warnings:
@@ -3093,6 +3280,11 @@ def node_red_team(state: MarketReportState) -> dict:
     logger.info("[RedTeam] Fact-checking draft")
     
     llm = get_model()
+    trace = get_trace_session(
+        service="market-monitor",
+        run_id=str(state.get("run_id") or "market-monitor-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     language = _state_language(state)
     sections = state.get("report_draft_sections", {})
     stats = state.get("data_statistics", {})
@@ -3105,11 +3297,17 @@ def node_red_team(state: MarketReportState) -> dict:
     }
      
     if not sections:
+        trace.record_skip(
+            node="red_team",
+            operation="market_monitor.red_team_review.v1",
+            reason="no_report_sections",
+        )
         review = qa_review_from_state({**dict(state), "skeptic_flags": []})
         return {
             "skeptic_flags": [],
             "qa_review": review,
             "correction_targets": [],
+            "llm_diagnostics": trace.snapshot(),
             "current_node": "red_team",
         }
      
@@ -3134,26 +3332,43 @@ def node_red_team(state: MarketReportState) -> dict:
     )
 
      
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
-        flags = _normalized_qa_flags(result.get("flags", []) if result else [])
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Red team check failed: {e}")
-        flags = _normalized_qa_flags(
-            [
-                {
-                    "section": "GLOBAL",
-                    "claim": "The automated QA review could not be completed.",
-                    "issue_type": "qa_execution_error",
-                    "severity": "high",
-                    "details": str(e),
-                    "recommendation": "Run the QA review again before publication.",
-                }
-            ]
-        )
-        llm_calls = 0
+    def _validate_qa(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        flags = result.get("flags")
+        if not isinstance(flags, list):
+            raise ValueError("flags must be a list")
+        required = {
+            "section",
+            "claim",
+            "issue_type",
+            "severity",
+            "details",
+            "recommendation",
+        }
+        for index, flag in enumerate(flags):
+            if not isinstance(flag, dict):
+                raise ValueError("every QA flag must be an object")
+            missing = sorted(required - set(flag))
+            if missing:
+                raise ValueError(f"flags[{index}] is missing: {', '.join(missing)}")
+            if flag.get("severity") not in {"high", "medium", "low"}:
+                raise ValueError(f"flags[{index}].severity is invalid")
+            for field in required - {"severity"}:
+                if not isinstance(flag.get(field), str):
+                    raise ValueError(f"flags[{index}].{field} must be text")
+        return _normalized_qa_flags(flags)
+
+    traced = trace.invoke_json(
+        model=llm,
+        messages=[HumanMessage(content=prompt)],
+        node="red_team",
+        operation="market_monitor.red_team_review.v1",
+        artifact_type="global",
+        artifact_id="qa_review",
+        correction_attempt=int(state.get("correction_attempts", 0) or 0),
+        validator=_validate_qa,
+    )
+    flags = traced.value
+    llm_calls = 1
 
     review = qa_review_from_state({**dict(state), "skeptic_flags": flags})
     return {
@@ -3161,6 +3376,7 @@ def node_red_team(state: MarketReportState) -> dict:
         "qa_review": review,
         "correction_targets": [],
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "red_team"
     }
 
@@ -3270,7 +3486,9 @@ def run_report_generation(
     previous_report_text: str = "",
     use_mock_data: bool = False,
     language: str = "auto",
-    on_step: Optional[OnStepCallback] = None
+    on_step: Optional[OnStepCallback] = None,
+    run_id: Optional[str] = None,
+    llm_trace_sink: Optional[TraceSink] = None,
 ) -> dict:
     """
     Entry point per la generazione del Market Monitor.
@@ -3302,10 +3520,23 @@ def run_report_generation(
         language=language_info["language"],
         locale=language_info["locale"],
         language_source=language_info["language_source"],
+        run_id=run_id,
     )
     
     agent = build_graph(on_step=on_step)
-    result = agent.invoke(initial_state)
+    with llm_trace_session(
+        service="market-monitor",
+        run_id=initial_state["run_id"],
+        initial=initial_state.get("llm_diagnostics"),
+        sink=llm_trace_sink,
+    ) as trace:
+        try:
+            result = agent.invoke(initial_state)
+        except Exception:
+            log_llm_run_summary(trace.snapshot())
+            raise
+        result["llm_diagnostics"] = trace.snapshot()
+        log_llm_run_summary(result["llm_diagnostics"])
     for key in ("databridges_rows", "seerist_documents", "reliefweb_documents"):
         result.pop(key, None)
     result["language"] = language_info["language"]

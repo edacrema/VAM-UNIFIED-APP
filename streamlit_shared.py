@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -792,6 +793,78 @@ def render_report_delivery(
             render_technical_details()
 
 
+def _llm_elapsed_seconds(call: Dict[str, Any]) -> Optional[float]:
+    started_at = call.get("started_at")
+    if not isinstance(started_at, str) or not started_at.strip():
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def render_llm_diagnostics(diagnostics: Any, *, live: bool = False) -> None:
+    """Render only the sanitized public LLM trace contract."""
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return
+    calls = [item for item in diagnostics.get("calls") or [] if isinstance(item, dict)]
+    current_id = str(diagnostics.get("current_call_id") or "")
+    current_call = next(
+        (item for item in reversed(calls) if str(item.get("call_id") or "") == current_id),
+        None,
+    )
+
+    if live and current_call is not None:
+        operation = str(current_call.get("operation") or "LLM request")
+        elapsed = _llm_elapsed_seconds(current_call)
+        elapsed_label = f"{elapsed:.1f}s" if elapsed is not None else "in progress"
+        st.info(f"Current LLM operation: {operation} ({elapsed_label})")
+
+    counters = st.columns(3)
+    counters[0].metric("Completed LLM calls", str(diagnostics.get("succeeded_calls") or 0))
+    counters[1].metric("Failed LLM calls", str(diagnostics.get("failed_calls") or 0))
+    counters[2].metric(
+        "Contract failures", str(diagnostics.get("contract_failed_calls") or 0)
+    )
+
+    failures = [item for item in calls if item.get("status") == "failed"]
+    if failures:
+        failure = failures[-1]
+        st.error(
+            "LLM call failed: "
+            f"{failure.get('failure_code') or 'llm_call_failed'}; "
+            f"node={failure.get('node') or 'unknown'}; "
+            f"operation={failure.get('operation') or 'unknown'}; "
+            f"call_id={failure.get('call_id') or 'unknown'}."
+        )
+
+    if not live and calls:
+        rows = []
+        for call in calls:
+            rows.append(
+                {
+                    "Call": call.get("call_id"),
+                    "Node": call.get("node"),
+                    "Operation": call.get("operation"),
+                    "Artifact": call.get("artifact_id") or call.get("artifact_type") or "—",
+                    "Attempt": call.get("correction_attempt") or 0,
+                    "Status": call.get("status"),
+                    "Duration (ms)": call.get("duration_ms"),
+                    "Model": call.get("model"),
+                    "Failure code": call.get("failure_code") or "—",
+                }
+            )
+        st.dataframe(rows, hide_index=True, width="stretch")
+        if diagnostics.get("payload_persistence_failures"):
+            st.warning(
+                "One or more private LLM trace payloads could not be persisted. "
+                "The report result itself is unchanged."
+            )
+
+
 def render_run_status(
     status: Any,
     *,
@@ -820,6 +893,10 @@ def render_run_status(
 
     metadata = status.get("metadata")
     if isinstance(metadata, dict) and metadata:
+        llm_diagnostics = metadata.get("llm_diagnostics")
+        if isinstance(llm_diagnostics, dict) and llm_diagnostics:
+            render_llm_diagnostics(llm_diagnostics, live=True)
+
         live_outputs = metadata.get("live_outputs")
         if isinstance(live_outputs, dict) and live_outputs:
             render_live_outputs(

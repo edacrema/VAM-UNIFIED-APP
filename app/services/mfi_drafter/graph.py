@@ -30,6 +30,12 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
 
 from app.shared.llm import get_model
+from app.shared.llm_observability import (
+    TraceSink,
+    get_trace_session,
+    llm_trace_session,
+    log_llm_run_summary,
+)
 from app.shared.retrievers import ReliefWebRetriever, SeeristRetriever
 from .analysis import build_assessment_profile
 from .claim_identity import (
@@ -166,6 +172,7 @@ class MFIReportState(TypedDict):
     run_id: str
     correction_attempts: int
     llm_calls: int
+    llm_diagnostics: Dict[str, Any]
     current_node: str
 
 
@@ -176,6 +183,7 @@ def create_initial_state(
     markets: List[str],
     csv_data: Optional[Dict[str, Any]] = None,
     release_control: Optional[MFIReleaseControl] = None,
+    run_id: Optional[str] = None,
 ) -> MFIReportState:
     """Crea stato iniziale per il grafo."""
     return MFIReportState(
@@ -252,9 +260,10 @@ def create_initial_state(
         claim_substitutions=[],
         report_blocks=[],
         warnings=[],
-        run_id=f"mfi_{uuid.uuid4().hex[:8]}",
+        run_id=run_id or f"mfi_{uuid.uuid4().hex[:8]}",
         correction_attempts=0,
         llm_calls=0,
+        llm_diagnostics={},
         current_node="init"
     )
 
@@ -305,28 +314,6 @@ def _record_ignored_model_identifiers(
     diagnostics["ignored_model_identifier_count"] = int(
         diagnostics.get("ignored_model_identifier_count", 0) or 0
     ) + count_model_identifiers(payload)
-
-
-def robust_json_parse(response: Any) -> Optional[Dict]:
-    """Helper per pulire e parsare l'output JSON dell'LLM."""
-    if hasattr(response, 'content'):
-        raw_output = response.content
-    elif isinstance(response, str):
-        raw_output = response
-    else:
-        return None
-
-    try:
-        raw_output = re.sub(r"```json\s*", "", raw_output)
-        raw_output = re.sub(r"```", "", raw_output).strip()
-        
-        start_index = raw_output.find('{')
-        end_index = raw_output.rfind('}')
-        if start_index == -1 or end_index == -1:
-            return None
-        return json.loads(raw_output[start_index:end_index+1])
-    except json.JSONDecodeError:
-        return None
 
 
 def _metric_prompt_view(metric: Dict[str, Any]) -> Dict[str, Any]:
@@ -977,7 +964,17 @@ def node_context_extractor(state: MFIReportState) -> dict:
     """Classify source-linked context before it can enter MFI narratives."""
     logger.info("[ContextExtractor] Classifying contextual evidence")
     docs = state.get("contextual_documents", [])
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     if not docs:
+        trace.record_skip(
+            node="context_extractor",
+            operation="mfi.context_classification.v1",
+            reason="no_contextual_documents",
+        )
         diagnostics = _generation_diagnostics(state)
         diagnostics["context_extraction_mode"] = "not_applicable"
         diagnostics["context_classification_status"] = "not_attempted"
@@ -996,6 +993,7 @@ def node_context_extractor(state: MFIReportState) -> dict:
             "context_evidence": [],
             "context_status": context_status.model_dump(),
             "generation_diagnostics": diagnostics,
+            "llm_diagnostics": trace.snapshot(),
             "current_node": "context_extractor",
         }
 
@@ -1032,51 +1030,60 @@ Output JSON:
   {{"text": "...", "classification": "corroborating|potentially_explanatory|unrelated",
     "document_ids": ["supplied-id"]}}
 ]}}"""
-    classification_failed = False
-    try:
-        response = get_model().invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
+    def _validate_context_response(result: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(result, dict) or not isinstance(
             result.get("statements"), list
         ):
             raise ValueError("Context classifier returned an invalid response schema")
-        ignored_model_identifiers = count_model_identifiers(result)
-        context_evidence, parse_flags = parse_context_evidence(
-            result,
-            documents=docs,
-        )
-        llm_calls = 1
-    except Exception as e:
-        logger.error(f"Context extraction failed: {e}")
-        context_evidence = []
-        parse_flags = []
-        llm_calls = 0
-        ignored_model_identifiers = 0
-        classification_failed = True
+        for index, statement in enumerate(result["statements"]):
+            if not isinstance(statement, dict):
+                raise ValueError(f"statements[{index}] must be an object")
+            if not str(statement.get("text") or "").strip():
+                raise ValueError(f"statements[{index}].text is required")
+            if statement.get("classification") not in {
+                "corroborating",
+                "potentially_explanatory",
+                "unrelated",
+            }:
+                raise ValueError(f"statements[{index}].classification is invalid")
+            if not isinstance(statement.get("document_ids"), list):
+                raise ValueError(f"statements[{index}].document_ids must be a list")
+        return result
+
+    traced = trace.invoke_json(
+        model=get_model(),
+        messages=[HumanMessage(content=prompt)],
+        node="context_extractor",
+        operation="mfi.context_classification.v1",
+        artifact_type="context",
+        validator=_validate_context_response,
+    )
+    result = traced.value
+    ignored_model_identifiers = count_model_identifiers(result)
+    context_evidence, parse_flags = parse_context_evidence(
+        result,
+        documents=docs,
+    )
+    llm_calls = 1
     diagnostics = _generation_diagnostics(state)
     diagnostics["ignored_model_identifier_count"] = int(
         diagnostics.get("ignored_model_identifier_count", 0) or 0
     ) + ignored_model_identifiers
-    diagnostics["context_extraction_mode"] = "llm" if llm_calls else "fallback"
-    diagnostics["context_classification_status"] = (
-        "failed" if classification_failed else "completed"
-    )
+    diagnostics["context_extraction_mode"] = "llm"
+    diagnostics["context_classification_status"] = "completed"
     context_status = resolve_context_status(
         retriever_statuses=diagnostics.get("retrievers", {}),
         documents=docs,
         statements=context_evidence,
-        extraction_mode=(
-            "failed"
-            if classification_failed
-            else diagnostics["context_extraction_mode"]
-        ),
-        classification_failed=classification_failed,
+        extraction_mode=diagnostics["context_extraction_mode"],
+        classification_failed=False,
     )
     updates = {
         "context_evidence": context_evidence,
         "context_status": context_status.model_dump(),
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "context_extractor",
     }
     if parse_flags:
@@ -1488,6 +1495,11 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
     repairing = bool(targets)
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     fallback_dimensions: List[str] = []
     correction_history = deepcopy(state.get("correction_history", []) or [])
     attempt_number = int(state.get("correction_attempts", 0) or 0)
@@ -1590,41 +1602,40 @@ Preserve the meaning and content of every unlisted field. Previous artifact:
 Relevant targets:
 {json.dumps(relevant_targets)}
 """
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            result = robust_json_parse(response)
-            _record_ignored_model_identifiers(diagnostics, result)
-            llm_calls += 1
-            deterministic_fallback = fallback_dimension_narrative(
-                dimension_profile,
-                assessment_profile=profile,
-            )
-            drafted = parse_dimension_narrative(
+        deterministic_fallback = fallback_dimension_narrative(
+            dimension_profile,
+            assessment_profile=profile,
+        )
+        traced = trace.invoke_json(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="dimension_drafter",
+            operation=(
+                "mfi.dimension_correction.v1"
+                if repairing
+                else "mfi.dimension_drafting.v2"
+            ),
+            artifact_type="dimension",
+            artifact_id=dimension,
+            correction_attempt=attempt_number,
+            validator=lambda result, dimension_profile=dimension_profile: parse_dimension_narrative(
                 result,
                 dimension_profile=dimension_profile,
                 assessment_profile=profile,
-            )
-            mode = "fallback" if drafted == deterministic_fallback else "llm"
-            _record_artifact_mode(diagnostics, "dimensions", dimension, mode)
-            if mode == "fallback":
-                fallback_dimensions.append(dimension)
-            correction_outcome = (
-                "deterministic_fallback" if mode == "fallback" else "llm_completed"
-            )
-        except Exception as exc:
-            logger.error("Dimension %s drafting error: %s", dimension, exc)
-            drafted = fallback_dimension_narrative(
-                dimension_profile,
-                assessment_profile=profile,
-            )
-            _record_artifact_mode(
-                diagnostics,
-                "dimensions",
-                dimension,
-                "fallback",
-            )
+                strict=True,
+            ),
+        )
+        result = traced.payload
+        drafted = traced.value
+        _record_ignored_model_identifiers(diagnostics, result)
+        llm_calls += 1
+        mode = "fallback" if drafted == deterministic_fallback else "llm"
+        _record_artifact_mode(diagnostics, "dimensions", dimension, mode)
+        if mode == "fallback":
             fallback_dimensions.append(dimension)
-            correction_outcome = "llm_or_schema_failed"
+        correction_outcome = (
+            "deterministic_fallback" if mode == "fallback" else "llm_completed"
+        )
         if repairing:
             correction_history = _record_correction_execution(
                 correction_history,
@@ -1647,6 +1658,7 @@ Relevant targets:
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "llm_diagnostics": trace.snapshot(),
         "correction_history": correction_history,
         "current_node": "dimension_drafter",
     }
@@ -1678,6 +1690,11 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
     repairing = bool(targets)
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     fallback_markets: List[str] = []
     correction_history = deepcopy(state.get("correction_history", []) or [])
     attempt_number = int(state.get("correction_attempts", 0) or 0)
@@ -1758,34 +1775,36 @@ Preserve all unlisted fields. Previous artifact:
 Relevant targets:
 {json.dumps(relevant_targets)}
 """
-        try:
-            response = llm.invoke([HumanMessage(content=prompt)])
-            result = robust_json_parse(response)
-            _record_ignored_model_identifiers(diagnostics, result)
-            llm_calls += 1
-            deterministic_fallback = fallback_market_narrative(market_profile)
-            drafted = parse_market_narrative(
+        deterministic_fallback = fallback_market_narrative(market_profile)
+        traced = trace.invoke_json(
+            model=llm,
+            messages=[HumanMessage(content=prompt)],
+            node="market_recommendations_drafter",
+            operation=(
+                "mfi.market_correction.v1"
+                if repairing
+                else "mfi.market_drafting.v2"
+            ),
+            artifact_type="market",
+            artifact_id=market_name,
+            correction_attempt=attempt_number,
+            validator=lambda result, market_profile=market_profile: parse_market_narrative(
                 result,
                 market_profile=market_profile,
-            )
-            mode = "fallback" if drafted == deterministic_fallback else "llm"
-            _record_artifact_mode(diagnostics, "markets", market_name, mode)
-            if mode == "fallback":
-                fallback_markets.append(market_name)
-            correction_outcome = (
-                "deterministic_fallback" if mode == "fallback" else "llm_completed"
-            )
-        except Exception as exc:
-            logger.error("Market %s drafting error: %s", market_name, exc)
-            drafted = fallback_market_narrative(market_profile)
-            _record_artifact_mode(
-                diagnostics,
-                "markets",
-                market_name,
-                "fallback",
-            )
+                strict=True,
+            ),
+        )
+        result = traced.payload
+        drafted = traced.value
+        _record_ignored_model_identifiers(diagnostics, result)
+        llm_calls += 1
+        mode = "fallback" if drafted == deterministic_fallback else "llm"
+        _record_artifact_mode(diagnostics, "markets", market_name, mode)
+        if mode == "fallback":
             fallback_markets.append(market_name)
-            correction_outcome = "llm_or_schema_failed"
+        correction_outcome = (
+            "deterministic_fallback" if mode == "fallback" else "llm_completed"
+        )
         if repairing:
             correction_history = _record_correction_execution(
                 correction_history,
@@ -1806,6 +1825,7 @@ Relevant targets:
         "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "llm_diagnostics": trace.snapshot(),
         "correction_history": correction_history,
         "current_node": "market_recommendations_drafter",
     }
@@ -1917,28 +1937,40 @@ Preserve all unlisted fields. Previous artifact:
 Relevant targets:
 {json.dumps(relevant_targets)}
 """
-    model_identifier_count = 0
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        result = robust_json_parse(response)
-        model_identifier_count = count_model_identifiers(result)
-        deterministic_fallback = fallback_executive_narrative(profile)
-        drafted = parse_executive_narrative(result, assessment_profile=profile)
-        llm_calls = 1
-        executive_mode = (
-            "fallback" if drafted == deterministic_fallback else "llm"
-        )
-        correction_outcome = (
-            "deterministic_fallback"
-            if executive_mode == "fallback"
-            else "llm_completed"
-        )
-    except Exception as exc:
-        logger.error("Executive summary error: %s", exc)
-        drafted = fallback_executive_narrative(profile)
-        llm_calls = 0
-        executive_mode = "fallback"
-        correction_outcome = "llm_or_schema_failed"
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
+    deterministic_fallback = fallback_executive_narrative(profile)
+    traced = trace.invoke_json(
+        model=llm,
+        messages=[HumanMessage(content=prompt)],
+        node="executive_summary_drafter",
+        operation=(
+            "mfi.executive_correction.v1"
+            if repairing
+            else "mfi.executive_drafting.v2"
+        ),
+        artifact_type="executive_summary",
+        artifact_id="executive_summary",
+        correction_attempt=int(state.get("correction_attempts", 0) or 0),
+        validator=lambda result: parse_executive_narrative(
+            result,
+            assessment_profile=profile,
+            strict=True,
+        ),
+    )
+    result = traced.payload
+    drafted = traced.value
+    model_identifier_count = count_model_identifiers(result)
+    llm_calls = 1
+    executive_mode = "fallback" if drafted == deterministic_fallback else "llm"
+    correction_outcome = (
+        "deterministic_fallback"
+        if executive_mode == "fallback"
+        else "llm_completed"
+    )
     if repairing and previous and flagged_fields:
         merged = dict(previous)
         for field_name in flagged_fields:
@@ -1958,6 +1990,7 @@ Relevant targets:
         "executive_summary_narrative": drafted,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "executive_summary_drafter",
     }
     if repairing:
@@ -2135,6 +2168,11 @@ def node_red_team(state: MFIReportState) -> dict:
     logger.info("[RedTeam] Reviewing structured MFI narratives")
     if not state.get("executive_summary_narrative"):
         return {"red_team_flags": [], "current_node": "red_team"}
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     prompt = f"""Red-Team this structured MFI assessment narrative.
 
 Use English only. Review the structured artifacts against the cited catalog,
@@ -2184,39 +2222,66 @@ Return:
   "repairable": true
 }}]}}
 """
-    try:
-        response = get_model().invoke([HumanMessage(content=prompt)])
-        payload = robust_json_parse(response)
+    def _validate_red_team(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(payload, dict) or not isinstance(
             payload.get("flags"), list
         ):
             raise ValueError("Red-Team response does not satisfy its schema")
-        flags = normalize_red_team_flags(payload)
-        llm_calls = 1
-        red_team_status = "completed"
-    except Exception as exc:
-        logger.error("Red-Team review error: %s", exc)
-        flags = [
-            {
-                "flag_id": "system-red-team-execution-error",
-                "source": "system",
-                "code": "qa_execution_error",
-                "severity": "medium",
-                "artifact_type": "global",
-                "artifact_id": None,
-                "field_name": None,
-                "claim_id": None,
-                "message": "The LLM Red-Team review could not be completed.",
-                "recommendation": "Review the deterministic validation results.",
-                "metric_ids": [],
-                "document_ids": [],
-                "expected_value": None,
-                "actual_value": None,
-                "repairable": False,
-            }
-        ]
-        llm_calls = 0
-        red_team_status = "failed"
+        required = {
+            "flag_id",
+            "code",
+            "severity",
+            "artifact_type",
+            "artifact_id",
+            "field_name",
+            "claim_id",
+            "message",
+            "recommendation",
+            "metric_ids",
+            "document_ids",
+            "repairable",
+        }
+        for index, flag in enumerate(payload["flags"]):
+            if not isinstance(flag, dict):
+                raise ValueError(f"flags[{index}] must be an object")
+            missing = sorted(required - set(flag))
+            if missing:
+                raise ValueError(f"flags[{index}] is missing: {', '.join(missing)}")
+            if flag.get("severity") not in {"high", "medium", "low"}:
+                raise ValueError(f"flags[{index}].severity is invalid")
+            if flag.get("artifact_type") not in {
+                "context",
+                "dimension",
+                "market",
+                "executive_summary",
+                "global",
+            }:
+                raise ValueError(f"flags[{index}].artifact_type is invalid")
+            if not str(flag.get("code") or "").strip() or not str(
+                flag.get("message") or ""
+            ).strip():
+                raise ValueError(f"flags[{index}] requires code and message")
+            if not isinstance(flag.get("metric_ids"), list) or not isinstance(
+                flag.get("document_ids"), list
+            ):
+                raise ValueError(f"flags[{index}] citations must be lists")
+            if not isinstance(flag.get("repairable"), bool):
+                raise ValueError(f"flags[{index}].repairable must be boolean")
+        return normalize_red_team_flags(payload)
+
+    traced = trace.invoke_json(
+        model=get_model(),
+        messages=[HumanMessage(content=prompt)],
+        node="red_team",
+        operation="mfi.red_team_review.v2",
+        artifact_type="global",
+        artifact_id="qa_review",
+        correction_attempt=int(state.get("correction_attempts", 0) or 0),
+        validator=_validate_red_team,
+    )
+    flags = traced.value
+    llm_calls = 1
+    red_team_status = "completed"
     qa_review = build_qa_review(
         state.get("deterministic_flags", []),
         flags,
@@ -2230,6 +2295,7 @@ Return:
         "qa_review": qa_review,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
         "generation_diagnostics": diagnostics,
+        "llm_diagnostics": trace.snapshot(),
         "current_node": "red_team",
     }
 
@@ -2445,6 +2511,11 @@ def node_prepare_correction(state: MFIReportState) -> dict:
         "correction_history": history,
         "current_node": "targeted_correction",
     }
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
     context_targets = [
         target
         for target in targets
@@ -2456,6 +2527,14 @@ def node_prepare_correction(state: MFIReportState) -> dict:
         if isinstance(item, dict) and item.get("doc_id")
     ]
     if not context_targets or not documents:
+        if context_targets:
+            trace.record_skip(
+                node="targeted_correction",
+                operation="mfi.context_correction.v1",
+                reason="no_contextual_documents",
+                artifact_type="context",
+            )
+            updates["llm_diagnostics"] = trace.snapshot()
         unavailable_context_targets = [
             target
             for target in context_targets
@@ -2490,31 +2569,30 @@ Return {{"statements": [{{"statement_id": "...", "text": "...",
 Each returned statement_id must exactly match a canonical statement_id in the
 targeted CURRENT_CONTEXT. Do not create or rename identifiers.
 """
-    try:
-        response = get_model().invoke([HumanMessage(content=prompt)])
-        payload = robust_json_parse(response)
-        targeted_ids = {
-            str(target.get("artifact_id"))
-            for target in context_targets
-            if target.get("artifact_type") == "context"
-            and target.get("artifact_id")
-        }
-        has_global = any(
-            target.get("artifact_type") == "global" for target in context_targets
-        )
-        current_ids = [
-            str(statement.get("statement_id"))
-            for statement in state.get("context_evidence", [])
-            if isinstance(statement, dict) and statement.get("statement_id")
-        ]
-        expected_ids = (
-            current_ids
-            if has_global or not targeted_ids
-            else [value for value in current_ids if value in targeted_ids]
-        )
-        raw_statements = (
-            payload.get("statements", []) if isinstance(payload, dict) else []
-        )
+    targeted_ids = {
+        str(target.get("artifact_id"))
+        for target in context_targets
+        if target.get("artifact_type") == "context"
+        and target.get("artifact_id")
+    }
+    has_global = any(
+        target.get("artifact_type") == "global" for target in context_targets
+    )
+    current_ids = [
+        str(statement.get("statement_id"))
+        for statement in state.get("context_evidence", [])
+        if isinstance(statement, dict) and statement.get("statement_id")
+    ]
+    expected_ids = (
+        current_ids
+        if has_global or not targeted_ids
+        else [value for value in current_ids if value in targeted_ids]
+    )
+
+    def _validate_context_correction(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw_statements = payload.get("statements")
+        if not isinstance(raw_statements, list):
+            raise ValueError("Context correction statements must be a list")
         returned_ids = [
             str(statement.get("statement_id") or "")
             for statement in raw_statements
@@ -2524,39 +2602,47 @@ targeted CURRENT_CONTEXT. Do not create or rename identifiers.
             raise ValueError(
                 "Context correction must preserve the supplied canonical statement IDs"
             )
-        repaired, _flags = parse_context_evidence(
+        repaired, parse_flags = parse_context_evidence(
             payload,
             documents=documents,
             expected_statement_ids=expected_ids,
         )
-        if has_global or not targeted_ids:
-            updates["context_evidence"] = repaired
-        else:
-            replacements = {
-                str(statement.get("statement_id")): statement
-                for statement in repaired
-                if statement.get("statement_id") in targeted_ids
-            }
-            updates["context_evidence"] = [
-                replacements.get(str(statement.get("statement_id")), statement)
-                for statement in state.get("context_evidence", [])
-                if isinstance(statement, dict)
-            ]
-        updates["llm_calls"] = state.get("llm_calls", 0) + 1
-        updates["correction_history"] = _record_correction_execution(
-            history,
-            attempt_number=attempt_number,
-            targets=context_targets,
-            outcome="llm_completed",
-        )
-    except Exception as exc:
-        logger.error("Targeted context correction failed: %s", exc)
-        updates["correction_history"] = _record_correction_execution(
-            history,
-            attempt_number=attempt_number,
-            targets=context_targets,
-            outcome="llm_or_schema_failed",
-        )
+        if parse_flags:
+            raise ValueError("Context correction contains invalid document citations")
+        return repaired
+
+    traced = trace.invoke_json(
+        model=get_model(),
+        messages=[HumanMessage(content=prompt)],
+        node="targeted_correction",
+        operation="mfi.context_correction.v1",
+        artifact_type="context",
+        artifact_id="context_evidence",
+        correction_attempt=attempt_number,
+        validator=_validate_context_correction,
+    )
+    repaired = traced.value
+    if has_global or not targeted_ids:
+        updates["context_evidence"] = repaired
+    else:
+        replacements = {
+            str(statement.get("statement_id")): statement
+            for statement in repaired
+            if statement.get("statement_id") in targeted_ids
+        }
+        updates["context_evidence"] = [
+            replacements.get(str(statement.get("statement_id")), statement)
+            for statement in state.get("context_evidence", [])
+            if isinstance(statement, dict)
+        ]
+    updates["llm_calls"] = state.get("llm_calls", 0) + 1
+    updates["llm_diagnostics"] = trace.snapshot()
+    updates["correction_history"] = _record_correction_execution(
+        history,
+        attempt_number=attempt_number,
+        targets=context_targets,
+        outcome="llm_completed",
+    )
     return updates
 
 
@@ -3087,6 +3173,8 @@ def run_mfi_report_generation(
     csv_data: Optional[Dict[str, Any]] = None,
     on_step: Optional[OnStepCallback] = None,
     release_control: Optional[MFIReleaseControl] = None,
+    run_id: Optional[str] = None,
+    llm_trace_sink: Optional[TraceSink] = None,
 ) -> dict:
     """
     Entry point per la generazione del MFI Report.
@@ -3111,6 +3199,7 @@ def run_mfi_report_generation(
         markets=markets,
         csv_data=csv_data,
         release_control=control,
+        run_id=run_id,
     )
     
     agent = build_graph(on_step=on_step)
@@ -3118,7 +3207,19 @@ def run_mfi_report_generation(
         # Three bounded correction cycles plus final delivery exceed LangGraph's
         # conservative default of 25 supersteps in the worst case.  The graph's own
         # MAX_CORRECTION_ATTEMPTS remains the controlling limit.
-        result = agent.invoke(initial_state, config={"recursion_limit": 100})
+        with llm_trace_session(
+            service="mfi-drafter",
+            run_id=initial_state["run_id"],
+            initial=initial_state.get("llm_diagnostics"),
+            sink=llm_trace_sink,
+        ) as trace:
+            try:
+                result = agent.invoke(initial_state, config={"recursion_limit": 100})
+            except Exception:
+                log_llm_run_summary(trace.snapshot())
+                raise
+            result["llm_diagnostics"] = trace.snapshot()
+            log_llm_run_summary(result["llm_diagnostics"])
     except Exception:
         logger.exception(
             "MFI Drafter 2.0 generation failed",

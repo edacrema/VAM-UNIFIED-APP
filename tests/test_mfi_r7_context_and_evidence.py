@@ -26,6 +26,7 @@ from app.services.mfi_drafter.schemas import (
 )
 from app.services.mfi_drafter.synthetic_fixtures import build_report_run
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
+from app.shared.llm_observability import LLMCallError
 from app.shared.report_blocks import ReportBlock, build_mfi_report_blocks
 from app.streamlit_backend.dispatcher import (
     _build_mfi_report_output,
@@ -304,9 +305,10 @@ def test_context_extractor_distinguishes_schema_failure_and_no_accepted(monkeypa
         "llm_calls": 0,
     }
     monkeypatch.setattr(graph, "get_model", lambda: _Model("{}"))
-    failed = graph.node_context_extractor(state)
-    assert failed["context_status"]["status"] == "classification_failed"
-    assert failed["context_status"]["extraction_mode"] == "failed"
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_context_extractor(state)
+    assert caught.value.failure_code == "llm_response_contract_error"
+    assert caught.value.node == "context_extractor"
 
     monkeypatch.setattr(
         graph,

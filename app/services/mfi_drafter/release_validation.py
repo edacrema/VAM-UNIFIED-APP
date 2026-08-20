@@ -22,6 +22,7 @@ import pandas as pd
 from pydantic import BaseModel, Field, model_validator
 
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
+from app.shared.llm_observability import LLMRunDiagnostics
 from app.shared.report_blocks import ReportBlock, resolve_mfi_report_blocks
 
 from .analysis import MFIAnalysisConfig, build_assessment_profile
@@ -433,6 +434,10 @@ def _deterministic_result(
             "was invoked."
         ],
         "llm_calls": 0,
+        "llm_diagnostics": LLMRunDiagnostics(
+            service="mfi-drafter",
+            run_id=str(loaded.get("run_id") or "deterministic-release-validation"),
+        ).model_dump(mode="json"),
         "correction_attempts": 0,
     }
     visualizations = node_mfi_graph_designer(result).get("visualizations", {})

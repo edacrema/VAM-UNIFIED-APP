@@ -33,6 +33,7 @@ from streamlit_shared import (
     render_instructions_sidebar_button,
     render_onboarding_sidebar_button,
     quote_path_param,
+    render_llm_diagnostics,
     render_report_delivery,
     render_report_blocks,
     render_wfp_sidebar_logo,
@@ -830,6 +831,8 @@ if isinstance(result, dict):
                 language_name=LANGUAGE_NAMES.get(result_language, result_language),
             )
         )
+        st.markdown("**LLM call diagnostics**")
+        render_llm_diagnostics(result.get("llm_diagnostics") or {})
 
         result_warnings = result.get("warnings") or []
         if result_warnings:

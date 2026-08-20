@@ -414,11 +414,33 @@ def parse_context_evidence(
     return statements, warnings
 
 
+def _validate_claim_payload(payload: Any, *, field: str) -> None:
+    """Validate the transport shape before tolerant canonical normalization."""
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{field} must be a claim object")
+    if not str(payload.get("text") or "").strip():
+        raise ValueError(f"{field}.text is required")
+    for key in ("metric_ids", "document_ids"):
+        if key not in payload or not isinstance(payload.get(key), list):
+            raise ValueError(f"{field}.{key} must be a list")
+    for key in ("scope", "polarity"):
+        if not str(payload.get(key) or "").strip():
+            raise ValueError(f"{field}.{key} is required")
+
+
+def _validate_claim_list_payload(payload: Any, *, field: str) -> None:
+    if not isinstance(payload, list):
+        raise ValueError(f"{field} must be a list")
+    for index, item in enumerate(payload):
+        _validate_claim_payload(item, field=f"{field}[{index}]")
+
+
 def parse_dimension_narrative(
     payload: Any,
     *,
     dimension_profile: Mapping[str, Any],
     assessment_profile: Mapping[str, Any],
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Normalize one LLM dimension payload into the canonical schema."""
     dimension = str(dimension_profile["dimension"])
@@ -428,8 +450,37 @@ def parse_dimension_narrative(
         assessment_profile=assessment_profile,
     )
     if not isinstance(payload, Mapping):
+        if strict:
+            raise ValueError("Dimension narrative response must be an object")
         return fallback
     try:
+        if strict:
+            _validate_claim_payload(payload.get("summary"), field="summary")
+            for field in (
+                "key_findings",
+                "geographic_patterns",
+                "data_limitations",
+                "recommendations",
+            ):
+                _validate_claim_list_payload(payload.get(field, []), field=field)
+            raw_subdimensions_for_validation = payload.get(
+                "subdimension_analysis", []
+            )
+            if not isinstance(raw_subdimensions_for_validation, list):
+                raise ValueError("subdimension_analysis must be a list")
+            for index, raw in enumerate(raw_subdimensions_for_validation):
+                if not isinstance(raw, Mapping):
+                    raise ValueError(
+                        f"subdimension_analysis[{index}] must be an object"
+                    )
+                _validate_claim_payload(
+                    raw.get("interpretation"),
+                    field=f"subdimension_analysis[{index}].interpretation",
+                )
+                if not isinstance(raw.get("driver_metric_ids", []), list):
+                    raise ValueError(
+                        f"subdimension_analysis[{index}].driver_metric_ids must be a list"
+                    )
         finding_limit = (
             NARRATIVE_DENSITY_POLICY.priority_findings
             if is_priority
@@ -532,6 +583,8 @@ def parse_dimension_narrative(
         )
         return narrative.model_dump()
     except (TypeError, ValueError, ValidationError):
+        if strict:
+            raise
         return fallback
 
 
@@ -539,12 +592,22 @@ def parse_market_narrative(
     payload: Any,
     *,
     market_profile: Mapping[str, Any],
+    strict: bool = False,
 ) -> dict[str, Any]:
     market_name = str(market_profile["market_name"])
     fallback = fallback_market_narrative(market_profile)
     if not isinstance(payload, Mapping):
+        if strict:
+            raise ValueError("Market narrative response must be an object")
         return fallback
     try:
+        if strict:
+            for field in (
+                "priority_issues",
+                "recommended_interventions",
+                "limitations",
+            ):
+                _validate_claim_list_payload(payload.get(field, []), field=field)
         issues = _claim_list(
             payload.get("priority_issues"),
             prefix=market_claim_id(market_name, "issue", 1).rsplit(".", 1)[0],
@@ -587,6 +650,8 @@ def parse_market_narrative(
             modality_consideration=None,
         ).model_dump()
     except (TypeError, ValueError, ValidationError):
+        if strict:
+            raise
         return fallback
 
 
@@ -594,11 +659,19 @@ def parse_executive_narrative(
     payload: Any,
     *,
     assessment_profile: Mapping[str, Any],
+    strict: bool = False,
 ) -> dict[str, Any]:
     fallback = fallback_executive_narrative(assessment_profile)
     if not isinstance(payload, Mapping):
+        if strict:
+            raise ValueError("Executive narrative response must be an object")
         return fallback
     try:
+        if strict:
+            if payload.get("motivation") is not None:
+                _validate_claim_payload(payload.get("motivation"), field="motivation")
+            for field in ("key_findings", "recommendations", "limitations"):
+                _validate_claim_list_payload(payload.get(field, []), field=field)
         motivation = (
             _claim_from_payload(
                 payload.get("motivation"),
@@ -639,6 +712,8 @@ def parse_executive_narrative(
             scope_statement=_scope_statement_claim(),
         ).model_dump()
     except (TypeError, ValueError, ValidationError):
+        if strict:
+            raise
         return fallback
 
 

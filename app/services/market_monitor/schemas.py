@@ -6,6 +6,7 @@ Classi e modelli per la generazione di Market Monitor Reports.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field, model_validator
+from app.shared.llm_observability import LLMRunDiagnostics
 from typing import Optional, List, Dict, Any, Literal
 from dataclasses import dataclass, field, asdict
 
@@ -266,6 +267,12 @@ class GenerateReportOutput(BaseModel):
     labour_market_data: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
     llm_calls: int = 0
+    llm_diagnostics: LLMRunDiagnostics = Field(
+        default_factory=lambda: LLMRunDiagnostics(
+            service="market-monitor",
+            run_id="unknown",
+        )
+    )
     success: bool = True
 
 

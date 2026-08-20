@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, UploadFile,
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Any, Dict, List
+import json
 import logging
 
 from .graph import run_mfi_report_generation
@@ -41,6 +42,7 @@ from app.shared.live_outputs import (
 
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import resolve_mfi_report_blocks
+from app.shared.llm_observability import LLMCallError, observability_config
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,7 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "release_control": state.get("release_control", {}),
         "generation_diagnostics": state.get("generation_diagnostics", {}),
         "context_status": state.get("context_status", {}),
+        "llm_diagnostics": state.get("llm_diagnostics", {}),
     }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
@@ -134,6 +137,10 @@ def _build_mfi_output(
         score_authority=result.get("score_authority", "synthetic_mock"),
         release_control=result.get("release_control") or mfi_release_control(),
         generation_diagnostics=result.get("generation_diagnostics", {}),
+        llm_diagnostics=result.get("llm_diagnostics") or {
+            "service": "mfi-drafter",
+            "run_id": result.get("run_id", "unknown"),
+        },
         excluded_market_records=result.get("excluded_market_records", []),
         methodology_warnings=result.get("methodology_warnings", []),
         survey_metadata=result.get("survey_metadata", {}),
@@ -243,6 +250,9 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
         
         return output
         
+    except LLMCallError as e:
+        logger.error("MFI report generation stopped: %s", e)
+        raise HTTPException(status_code=502, detail=e.to_public_dict())
     except Exception as e:
         logger.error(f"MFI report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -282,6 +292,9 @@ async def generate_mfi_report_from_csv(
         )
         logger.info(f"MFI report generation from CSV completed: {output.run_id}")
         return output
+    except LLMCallError as e:
+        logger.error("MFI report generation from CSV stopped: %s", e)
+        raise HTTPException(status_code=502, detail=e.to_public_dict())
     except ValueError as e:
         logger.error(f"CSV validation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -361,6 +374,9 @@ async def generate_mfi_report_from_csv_async(
         try:
             update_run(run_id, status="running", error=None, traceback=None)
 
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
+
             def on_step(node_name: str, _state: dict):
                 progress = progress_map.get(node_name)
                 if progress is not None:
@@ -434,6 +450,8 @@ async def generate_mfi_report_from_csv_async(
                 csv_data=csv_data,
                 on_step=on_step,
                 release_control=release_control,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
@@ -441,9 +459,14 @@ async def generate_mfi_report_from_csv_async(
         except Exception as e:
             import traceback
 
-            tb_str = traceback.format_exc()
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
-            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
+            tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
+            current_node = (
+                e.node
+                if isinstance(e, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
+            error = json.dumps(e.to_public_dict(), sort_keys=True) if isinstance(e, LLMCallError) else str(e)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     background_tasks.add_task(run_in_background)
 
@@ -499,6 +522,9 @@ async def generate_mfi_report_async(
         try:
             update_run(run_id, status="running", error=None, traceback=None)
 
+            def on_llm_trace(diagnostics: Dict[str, Any]) -> None:
+                update_run(run_id, metadata={"llm_diagnostics": diagnostics})
+
             def on_step(node_name: str, _state: dict):
                 progress = progress_map.get(node_name)
                 if progress is not None:
@@ -523,6 +549,8 @@ async def generate_mfi_report_async(
                 markets=input_data.markets,
                 on_step=on_step,
                 release_control=release_control,
+                run_id=run_id,
+                llm_trace_sink=on_llm_trace,
             )
             
             update_run(run_id, warnings=result.get("warnings", []))
@@ -531,9 +559,14 @@ async def generate_mfi_report_async(
         except Exception as e:
             import traceback
 
-            tb_str = traceback.format_exc()
-            current_node = get_run(run_id).current_node if get_run(run_id) is not None else None
-            set_run_failed(run_id, error=str(e), traceback=tb_str, current_node=current_node)
+            tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
+            current_node = (
+                e.node
+                if isinstance(e, LLMCallError)
+                else (get_run(run_id).current_node if get_run(run_id) is not None else None)
+            )
+            error = json.dumps(e.to_public_dict(), sort_keys=True) if isinstance(e, LLMCallError) else str(e)
+            set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
     
     background_tasks.add_task(run_in_background)
     
@@ -639,6 +672,7 @@ async def export_mfi_docx(
 def get_service_info():
     """Returns service metadata for the frontend."""
     release_control = mfi_release_control()
+    trace_config = observability_config()
     return {
         "id": "mfi-drafter",
         "name": "MFI Report Generator",
@@ -648,6 +682,7 @@ def get_service_info():
         "version": "2.0.0",
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
+        "llm_observability": trace_config.model_dump(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -729,11 +764,13 @@ def get_service_info():
 def health_check():
     """Health check endpoint."""
     release_control = mfi_release_control()
+    trace_config = observability_config()
     return {
         "status": "healthy",
         "service": "mfi-drafter",
         "generation_enabled": release_control.enabled,
         "release_control": release_control.model_dump(),
+        "llm_observability": trace_config.model_dump(),
     }
 
 

@@ -1,8 +1,10 @@
 import io
 
 import pandas as pd
+import pytest
 from types import SimpleNamespace
 
+from app.shared.llm_observability import LLMCallError
 from app.shared.report_blocks import build_market_monitor_report_blocks
 from app.services.market_monitor import graph as market_graph
 
@@ -631,121 +633,57 @@ def test_market_monitor_report_blocks_use_human_module_heading():
     assert "labour_market" in figures
 
 
-def test_fuel_energy_module_fallback_narrative_contains_required_elements():
-    module = market_graph.FuelEnergyModule()
-
+@pytest.mark.parametrize(
+    ("module", "state"),
+    [
+        (
+            market_graph.FuelEnergyModule(),
+            {
+                "fuel_energy_data": {
+                    "available": True,
+                    "unit": "SOS/Litre",
+                    "series": [{"kind": "diesel", "label": "Diesel", "current_price": 1120}],
+                    "regional_disparities": [],
+                }
+            },
+        ),
+        (
+            market_graph.LivestockAnimalProductsModule(),
+            {
+                "livestock_animal_products_data": {
+                    "available": True,
+                    "series": [{"group": "live_animal", "label": "Livestock (Goat)", "current_price": 1200}],
+                    "regional_disparities": [],
+                }
+            },
+        ),
+        (
+            market_graph.LabourMarketModule(),
+            {
+                "labour_market_data": {
+                    "available": True,
+                    "series": [{"kind": "casual_unskilled", "label": "Casual wage", "current_wage": 420}],
+                    "purchasing_power": {"current_kg": 19.09, "staple_name": "Maize"},
+                }
+            },
+        ),
+    ],
+)
+def test_optional_module_llm_failure_interrupts_instead_of_using_fallback(module, state):
     class FailingLLM:
         def invoke(self, *_args, **_kwargs):
             raise RuntimeError("offline")
 
-    result = module.generate_section(
-        {
-            "country": "Somalia",
-            "time_period": "2026-06",
-            "fuel_energy_data": {
-                "available": True,
-                "unit": "SOS/Litre",
-                "driver_hint": "The increase is consistent with higher fuel-market pressure.",
-                "series": [
-                    {
-                        "kind": "diesel",
-                        "label": "Diesel",
-                        "current_price": 1120,
-                        "mom_change_pct": 1.8,
-                        "yoy_change_pct": 12.0,
-                        "latest_month": "2026-06",
-                    }
-                ],
-                "regional_disparities": [],
-            },
-        },
-        FailingLLM(),
-    )
-
-    narrative = result["narrative"].lower()
-    assert "diesel averaged 1120 sos/litre" in narrative
-    assert "consistent with higher fuel-market pressure" in narrative
-    assert "transport and distribution costs" in narrative
-
-
-def test_livestock_module_fallback_narrative_uses_only_available_series():
-    module = market_graph.LivestockAnimalProductsModule()
-
-    class FailingLLM:
-        def invoke(self, *_args, **_kwargs):
-            raise RuntimeError("offline")
-
-    result = module.generate_section(
-        {
-            "country": "Somalia",
-            "time_period": "2026-06",
-            "livestock_animal_products_data": {
-                "available": True,
-                "driver_hint": "The increase is consistent with seasonal demand.",
-                "series": [
-                    {
-                        "group": "live_animal",
-                        "label": "Livestock (Goat)",
-                        "current_price": 1200,
-                        "axis_unit": "SOS/Head",
-                        "mom_change_pct": 2.0,
-                        "yoy_change_pct": None,
-                        "latest_month": "2026-06",
-                    }
-                ],
-                "regional_disparities": [],
-            },
-        },
-        FailingLLM(),
-    )
-
-    narrative = result["narrative"].lower()
-    assert "livestock (goat) averaged 1200 sos/head" in narrative
-    assert "animal-source protein affordability" in narrative
-    assert "pastoralist income" in narrative
-    assert "milk" not in narrative
-
-
-def test_labour_module_fallback_narrative_contains_wage_and_purchasing_power():
-    module = market_graph.LabourMarketModule()
-
-    class FailingLLM:
-        def invoke(self, *_args, **_kwargs):
-            raise RuntimeError("offline")
-
-    result = module.generate_section(
-        {
-            "country": "Afghanistan",
-            "time_period": "2026-06",
-            "labour_market_data": {
-                "available": True,
-                "driver_hint": "The wage increase is consistent with seasonal labour demand.",
-                "series": [
-                    {
-                        "kind": "casual_unskilled",
-                        "label": "Casual/unskilled wage",
-                        "current_wage": 420,
-                        "axis_unit": "AFN/day",
-                        "mom_change_pct": 1.0,
-                        "yoy_change_pct": 5.0,
-                        "latest_month": "2026-06",
-                    }
-                ],
-                "purchasing_power": {
-                    "current_kg": 19.09,
-                    "staple_name": "Maize",
-                    "latest_month": "2026-06",
-                    "mom_change_pct": -1.5,
-                },
-            },
-        },
-        FailingLLM(),
-    )
-
-    narrative = result["narrative"].lower()
-    assert "casual/unskilled wage averaged 420 afn/day" in narrative
-    assert "one day's wage bought about 19.09 kg of maize" in narrative
-    assert "seasonal labour demand" in narrative
+    call_state = {
+        "run_id": "market-module-failure",
+        "country": "Testland",
+        "time_period": "2026-06",
+        **state,
+    }
+    with pytest.raises(LLMCallError) as caught:
+        module.generate_section(call_state, FailingLLM())
+    assert caught.value.failure_code == "llm_transport_error"
+    assert caught.value.node == "module_orchestrator"
 
 
 def test_exchange_rate_module_uses_existing_databridges_data_without_te(monkeypatch):

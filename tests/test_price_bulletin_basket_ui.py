@@ -229,6 +229,7 @@ shared.render_bug_report_header_link = lambda **kwargs: None
 shared.render_results_tabs = lambda **kwargs: None
 shared.render_report_delivery = lambda **kwargs: None
 shared.render_report_blocks = lambda *args, **kwargs: None
+shared.render_llm_diagnostics = lambda *args, **kwargs: None
 shared.render_report_sections = lambda *args, **kwargs: None
 shared.render_visualizations = lambda *args, **kwargs: None
 shared.quote_path_param = lambda value: quote(str(value), safe="")
