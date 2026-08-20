@@ -1,6 +1,4 @@
 import json
-import sys
-import types
 from importlib import import_module
 
 from app.shared.retrievers import SeeristRetriever
@@ -125,8 +123,6 @@ class FakeUnavailableSeeristRetriever:
 
 
 def import_graph_module(module_name):
-    if "app.shared.llm" not in sys.modules:
-        sys.modules["app.shared.llm"] = types.SimpleNamespace(get_model=lambda: None)
     return import_module(module_name)
 
 

@@ -15,6 +15,7 @@ from app.services.mfi_drafter.analysis import build_assessment_profile
 from app.services.mfi_drafter.narrative import (
     build_claim_catalog,
     build_qa_review,
+    compact_catalog,
     fallback_dimension_narrative,
     fallback_executive_narrative,
     fallback_market_narrative,
@@ -379,6 +380,80 @@ def test_deterministic_validator_makes_no_llm_call(monkeypatch, phase3_bundle):
         }
     )
     assert update["claim_validation"]["status"] == "passed"
+
+
+def test_red_team_v3_package_is_complete_deterministic_and_compact(
+    phase3_bundle,
+) -> None:
+    state = {
+        **phase3_bundle["result"],
+        "deterministic_flags": [],
+        "contextual_documents": [],
+    }
+    package = graph._build_red_team_review_package(state)
+    repeated = graph._build_red_team_review_package(copy.deepcopy(state))
+    assert package == repeated
+    assert package["contract_version"] == "mfi-red-team-input-v3"
+
+    claim_ids = [item["claim_id"] for item in package["claims"]]
+    assert claim_ids
+    assert len(claim_ids) == len(set(claim_ids))
+    cited_ids = {
+        str(metric_id)
+        for claim in package["claims"]
+        for metric_id in claim.get("metric_ids", [])
+    }
+    evidence_ids = {item["metric_id"] for item in package["cited_evidence"]}
+    assert evidence_ids == cited_ids & set(phase3_bundle["catalog"])
+
+    compact = json.dumps(package, sort_keys=True, separators=(",", ":"))
+    legacy = json.dumps(
+        {
+            "dimension_narratives": state["dimension_narratives"],
+            "market_narratives": state["market_narratives"],
+            "executive_summary": state["executive_summary_narrative"],
+            "cited_catalog": compact_catalog(
+                phase3_bundle["catalog"], sorted(cited_ids)
+            ),
+            "context_evidence": state["context_evidence"],
+            "limitations": phase3_bundle["profile"]["limitations"],
+            "deterministic_flags": [],
+        },
+        sort_keys=True,
+    )
+    assert len(compact) < len(legacy) * 0.85
+
+
+def test_red_team_v3_uses_operation_specific_timeout(
+    monkeypatch,
+    phase3_bundle,
+) -> None:
+    observed = {}
+
+    class Model:
+        def invoke(self, messages):
+            observed["prompt"] = messages[0].content
+            return type("Response", (), {"content": '{"flags": []}'})()
+
+    def model_factory(**kwargs):
+        observed["model_kwargs"] = kwargs
+        return Model()
+
+    monkeypatch.setattr(graph, "get_model", model_factory)
+    state = {
+        **phase3_bundle["result"],
+        "deterministic_flags": [],
+        "contextual_documents": [],
+        "llm_diagnostics": {},
+    }
+    update = graph.node_red_team(state)
+    assert observed["model_kwargs"]["timeout_seconds"] == 180.0
+    assert "REVIEW_PACKAGE_V3" in observed["prompt"]
+    call = update["llm_diagnostics"]["calls"][-1]
+    assert call["operation"] == "mfi.red_team_review.v3"
+    assert call["configured_timeout_seconds"] == 180.0
+    assert call["configured_max_retries"] == 2
+    assert update["generation_diagnostics"]["red_team_status"] == "completed"
 
 
 def test_schema_failure_interrupts_enabled_llm_stage(

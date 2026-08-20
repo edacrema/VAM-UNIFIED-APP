@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, Generic, Iterator, List, Literal, Mappin
 
 from pydantic import BaseModel, Field
 
+from app.shared.llm import llm_runtime_config
+
 
 TRACE_SCHEMA_VERSION = "1.0"
 
@@ -401,12 +403,19 @@ def _persist_payload(
     return f"gs://{bucket_name}/{object_name}"
 
 
-def _model_config() -> tuple[str, str, float, int]:
-    model = (os.getenv("LLM_MODEL") or "gemini-2.5-pro").strip()
-    location = (os.getenv("VERTEX_LOCATION") or "us-central1").strip()
-    timeout = 60.0
-    retries = 2
-    return model, location, timeout, retries
+def _model_config(
+    *,
+    timeout_seconds: Optional[float] = None,
+    max_retries: Optional[int] = None,
+) -> tuple[str, str, float, int]:
+    config = llm_runtime_config()
+    timeout = (
+        config.default_timeout_seconds
+        if timeout_seconds is None
+        else float(timeout_seconds)
+    )
+    retries = config.max_retries if max_retries is None else int(max_retries)
+    return config.model, config.location, timeout, retries
 
 
 class LLMTraceSession:
@@ -512,13 +521,18 @@ class LLMTraceSession:
         artifact_type: Optional[str],
         artifact_id: Optional[str],
         correction_attempt: int,
+        timeout_seconds: Optional[float],
+        max_retries: Optional[int],
     ) -> tuple[LLMCallDiagnostic, float, List[Dict[str, Any]]]:
         serialized_messages = serialize_messages(messages)
         prompt_text = "\n".join(
             json.dumps(item, ensure_ascii=False, sort_keys=True)
             for item in serialized_messages
         )
-        model, location, timeout, retries = _model_config()
+        model, location, timeout, retries = _model_config(
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
         with self._lock:
             sequence = len(self._calls) + 1
             call_id = f"llm-{sequence:04d}-{uuid.uuid4().hex[:8]}"
@@ -656,6 +670,8 @@ class LLMTraceSession:
         artifact_type: Optional[str] = None,
         artifact_id: Optional[str] = None,
         correction_attempt: int = 0,
+        timeout_seconds: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> TracedLLMResult[T]:
         diagnostic, started, serialized_messages = self._start_call(
             messages=messages,
@@ -664,6 +680,8 @@ class LLMTraceSession:
             artifact_type=artifact_type,
             artifact_id=artifact_id,
             correction_attempt=correction_attempt,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
         )
         private_payload: Dict[str, Any] = {
             "trace_schema_version": TRACE_SCHEMA_VERSION,
@@ -804,6 +822,8 @@ class LLMTraceSession:
         artifact_type: Optional[str] = None,
         artifact_id: Optional[str] = None,
         correction_attempt: int = 0,
+        timeout_seconds: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> TracedLLMResult[Any]:
         return self._invoke_text_impl(
             model=model,
@@ -814,6 +834,8 @@ class LLMTraceSession:
             artifact_type=artifact_type,
             artifact_id=artifact_id,
             correction_attempt=correction_attempt,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
         )
 
     def _invoke_text_impl(
@@ -827,6 +849,8 @@ class LLMTraceSession:
         artifact_type: Optional[str],
         artifact_id: Optional[str],
         correction_attempt: int,
+        timeout_seconds: Optional[float],
+        max_retries: Optional[int],
     ) -> TracedLLMResult[Any]:
         diagnostic, started, serialized_messages = self._start_call(
             messages=messages,
@@ -835,6 +859,8 @@ class LLMTraceSession:
             artifact_type=artifact_type,
             artifact_id=artifact_id,
             correction_attempt=correction_attempt,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
         )
         private_payload: Dict[str, Any] = {
             "trace_schema_version": TRACE_SCHEMA_VERSION,

@@ -6,6 +6,10 @@ Storage prefix that is not served by any report or artifact endpoint.
 
 ## Runtime configuration
 
+- `LLM_TIMEOUT_SECONDS=90`: per-attempt deadline for ordinary LLM calls.
+- `MFI_RED_TEAM_TIMEOUT_SECONDS=180`: per-attempt deadline for the compact MFI
+  Red-Team review.
+- `LLM_MAX_RETRIES=2`: provider retry limit shared by traced calls.
 - `LLM_TRACE_PAYLOADS=false` (default): structured call metadata only.
 - `LLM_TRACE_PAYLOADS=true`: persist gzip-compressed private payloads.
 - `LLM_TRACE_GCS_URI=gs://<private-bucket>/<optional-prefix>`: private storage
@@ -47,3 +51,8 @@ The `/info` and `/health` responses expose only whether capture and storage are
 configured, their configuration status, and the retention expectation. They do
 not expose the bucket name. Per-run diagnostics report persistence failures,
 which do not alter a successfully validated model response.
+
+Invalid timeout or retry settings fail report generation before an asynchronous
+run is created with stable code `llm_runtime_configuration_invalid`. The MFI
+Red-Team operation is `mfi.red_team_review.v3`; it receives one compact,
+canonical claim package and retains the existing structured flag response.

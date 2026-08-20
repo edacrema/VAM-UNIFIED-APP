@@ -182,7 +182,7 @@ def test_synchronous_dispatchers_map_llm_failures_to_502(monkeypatch):
             failure_code="llm_transport_error",
             call_id="llm-0001-sync",
             node="red_team",
-            operation="mfi.red_team_review.v2",
+            operation="mfi.red_team_review.v3",
             stage="transport",
         )
 
@@ -199,6 +199,51 @@ def test_synchronous_dispatchers_map_llm_failures_to_502(monkeypatch):
     )
     assert response.status_code == 502
     assert response.json()["detail"]["code"] == "llm_call_failed"
+
+
+def test_dispatcher_red_team_failure_sets_generation_status_failed(monkeypatch):
+    monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
+
+    def failed_generation(*, run_id, llm_trace_sink, **_kwargs):
+        llm_trace_sink(
+            {
+                "trace_schema_version": "1.0",
+                "service": "mfi-drafter",
+                "run_id": run_id,
+                "status": "failed",
+                "current_call_id": None,
+                "total_calls": 27,
+                "succeeded_calls": 26,
+                "failed_calls": 1,
+                "contract_failed_calls": 0,
+                "payload_capture_enabled": False,
+                "payload_storage_configured": False,
+                "payload_persistence_failures": 0,
+                "calls": [],
+            }
+        )
+        raise LLMCallError(
+            failure_code="llm_transport_error",
+            call_id="llm-0027-timeout",
+            node="red_team",
+            operation="mfi.red_team_review.v3",
+            stage="transport",
+        )
+
+    monkeypatch.setattr(dispatcher, "run_mfi_report_generation", failed_generation)
+    response = dispatcher._mfi_drafter_generate_async(
+        json_body={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+            "markets": ["Dangbo"],
+        }
+    )
+    run = async_runs.get_run(response.json()["run_id"])
+    assert run is not None and run.status == "failed"
+    assert run.current_node == "red_team"
+    assert run.progress_pct < 100
+    assert run.metadata["generation_diagnostics"]["red_team_status"] == "failed"
 
 
 def test_fastapi_synchronous_paths_map_llm_failures_to_502(monkeypatch):
@@ -285,6 +330,54 @@ def test_fastapi_async_mfi_public_and_graph_run_ids_match(monkeypatch):
     assert captured["run_id"] == public_run_id
     run = async_runs.get_run(public_run_id)
     assert run is not None and run.status == "completed"
+
+
+def test_fastapi_async_red_team_failure_sets_generation_status_failed(monkeypatch):
+    monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
+
+    def failed_generation(*, run_id, llm_trace_sink, **_kwargs):
+        llm_trace_sink(
+            {
+                "trace_schema_version": "1.0",
+                "service": "mfi-drafter",
+                "run_id": run_id,
+                "status": "failed",
+                "current_call_id": None,
+                "total_calls": 27,
+                "succeeded_calls": 26,
+                "failed_calls": 1,
+                "contract_failed_calls": 0,
+                "payload_capture_enabled": False,
+                "payload_storage_configured": False,
+                "payload_persistence_failures": 0,
+                "calls": [],
+            }
+        )
+        raise LLMCallError(
+            failure_code="llm_transport_error",
+            call_id="llm-0027-timeout",
+            node="red_team",
+            operation="mfi.red_team_review.v3",
+            stage="transport",
+        )
+
+    monkeypatch.setattr(mfi_router, "run_mfi_report_generation", failed_generation)
+    app = FastAPI()
+    app.include_router(mfi_router.router)
+    response = TestClient(app).post(
+        "/generate-async",
+        json={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+            "markets": ["Dangbo"],
+        },
+    )
+    assert response.status_code == 200
+    run = async_runs.get_run(response.json()["run_id"])
+    assert run is not None and run.status == "failed"
+    assert run.current_node == "red_team"
+    assert run.metadata["generation_diagnostics"]["red_team_status"] == "failed"
 
 
 def test_fastapi_async_market_public_and_graph_run_ids_match(monkeypatch):

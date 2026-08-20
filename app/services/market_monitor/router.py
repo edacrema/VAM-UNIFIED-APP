@@ -67,6 +67,7 @@ from app.shared.live_outputs import (
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import build_market_monitor_report_blocks
 from app.shared.llm_observability import LLMCallError, observability_config
+from app.shared.llm import llm_runtime_status
 from .i18n import resolve_report_language, t
 
 logger = logging.getLogger(__name__)
@@ -719,6 +720,7 @@ def get_service_info():
                        "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
         "llm_observability": trace_config.model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
         "features": {
             "second_food_basket": {
                 "enabled": second_basket_enabled,
@@ -907,6 +909,7 @@ def health_check():
         "status": "healthy",
         "service": "market-monitor",
         "llm_observability": observability_config().model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
     }
 
 

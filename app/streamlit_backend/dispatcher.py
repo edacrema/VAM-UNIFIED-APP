@@ -39,6 +39,11 @@ from app.shared.report_blocks import (
 )
 from app.shared.countries import supported_country_options
 from app.shared.llm_observability import LLMCallError, observability_config
+from app.shared.llm import (
+    LLMRuntimeConfigurationError,
+    llm_runtime_status,
+    require_llm_runtime_config,
+)
 
 from app.services.mfi_validator.graph import RAW_FILE_INDICATORS, run_troubleshooting as run_mfi_troubleshooting
 from app.services.mfi_drafter.data_loader import (
@@ -54,7 +59,11 @@ from app.services.mfi_drafter.features import (
     mfi_release_control,
     require_mfi_analysis_v2,
 )
-from app.services.mfi_drafter.graph import DIMENSION_DESCRIPTIONS, run_mfi_report_generation
+from app.services.mfi_drafter.graph import (
+    DIMENSION_DESCRIPTIONS,
+    reconcile_generation_diagnostics_for_llm_failure,
+    run_mfi_report_generation,
+)
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
 from app.services.market_monitor.graph import (
@@ -398,11 +407,29 @@ def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     return metadata
 
 
+def _record_mfi_llm_failure_metadata(run_id: str, error: LLMCallError) -> None:
+    run = get_run(run_id)
+    metadata = dict(getattr(run, "metadata", {}) or {})
+    update_run(
+        run_id,
+        metadata={
+            "generation_diagnostics": (
+                reconcile_generation_diagnostics_for_llm_failure(metadata, error)
+            )
+        },
+    )
+
+
 def _require_enabled_mfi_release_control():
     try:
-        return require_mfi_analysis_v2()
+        control = require_mfi_analysis_v2()
     except MFIAnalysisVersionDisabled as exc:
         raise LocalHTTPException(exc.status_code, exc.to_dict()) from exc
+    try:
+        require_llm_runtime_config()
+    except LLMRuntimeConfigurationError as exc:
+        raise LocalHTTPException(503, exc.to_public_dict()) from exc
+    return control
 
 
 def _build_mfi_report_output(
@@ -1117,6 +1144,7 @@ def _dispatch_mfi_drafter(
                 "generation_enabled": control.enabled,
                 "release_control": control.model_dump(),
                 "llm_observability": observability_config().model_dump(),
+                "llm_runtime": llm_runtime_status().model_dump(),
             }
         )
     if method == "GET" and parts == ["dimensions"]:
@@ -1379,6 +1407,8 @@ def _mfi_drafter_generate_from_csv_async(
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
         except Exception as exc:
+            if isinstance(exc, LLMCallError):
+                _record_mfi_llm_failure_metadata(run_id, exc)
             tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
             current_node = (
                 exc.node
@@ -1511,6 +1541,8 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
             update_run(run_id, warnings=result.get("warnings", []))
             set_run_completed(run_id, result=result)
         except Exception as exc:
+            if isinstance(exc, LLMCallError):
+                _record_mfi_llm_failure_metadata(run_id, exc)
             tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
             current_node = (
                 exc.node
@@ -1626,6 +1658,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
         "llm_observability": observability_config().model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -1800,6 +1833,7 @@ def _dispatch_market_monitor(
                 "status": "healthy",
                 "service": "market-monitor",
                 "llm_observability": observability_config().model_dump(),
+                "llm_runtime": llm_runtime_status().model_dump(),
             }
         )
     if method == "GET" and parts == ["countries"]:
@@ -2265,6 +2299,7 @@ def _market_monitor_info() -> Dict[str, Any]:
         "Includes optional modules such as exchange rate analysis.",
         "version": "1.0.0",
         "llm_observability": observability_config().model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
         "features": {
             "second_food_basket": {
                 "enabled": second_basket_enabled,

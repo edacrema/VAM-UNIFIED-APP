@@ -4,6 +4,8 @@ import asyncio
 import json
 import re
 
+import pytest
+
 from app.services.mfi_drafter import graph, router
 from app.services.mfi_drafter.claim_identity import (
     CLAIM_IDENTITY_AUTHORITY,
@@ -22,6 +24,8 @@ from app.services.mfi_drafter.narrative import (
     NARRATIVE_DENSITY_POLICY,
     apply_narrative_density_policy,
     apply_unresolved_claim_policy,
+    fallback_executive_narrative,
+    fallback_market_narrative,
     parse_context_evidence,
     parse_dimension_narrative,
     parse_executive_narrative,
@@ -92,6 +96,84 @@ def test_market_context_tokens_prevent_slug_case_and_unicode_collisions() -> Non
     tokens = [context_token(name) for name in names]
     assert len(tokens) == len(set(tokens))
     assert all(token.startswith("cafe_") for token in tokens)
+
+
+@pytest.mark.parametrize("market_name", ["Dangbo", "Café"])
+def test_market_limitations_use_the_canonical_singular_identity_token(
+    market_name: str,
+) -> None:
+    market = {
+        "market_name": market_name,
+        "region": "Region A",
+        "overall_mfi": 4.5,
+        "score_rank": 1,
+        "weak_dimensions": ["Price"],
+        "priority_issues": [_model_claim("Issue.", scope="market")],
+        "recommended_interventions": [
+            _model_claim("Intervention.", scope="market")
+        ],
+        "limitations": [
+            {
+                **_model_claim("Market-specific limitation.", scope="market"),
+                "metric_ids": ["market.coverage"],
+            }
+        ],
+        "modality_consideration": None,
+    }
+    _dimensions, markets, _executive, _context = (
+        canonicalize_narrative_identities(
+            dimension_narratives={},
+            market_narratives={market_name: market},
+            executive_narrative={},
+        )
+    )
+    limitation_id = markets[market_name]["limitations"][0]["claim_id"]
+    assert limitation_id == market_claim_id(market_name, "limitation", 1)
+    assert ".limitations." not in limitation_id
+    index = canonical_claim_index({}, markets, {}, [])
+    assert limitation_id in index
+
+
+def test_localized_market_identity_failure_preserves_other_llm_artifacts() -> None:
+    profile = {
+        "dimensions": [],
+        "markets": [_market_profile("Dangbo"), _market_profile("Café")],
+        "priority_market_names": ["Dangbo", "Café"],
+        "priority_dimension_names": [],
+        "limitations": [],
+        "metric_ledger": {},
+    }
+    valid_market = {
+        **fallback_market_narrative(_market_profile("Café")),
+    }
+    valid_market["priority_issues"][0]["text"] = "Preserve this LLM-authored issue."
+    malformed_market = fallback_market_narrative(_market_profile("Dangbo"))
+    malformed_market["priority_issues"] = ["malformed claim"]
+    result = graph.node_deterministic_claim_validator(
+        {
+            "assessment_profile": profile,
+            "claim_catalog": {},
+            "contextual_documents": [],
+            "context_evidence": [],
+            "dimension_narratives": {},
+            "market_narratives": {
+                "Dangbo": malformed_market,
+                "Café": valid_market,
+            },
+            "executive_summary_narrative": fallback_executive_narrative(profile),
+            "generation_diagnostics": {},
+        }
+    )
+    assert result["market_narratives"]["Café"]["priority_issues"][0][
+        "text"
+    ] == "Preserve this LLM-authored issue."
+    assert result["generation_diagnostics"]["identity_fallback_artifacts"] == [
+        "market:Dangbo"
+    ]
+    assert any(
+        flag.get("code") == "claim_identity_contract_failure"
+        for flag in result["deterministic_flags"]
+    )
 
 
 def test_all_initial_model_identifiers_are_ignored_and_globally_unique() -> None:
@@ -329,7 +411,12 @@ class _RepeatedIdModel:
                 "recommended_interventions": [
                     claim("Triangulate this market evidence.", "market")
                 ],
-                "limitations": [],
+                "limitations": [
+                    claim(
+                        "This market interpretation is limited to the cited evidence.",
+                        "market",
+                    )
+                ],
             }
         elif "structured executive summary" in prompt:
             payload = {
@@ -354,7 +441,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     monkeypatch,
 ) -> None:
     loaded = build_loaded(SyntheticSpec(market_count=1, region_count=1))
-    monkeypatch.setattr(graph, "get_model", lambda: _RepeatedIdModel())
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: _RepeatedIdModel())
     monkeypatch.setattr(
         graph,
         "node_context_retrieval",
@@ -397,6 +484,11 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     assert index
     assert "stable id" not in index
     assert result["generation_diagnostics"]["ignored_model_identifier_count"] > 0
+    assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
+    assert result["generation_diagnostics"]["red_team_status"] == "completed"
+    assert result["llm_diagnostics"]["calls"][-1]["operation"] == (
+        "mfi.red_team_review.v3"
+    )
     assert result["correction_attempts"] == 3
     assert result["generation_diagnostics"]["delivery_contract_status"] in {
         "validated",

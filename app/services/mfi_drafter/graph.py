@@ -19,7 +19,18 @@ import random
 import logging
 from copy import deepcopy
 from math import pi
-from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional, Callable
+from typing import (
+    TypedDict,
+    Annotated,
+    Literal,
+    List,
+    Dict,
+    Any,
+    Optional,
+    Callable,
+    Mapping,
+    Sequence,
+)
 
 import operator
 from collections import Counter
@@ -29,8 +40,9 @@ import numpy as np
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
 
-from app.shared.llm import get_model
+from app.shared.llm import get_model, llm_runtime_config, require_llm_runtime_config
 from app.shared.llm_observability import (
+    LLMCallError,
     TraceSink,
     get_trace_session,
     llm_trace_session,
@@ -292,6 +304,17 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("ignored_model_identifier_count", 0)
     diagnostics.setdefault("identity_fallback_artifacts", [])
     diagnostics.setdefault("delivery_contract_status", "not_validated")
+    return diagnostics
+
+
+def reconcile_generation_diagnostics_for_llm_failure(
+    metadata: Mapping[str, Any],
+    error: LLMCallError,
+) -> Dict[str, Any]:
+    """Return the live generation diagnostics implied by a failed LLM node."""
+    diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
+    if error.node == "red_team":
+        diagnostics["red_team_status"] = "failed"
     return diagnostics
 
 
@@ -2039,10 +2062,12 @@ def _identity_failure_flag(error: MFIClaimIdentityError) -> Dict[str, Any]:
 
 def _deterministic_identity_fallbacks(
     state: MFIReportState,
+    *,
+    affected_artifacts: Optional[Sequence[str]] = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], List[str]]:
-    """Build a fully application-owned narrative set after an internal ID breach."""
+    """Replace only safely identified artifacts, or the complete narrative set."""
     profile = state.get("assessment_profile") or {}
-    dimensions = {
+    fallback_dimensions = {
         str(item["dimension"]): fallback_dimension_narrative(
             item,
             assessment_profile=profile,
@@ -2051,17 +2076,57 @@ def _deterministic_identity_fallbacks(
         if isinstance(item, dict) and item.get("dimension")
     }
     priority_names = set(profile.get("priority_market_names", []) or [])
-    markets = {
+    fallback_markets = {
         str(item["market_name"]): fallback_market_narrative(item)
         for item in profile.get("markets", []) or []
         if isinstance(item, dict) and item.get("market_name") in priority_names
     }
-    executive = fallback_executive_narrative(profile)
-    # Context is omitted under an internal identity breach because a high-severity
-    # statement may itself be the malformed artifact. Raw statements remain in the
-    # technical graph trace; none is allowed back into reader-facing fallback content.
+    fallback_executive = fallback_executive_narrative(profile)
     had_context = bool(state.get("context_evidence", []) or [])
-    context: List[Dict[str, Any]] = []
+    valid_tokens = {
+        *[f"dimension:{name}" for name in fallback_dimensions],
+        *[f"market:{name}" for name in fallback_markets],
+        "executive_summary",
+        "context",
+    }
+    requested = {
+        str(item) for item in affected_artifacts or [] if str(item).strip()
+    }
+    localized = bool(requested) and requested <= valid_tokens and "global" not in requested
+
+    if localized:
+        dimensions = deepcopy(dict(state.get("dimension_narratives", {}) or {}))
+        markets = deepcopy(dict(state.get("market_narratives", {}) or {}))
+        executive = deepcopy(dict(state.get("executive_summary_narrative", {}) or {}))
+        context = deepcopy(list(state.get("context_evidence", []) or []))
+        replaced: List[str] = []
+        for token in sorted(requested):
+            if token.startswith("dimension:"):
+                name = token.split(":", 1)[1]
+                dimensions[name] = fallback_dimensions[name]
+            elif token.startswith("market:"):
+                name = token.split(":", 1)[1]
+                markets[name] = fallback_markets[name]
+            elif token == "executive_summary":
+                executive = fallback_executive
+            elif token == "context":
+                # Context is one report artifact. If its identity is malformed, omit
+                # it from reader-facing delivery while retaining the raw technical data.
+                context = []
+            replaced.append(token)
+    else:
+        dimensions = fallback_dimensions
+        markets = fallback_markets
+        executive = fallback_executive
+        context = []
+        replaced = [
+            *[f"dimension:{name}" for name in dimensions],
+            *[f"market:{name}" for name in markets],
+            "executive_summary",
+        ]
+        if had_context:
+            replaced.append("context")
+
     dimensions, markets, executive, context = canonicalize_narrative_identities(
         dimension_narratives=dimensions,
         market_narratives=markets,
@@ -2069,14 +2134,21 @@ def _deterministic_identity_fallbacks(
         context_evidence=context,
         preserve_context_ids=False,
     )
-    artifacts = [
-        *[f"dimension:{name}" for name in dimensions],
-        *[f"market:{name}" for name in markets],
-        "executive_summary",
-    ]
-    if had_context:
-        artifacts.append("context")
-    return dimensions, markets, executive, context, artifacts
+    return dimensions, markets, executive, context, sorted(replaced)
+
+
+def _identity_fallbacks_for_error(
+    state: MFIReportState,
+    error: MFIClaimIdentityError,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], List[str]]:
+    """Prefer artifact-scoped fallback and fail safely to the complete set."""
+    try:
+        return _deterministic_identity_fallbacks(
+            state,
+            affected_artifacts=error.artifacts,
+        )
+    except (KeyError, MFIClaimIdentityError, TypeError, ValueError):
+        return _deterministic_identity_fallbacks(state)
 
 def node_deterministic_claim_validator(state: MFIReportState) -> dict:
     """Validate every narrative claim against the closed evidence catalog."""
@@ -2103,7 +2175,7 @@ def node_deterministic_claim_validator(state: MFIReportState) -> dict:
     except MFIClaimIdentityError as exc:
         identity_flag = _identity_failure_flag(exc)
         dimensions, markets, executive, context, artifacts = (
-            _deterministic_identity_fallbacks(state)
+            _identity_fallbacks_for_error(state, exc)
         )
         diagnostics["identity_fallback_artifacts"] = sorted(
             set(diagnostics.get("identity_fallback_artifacts", [])) | set(artifacts)
@@ -2141,26 +2213,325 @@ def node_deterministic_claim_validator(state: MFIReportState) -> dict:
     }
 
 
-def _cited_catalog(
+_RED_TEAM_CLAIM_FIELDS = (
+    "summary",
+    "key_findings",
+    "geographic_patterns",
+    "data_limitations",
+    "recommendations",
+    "priority_issues",
+    "recommended_interventions",
+    "limitations",
+    "motivation",
+    "scope_statement",
+)
+
+
+def _red_team_claim_rows(
     state: MFIReportState,
-) -> Dict[str, Dict[str, Any]]:
-    cited: set[str] = set()
+) -> List[Dict[str, Any]]:
+    """Flatten canonical narratives into one stable, non-duplicated claim manifest."""
+    rows: List[Dict[str, Any]] = []
 
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            metric_ids = value.get("metric_ids")
-            if isinstance(metric_ids, list):
-                cited.update(str(item) for item in metric_ids if item)
-            for nested in value.values():
-                visit(nested)
-        elif isinstance(value, list):
-            for nested in value:
-                visit(nested)
+    def add_claim(
+        claim: Mapping[str, Any],
+        *,
+        artifact_type: str,
+        artifact_id: str,
+        field_name: str,
+        position: int,
+        subdimension_name: Optional[str] = None,
+    ) -> None:
+        row: Dict[str, Any] = {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "field_name": field_name,
+            "position": position,
+            "claim_id": claim.get("claim_id"),
+            "text": claim.get("text"),
+            "scope": claim.get("scope"),
+            "polarity": claim.get("polarity"),
+            "metric_ids": list(claim.get("metric_ids") or []),
+            "document_ids": list(claim.get("document_ids") or []),
+        }
+        if subdimension_name:
+            row["subdimension_name"] = subdimension_name
+        rows.append(row)
 
-    visit(state.get("dimension_narratives", {}))
-    visit(state.get("market_narratives", {}))
-    visit(state.get("executive_summary_narrative", {}))
-    return compact_catalog(state.get("claim_catalog", {}), sorted(cited))
+    def add_artifact(
+        narrative: Mapping[str, Any],
+        *,
+        artifact_type: str,
+        artifact_id: str,
+    ) -> None:
+        for field_name in _RED_TEAM_CLAIM_FIELDS:
+            value = narrative.get(field_name)
+            if isinstance(value, Mapping) and value.get("claim_id"):
+                add_claim(
+                    value,
+                    artifact_type=artifact_type,
+                    artifact_id=artifact_id,
+                    field_name=field_name,
+                    position=1,
+                )
+            elif isinstance(value, list):
+                for position, claim in enumerate(value, start=1):
+                    if isinstance(claim, Mapping) and claim.get("claim_id"):
+                        add_claim(
+                            claim,
+                            artifact_type=artifact_type,
+                            artifact_id=artifact_id,
+                            field_name=field_name,
+                            position=position,
+                        )
+        for position, subdimension in enumerate(
+            narrative.get("subdimension_analysis") or [],
+            start=1,
+        ):
+            if not isinstance(subdimension, Mapping):
+                continue
+            interpretation = subdimension.get("interpretation")
+            if isinstance(interpretation, Mapping) and interpretation.get("claim_id"):
+                add_claim(
+                    interpretation,
+                    artifact_type=artifact_type,
+                    artifact_id=artifact_id,
+                    field_name="subdimension_analysis",
+                    position=position,
+                    subdimension_name=str(subdimension.get("name") or ""),
+                )
+
+    profile = state.get("assessment_profile") or {}
+    dimensions = state.get("dimension_narratives", {}) or {}
+    dimension_order = [
+        str(item.get("dimension"))
+        for item in profile.get("dimensions", []) or []
+        if isinstance(item, Mapping) and item.get("dimension") in dimensions
+    ]
+    dimension_order.extend(
+        sorted(str(key) for key in dimensions if str(key) not in dimension_order)
+    )
+    for name in dimension_order:
+        narrative = dimensions.get(name)
+        if isinstance(narrative, Mapping):
+            add_artifact(
+                narrative,
+                artifact_type="dimension",
+                artifact_id=name,
+            )
+
+    markets = state.get("market_narratives", {}) or {}
+    market_order = [
+        str(name)
+        for name in profile.get("priority_market_names", []) or []
+        if name in markets
+    ]
+    market_order.extend(
+        sorted(
+            (str(key) for key in markets if str(key) not in market_order),
+            key=lambda value: (value.casefold(), value),
+        )
+    )
+    for name in market_order:
+        narrative = markets.get(name)
+        if isinstance(narrative, Mapping):
+            add_artifact(
+                narrative,
+                artifact_type="market",
+                artifact_id=name,
+            )
+
+    executive = state.get("executive_summary_narrative", {}) or {}
+    if isinstance(executive, Mapping):
+        add_artifact(
+            executive,
+            artifact_type="executive_summary",
+            artifact_id="executive_summary",
+        )
+
+    claim_ids = [str(row.get("claim_id") or "") for row in rows]
+    if not all(claim_ids) or len(claim_ids) != len(set(claim_ids)):
+        raise MFIClaimIdentityError(
+            "Red-Team input requires non-empty globally unique claim identities.",
+            artifacts=["global"],
+        )
+    return rows
+
+
+def _red_team_evidence(
+    catalog: Mapping[str, Mapping[str, Any]],
+    claims: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    cited = sorted(
+        {
+            str(metric_id)
+            for claim in claims
+            for metric_id in claim.get("metric_ids", []) or []
+            if metric_id
+        }
+    )
+    evidence: List[Dict[str, Any]] = []
+    for metric_id in cited:
+        entry = catalog.get(metric_id)
+        if not isinstance(entry, Mapping):
+            continue
+        item: Dict[str, Any] = {
+            "metric_id": metric_id,
+            "label": entry.get("label"),
+            "value": entry.get("formatted_value"),
+            "unit": entry.get("unit"),
+            "orientation": entry.get("orientation"),
+            "scope": entry.get("scope"),
+            "coverage": entry.get("coverage_label"),
+            "sources": list(entry.get("source_metric_ids") or []),
+        }
+        location = {
+            key: entry.get(key)
+            for key in ("dimension", "market_name", "region")
+            if entry.get(key) is not None
+        }
+        if location:
+            item["location"] = location
+        representation_kind = str(entry.get("representation_kind") or "none")
+        representation_required = bool(entry.get("representation_required"))
+        representation_complete = bool(entry.get("representation_complete"))
+        if representation_required or representation_kind not in {"none", "fixed_metric"}:
+            item["representation"] = {
+                "kind": representation_kind,
+                "complete": representation_complete,
+                "required": representation_required,
+            }
+        evidence.append(item)
+    return evidence
+
+
+def _compact_red_team_flag(flag: Mapping[str, Any]) -> Dict[str, Any]:
+    fields = (
+        "flag_id",
+        "source",
+        "code",
+        "severity",
+        "artifact_type",
+        "artifact_id",
+        "field_name",
+        "claim_id",
+        "message",
+        "recommendation",
+        "metric_ids",
+        "document_ids",
+        "repairable",
+    )
+    return {field: flag.get(field) for field in fields}
+
+
+def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
+    """Build the complete but compact deterministic Red-Team v3 input contract."""
+    claims = _red_team_claim_rows(state)
+    profile = state.get("assessment_profile") or {}
+    dimension_profiles = {
+        str(item.get("dimension")): item
+        for item in profile.get("dimensions", []) or []
+        if isinstance(item, Mapping) and item.get("dimension")
+    }
+    market_profiles = {
+        str(item.get("market_name")): item
+        for item in profile.get("markets", []) or []
+        if isinstance(item, Mapping) and item.get("market_name")
+    }
+    dimensions = [
+        {
+            "dimension": name,
+            "is_priority": bool(dimension_profiles.get(name, {}).get("is_priority")),
+            "rank": dimension_profiles.get(name, {}).get("profile_rank"),
+        }
+        for name in profile.get("priority_dimension_names", []) or []
+    ]
+    markets = [
+        {
+            "market_name": name,
+            "score_rank": market_profiles.get(name, {}).get("score_rank"),
+            "selection_order": market_profiles.get(name, {}).get("selection_order"),
+            "weak_dimensions": [
+                item.get("dimension")
+                for item in market_profiles.get(name, {}).get("weak_dimensions", []) or []
+                if isinstance(item, Mapping) and item.get("dimension")
+            ],
+        }
+        for name in profile.get("priority_market_names", []) or []
+    ]
+
+    documents_by_id = {
+        str(item.get("doc_id")): item
+        for item in state.get("contextual_documents", []) or []
+        if isinstance(item, Mapping) and item.get("doc_id")
+    }
+    contexts: List[Dict[str, Any]] = []
+    cited_document_ids: set[str] = set()
+    for statement in state.get("context_evidence", []) or []:
+        if not isinstance(statement, Mapping):
+            continue
+        document_ids = [
+            str(item)
+            for item in statement.get("document_ids", []) or []
+            if str(item) in documents_by_id
+        ]
+        if statement.get("classification") == "unrelated" or not document_ids:
+            continue
+        cited_document_ids.update(document_ids)
+        contexts.append(
+            {
+                "statement_id": statement.get("statement_id"),
+                "text": statement.get("text"),
+                "classification": statement.get("classification"),
+                "document_ids": document_ids,
+            }
+        )
+    documents = [
+        {
+            "document_id": document_id,
+            "title": documents_by_id[document_id].get("title"),
+            "date": documents_by_id[document_id].get("date"),
+            "source": documents_by_id[document_id].get("source"),
+        }
+        for document_id in sorted(cited_document_ids)
+    ]
+    limitations = [
+        {
+            key: item.get(key)
+            for key in (
+                "code",
+                "severity",
+                "message",
+                "dimension",
+                "market_name",
+                "region",
+                "metric_ids",
+            )
+        }
+        for item in profile.get("limitations", []) or []
+        if isinstance(item, Mapping)
+    ]
+    return {
+        "contract_version": "mfi-red-team-input-v3",
+        "claims": claims,
+        "priority_context": {
+            "dimensions": dimensions,
+            "markets": markets,
+        },
+        "cited_evidence": _red_team_evidence(
+            state.get("claim_catalog", {}) or {},
+            claims,
+        ),
+        "context_statements": contexts,
+        "cited_documents": documents,
+        "limitations": limitations,
+        "deterministic_flags": [
+            _compact_red_team_flag(item)
+            for item in state.get("deterministic_flags", []) or []
+            if isinstance(item, Mapping)
+        ],
+        "prohibitions": list(NARRATIVE_PROHIBITIONS),
+    }
 
 
 def node_red_team(state: MFIReportState) -> dict:
@@ -2173,38 +2544,26 @@ def node_red_team(state: MFIReportState) -> dict:
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
+    review_package = _build_red_team_review_package(state)
+    assert review_package["prohibitions"] == list(NARRATIVE_PROHIBITIONS)
+    review_json = json.dumps(
+        review_package,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     prompt = f"""Red-Team this structured MFI assessment narrative.
 
-Use English only. Review the structured artifacts against the cited catalog,
+Use English only. Review every claim against the supplied cited evidence,
 deterministic flags, context classifications, and limitations. Check semantic
 interpretation, polarity, scope, coverage qualification, recommendation
 linkage, unsupported causal or affordability claims, priority drill-downs,
 and any conclusion about transfer modality. Do not invent new facts or
-recalculate values. Return valid JSON only.
+recalculate values. The package is complete: do not request omitted report or
+rendering metadata. Return valid JSON only.
 
-PROHIBITIONS:
-{json.dumps(list(NARRATIVE_PROHIBITIONS))}
-
-DIMENSION_NARRATIVES:
-{json.dumps(state.get('dimension_narratives', {}))}
-
-MARKET_NARRATIVES:
-{json.dumps(state.get('market_narratives', {}))}
-
-EXECUTIVE_SUMMARY:
-{json.dumps(state.get('executive_summary_narrative', {}))}
-
-CITED_CATALOG:
-{json.dumps(_cited_catalog(state))}
-
-CONTEXT_EVIDENCE:
-{json.dumps(state.get('context_evidence', []))}
-
-LIMITATIONS:
-{json.dumps((state.get('assessment_profile') or {}).get('limitations', []))}
-
-DETERMINISTIC_FLAGS:
-{json.dumps(state.get('deterministic_flags', []))}
+REVIEW_PACKAGE_V3:
+{review_json}
 
 Return:
 {{"flags": [{{
@@ -2269,15 +2628,21 @@ Return:
                 raise ValueError(f"flags[{index}].repairable must be boolean")
         return normalize_red_team_flags(payload)
 
+    runtime = llm_runtime_config()
     traced = trace.invoke_json(
-        model=get_model(),
+        model=get_model(
+            timeout_seconds=runtime.mfi_red_team_timeout_seconds,
+            max_retries=runtime.max_retries,
+        ),
         messages=[HumanMessage(content=prompt)],
         node="red_team",
-        operation="mfi.red_team_review.v2",
+        operation="mfi.red_team_review.v3",
         artifact_type="global",
         artifact_id="qa_review",
         correction_attempt=int(state.get("correction_attempts", 0) or 0),
         validator=_validate_red_team,
+        timeout_seconds=runtime.mfi_red_team_timeout_seconds,
+        max_retries=runtime.max_retries,
     )
     flags = traced.value
     llm_calls = 1
@@ -2790,7 +3155,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             canonical_executive,
             canonical_context,
             artifacts,
-        ) = _deterministic_identity_fallbacks(state)
+        ) = _identity_fallbacks_for_error(state, exc)
         identity_flag = _identity_failure_flag(exc)
         if not any(
             flag.get("code") == identity_flag["code"]
@@ -3183,6 +3548,7 @@ def run_mfi_report_generation(
         Stato finale con report completo
     """
     control = require_mfi_analysis_v2(release_control)
+    runtime = require_llm_runtime_config()
     logger.info(
         "MFI Drafter 2.0 generation started",
         extra={
@@ -3190,6 +3556,9 @@ def run_mfi_report_generation(
             "mfi_analysis_version": control.analysis_version,
             "mfi_deployment_revision": control.deployment_revision,
             "mfi_country": country,
+            "mfi_llm_timeout_seconds": runtime.default_timeout_seconds,
+            "mfi_red_team_timeout_seconds": runtime.mfi_red_team_timeout_seconds,
+            "mfi_llm_max_retries": runtime.max_retries,
         },
     )
     initial_state = create_initial_state(

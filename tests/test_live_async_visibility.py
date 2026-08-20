@@ -1,8 +1,4 @@
-import sys
-import types
 from contextlib import nullcontext
-
-sys.modules.setdefault("app.shared.llm", types.SimpleNamespace(get_model=lambda: None))
 
 from app.shared import async_runs
 from app.services.market_monitor.price_backfill import (

@@ -166,7 +166,7 @@ def test_started_snapshot_is_visible_before_blocking_model_returns():
             model=BlockingModel(),
             messages=[{"role": "user", "content": "prompt"}],
             node="red_team",
-            operation="mfi.red_team_review.v2",
+            operation="mfi.red_team_review.v3",
         )
     )
     thread.start()

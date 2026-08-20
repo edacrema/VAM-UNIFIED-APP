@@ -113,33 +113,35 @@ def canonicalize_narrative_identities(
     for key, narrative in dimensions.items():
         if not isinstance(narrative, MutableMapping):
             raise MFIClaimIdentityError(
-                "Dimension narrative must be an object.", artifacts=[str(key)]
+                "Dimension narrative must be an object.",
+                artifacts=[f"dimension:{key}"],
             )
         dimension = str(narrative.get("dimension") or key)
+        artifact = f"dimension:{dimension}"
         _assign_single(
             narrative,
             "summary",
             dimension_claim_id(dimension, "summary", 1),
-            artifact=dimension,
+            artifact=artifact,
             required=False,
         )
         _assign_list(
             narrative,
             "key_findings",
             lambda position: dimension_claim_id(dimension, "finding", position),
-            artifact=dimension,
+            artifact=artifact,
         )
         _assign_list(
             narrative,
             "geographic_patterns",
             lambda position: dimension_claim_id(dimension, "geography", position),
-            artifact=dimension,
+            artifact=artifact,
         )
         _assign_list(
             narrative,
             "data_limitations",
             lambda position: dimension_claim_id(dimension, "limitation", position),
-            artifact=dimension,
+            artifact=artifact,
         )
         _assign_list(
             narrative,
@@ -147,7 +149,7 @@ def canonicalize_narrative_identities(
             lambda position: dimension_claim_id(
                 dimension, "recommendation", position
             ),
-            artifact=dimension,
+            artifact=artifact,
         )
         for position, subdimension in enumerate(
             narrative.get("subdimension_analysis") or [], start=1
@@ -155,27 +157,29 @@ def canonicalize_narrative_identities(
             if not isinstance(subdimension, MutableMapping):
                 raise MFIClaimIdentityError(
                     "Subdimension narrative must be an object.",
-                    artifacts=[dimension],
+                    artifacts=[artifact],
                 )
             interpretation = subdimension.get("interpretation")
             if not isinstance(interpretation, MutableMapping):
                 raise MFIClaimIdentityError(
                     "Subdimension interpretation must be a claim object.",
-                    artifacts=[dimension],
+                    artifacts=[artifact],
                 )
             interpretation["claim_id"] = subdimension_claim_id(dimension, position)
 
     for key, narrative in markets.items():
         if not isinstance(narrative, MutableMapping):
             raise MFIClaimIdentityError(
-                "Market narrative must be an object.", artifacts=[str(key)]
+                "Market narrative must be an object.",
+                artifacts=[f"market:{key}"],
             )
         market_name = str(narrative.get("market_name") or key)
+        artifact = f"market:{market_name}"
         _assign_list(
             narrative,
             "priority_issues",
             lambda position: market_claim_id(market_name, "issue", position),
-            artifact=market_name,
+            artifact=artifact,
         )
         _assign_list(
             narrative,
@@ -183,13 +187,13 @@ def canonicalize_narrative_identities(
             lambda position: market_claim_id(
                 market_name, "intervention", position
             ),
-            artifact=market_name,
+            artifact=artifact,
         )
         _assign_list(
             narrative,
             "limitations",
             lambda position: market_claim_id(market_name, "limitation", position),
-            artifact=market_name,
+            artifact=artifact,
         )
         # Retained only in the API model for compatibility; R8 keeps it null. If an
         # older in-memory artifact supplies one, it still receives application identity.
@@ -197,7 +201,7 @@ def canonicalize_narrative_identities(
             narrative,
             "modality_consideration",
             market_claim_id(market_name, "modality_consideration", 1),
-            artifact=market_name,
+            artifact=artifact,
             required=False,
         )
 
@@ -368,7 +372,7 @@ def canonical_claim_index(
     if missing or duplicates:
         raise MFIClaimIdentityError(
             "Canonical claim IDs must be non-empty and globally unique.",
-            artifacts=[*missing, *duplicates],
+            artifacts=[*missing, *(["global"] if duplicates else [])],
         )
     return index
 
@@ -419,6 +423,7 @@ def _expected_id(
         field = {
             "priority_issues": "issue",
             "recommended_interventions": "intervention",
+            "limitations": "limitation",
         }.get(location.field_name, location.field_name)
         return market_claim_id(market_name, field, location.position)
     field = {

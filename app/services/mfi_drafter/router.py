@@ -10,7 +10,10 @@ from typing import Optional, Any, Dict, List
 import json
 import logging
 
-from .graph import run_mfi_report_generation
+from .graph import (
+    reconcile_generation_diagnostics_for_llm_failure,
+    run_mfi_report_generation,
+)
 from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .compatibility import canonical_and_legacy_response_fields
 from .context_status import not_attempted_context_status
@@ -43,6 +46,11 @@ from app.shared.live_outputs import (
 from app.shared.docx_export import build_content_disposition, build_docx_bytes_from_report_blocks
 from app.shared.report_blocks import resolve_mfi_report_blocks
 from app.shared.llm_observability import LLMCallError, observability_config
+from app.shared.llm import (
+    LLMRuntimeConfigurationError,
+    llm_runtime_status,
+    require_llm_runtime_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +120,29 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     return metadata
 
 
+def _record_llm_failure_metadata(run_id: str, error: LLMCallError) -> None:
+    run = get_run(run_id)
+    metadata = dict(getattr(run, "metadata", {}) or {})
+    update_run(
+        run_id,
+        metadata={
+            "generation_diagnostics": (
+                reconcile_generation_diagnostics_for_llm_failure(metadata, error)
+            )
+        },
+    )
+
+
 def _require_enabled_release_control():
     try:
-        return require_mfi_analysis_v2()
+        control = require_mfi_analysis_v2()
     except MFIAnalysisVersionDisabled as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_dict())
+    try:
+        require_llm_runtime_config()
+    except LLMRuntimeConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=exc.to_public_dict()) from exc
+    return control
 
 def _build_mfi_output(
     *,
@@ -459,6 +485,8 @@ async def generate_mfi_report_from_csv_async(
         except Exception as e:
             import traceback
 
+            if isinstance(e, LLMCallError):
+                _record_llm_failure_metadata(run_id, e)
             tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
             current_node = (
                 e.node
@@ -559,6 +587,8 @@ async def generate_mfi_report_async(
         except Exception as e:
             import traceback
 
+            if isinstance(e, LLMCallError):
+                _record_llm_failure_metadata(run_id, e)
             tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
             current_node = (
                 e.node
@@ -683,6 +713,7 @@ def get_service_info():
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
         "llm_observability": trace_config.model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -771,6 +802,7 @@ def health_check():
         "generation_enabled": release_control.enabled,
         "release_control": release_control.model_dump(),
         "llm_observability": trace_config.model_dump(),
+        "llm_runtime": llm_runtime_status().model_dump(),
     }
 
 
