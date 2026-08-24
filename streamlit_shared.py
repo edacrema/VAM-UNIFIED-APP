@@ -823,10 +823,11 @@ def render_llm_diagnostics(diagnostics: Any, *, live: bool = False) -> None:
         elapsed_label = f"{elapsed:.1f}s" if elapsed is not None else "in progress"
         st.info(f"Current LLM operation: {operation} ({elapsed_label})")
 
-    counters = st.columns(3)
+    counters = st.columns(4)
     counters[0].metric("Completed LLM calls", str(diagnostics.get("succeeded_calls") or 0))
-    counters[1].metric("Failed LLM calls", str(diagnostics.get("failed_calls") or 0))
-    counters[2].metric(
+    counters[1].metric("Recovered JSON calls", str(diagnostics.get("recovered_calls") or 0))
+    counters[2].metric("Failed LLM calls", str(diagnostics.get("failed_calls") or 0))
+    counters[3].metric(
         "Contract failures", str(diagnostics.get("contract_failed_calls") or 0)
     )
 
@@ -855,6 +856,9 @@ def render_llm_diagnostics(diagnostics: Any, *, live: bool = False) -> None:
                     "Duration (ms)": call.get("duration_ms"),
                     "Model": call.get("model"),
                     "Failure code": call.get("failure_code") or "—",
+                    "JSON roots": call.get("json_root_value_count"),
+                    "Trailing chars": call.get("json_trailing_character_count"),
+                    "Disposition": call.get("disposition") or "—",
                 }
             )
         st.dataframe(rows, hide_index=True, width="stretch")

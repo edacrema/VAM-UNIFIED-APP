@@ -68,6 +68,7 @@ from .schemas import (
     MFI_DIMENSIONS,
     MFICorrectionAttemptRecord,
     MFIMetric,
+    MFIRedTeamResponse,
     MFIReleaseControl,
 )
 from .methodology import (
@@ -229,6 +230,16 @@ def create_initial_state(
             "context_classification_status": "not_started",
             "executive_summary_mode": "not_started",
             "red_team_status": "not_started",
+            "red_team_contract_version": None,
+            "red_team_review_operation": None,
+            "red_team_structured_output": False,
+            "red_team_package_character_count": 0,
+            "red_team_package_target_characters": 0,
+            "red_team_package_within_target": None,
+            "red_team_format_repair_attempted": False,
+            "red_team_format_repair_status": "not_needed",
+            "red_team_initial_call_id": None,
+            "red_team_format_repair_call_id": None,
             "correction_attempts": 0,
             "unresolved_high_count": 0,
             "unresolved_medium_count": 0,
@@ -292,6 +303,16 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("context_classification_status", "not_started")
     diagnostics.setdefault("executive_summary_mode", "not_started")
     diagnostics.setdefault("red_team_status", "not_started")
+    diagnostics.setdefault("red_team_contract_version", None)
+    diagnostics.setdefault("red_team_review_operation", None)
+    diagnostics.setdefault("red_team_structured_output", False)
+    diagnostics.setdefault("red_team_package_character_count", 0)
+    diagnostics.setdefault("red_team_package_target_characters", 0)
+    diagnostics.setdefault("red_team_package_within_target", None)
+    diagnostics.setdefault("red_team_format_repair_attempted", False)
+    diagnostics.setdefault("red_team_format_repair_status", "not_needed")
+    diagnostics.setdefault("red_team_initial_call_id", None)
+    diagnostics.setdefault("red_team_format_repair_call_id", None)
     diagnostics.setdefault("correction_attempts", 0)
     diagnostics.setdefault("unresolved_high_count", 0)
     diagnostics.setdefault("unresolved_medium_count", 0)
@@ -315,6 +336,29 @@ def reconcile_generation_diagnostics_for_llm_failure(
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     if error.node == "red_team":
         diagnostics["red_team_status"] = "failed"
+        diagnostics["red_team_contract_version"] = "mfi-red-team-input-v4"
+        diagnostics["red_team_review_operation"] = MFI_RED_TEAM_REVIEW_OPERATION
+        diagnostics["red_team_structured_output"] = True
+        if error.operation == MFI_RED_TEAM_FORMAT_REPAIR_OPERATION:
+            diagnostics["red_team_format_repair_attempted"] = True
+            diagnostics["red_team_format_repair_status"] = "failed"
+            diagnostics["red_team_format_repair_call_id"] = error.call_id
+            calls = (
+                metadata.get("llm_diagnostics", {}).get("calls", [])
+                if isinstance(metadata.get("llm_diagnostics"), Mapping)
+                else []
+            )
+            initial = next(
+                (
+                    item
+                    for item in reversed(calls)
+                    if isinstance(item, Mapping)
+                    and item.get("operation") == MFI_RED_TEAM_REVIEW_OPERATION
+                ),
+                None,
+            )
+            if initial:
+                diagnostics["red_team_initial_call_id"] = initial.get("call_id")
     return diagnostics
 
 
@@ -2226,6 +2270,86 @@ _RED_TEAM_CLAIM_FIELDS = (
     "scope_statement",
 )
 
+MFI_RED_TEAM_REVIEW_OPERATION = "mfi.red_team_review.v4"
+MFI_RED_TEAM_FORMAT_REPAIR_OPERATION = "mfi.red_team_response_repair.v1"
+MFI_RED_TEAM_PACKAGE_TARGET_CHARACTERS = 220_000
+
+_RED_TEAM_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "flags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
+                    "artifact_type": {
+                        "type": "string",
+                        "enum": [
+                            "context",
+                            "dimension",
+                            "market",
+                            "executive_summary",
+                            "global",
+                        ],
+                    },
+                    "artifact_id": {"type": "string", "nullable": True},
+                    "field_name": {"type": "string", "nullable": True},
+                    "claim_id": {"type": "string", "nullable": True},
+                    "message": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "metric_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "document_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "repairable": {"type": "boolean"},
+                },
+                "required": [
+                    "code",
+                    "severity",
+                    "artifact_type",
+                    "artifact_id",
+                    "field_name",
+                    "claim_id",
+                    "message",
+                    "recommendation",
+                    "metric_ids",
+                    "document_ids",
+                    "repairable",
+                ],
+            },
+        }
+    },
+    "required": ["flags"],
+}
+
+
+def _without_empty(values: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and value != "" and value != [] and value != {}
+    }
+
+
+def _bind_red_team_schema(model: Any) -> Any:
+    """Bind Vertex controlled JSON generation without mutating the cached client."""
+    binder = getattr(model, "bind", None)
+    if not callable(binder):
+        return model
+    return binder(
+        response_mime_type="application/json",
+        response_schema=_RED_TEAM_RESPONSE_SCHEMA,
+    )
+
 
 def _red_team_claim_rows(
     state: MFIReportState,
@@ -2243,20 +2367,24 @@ def _red_team_claim_rows(
         subdimension_name: Optional[str] = None,
     ) -> None:
         row: Dict[str, Any] = {
-            "artifact_type": artifact_type,
-            "artifact_id": artifact_id,
-            "field_name": field_name,
-            "position": position,
-            "claim_id": claim.get("claim_id"),
+            "a": artifact_type,
+            "aid": artifact_id,
+            "f": field_name,
+            "p": position,
+            "id": claim.get("claim_id"),
             "text": claim.get("text"),
-            "scope": claim.get("scope"),
-            "polarity": claim.get("polarity"),
-            "metric_ids": list(claim.get("metric_ids") or []),
-            "document_ids": list(claim.get("document_ids") or []),
+            "s": claim.get("scope"),
+            "o": claim.get("polarity"),
         }
+        metric_ids = list(claim.get("metric_ids") or [])
+        document_ids = list(claim.get("document_ids") or [])
+        if metric_ids:
+            row["m"] = metric_ids
+        if document_ids:
+            row["d"] = document_ids
         if subdimension_name:
-            row["subdimension_name"] = subdimension_name
-        rows.append(row)
+            row["sub"] = subdimension_name
+        rows.append(_without_empty(row))
 
     def add_artifact(
         narrative: Mapping[str, Any],
@@ -2349,7 +2477,7 @@ def _red_team_claim_rows(
             artifact_id="executive_summary",
         )
 
-    claim_ids = [str(row.get("claim_id") or "") for row in rows]
+    claim_ids = [str(row.get("id") or "") for row in rows]
     if not all(claim_ids) or len(claim_ids) != len(set(claim_ids)):
         raise MFIClaimIdentityError(
             "Red-Team input requires non-empty globally unique claim identities.",
@@ -2361,29 +2489,27 @@ def _red_team_claim_rows(
 def _red_team_evidence(
     catalog: Mapping[str, Mapping[str, Any]],
     claims: Sequence[Mapping[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Dict[str, Any]]:
     cited = sorted(
         {
             str(metric_id)
             for claim in claims
-            for metric_id in claim.get("metric_ids", []) or []
+            for metric_id in claim.get("m", []) or []
             if metric_id
         }
     )
-    evidence: List[Dict[str, Any]] = []
+    evidence: Dict[str, Dict[str, Any]] = {}
     for metric_id in cited:
         entry = catalog.get(metric_id)
         if not isinstance(entry, Mapping):
             continue
         item: Dict[str, Any] = {
-            "metric_id": metric_id,
-            "label": entry.get("label"),
-            "value": entry.get("formatted_value"),
-            "unit": entry.get("unit"),
-            "orientation": entry.get("orientation"),
-            "scope": entry.get("scope"),
-            "coverage": entry.get("coverage_label"),
-            "sources": list(entry.get("source_metric_ids") or []),
+            "l": entry.get("label"),
+            "v": entry.get("formatted_value"),
+            "u": entry.get("unit"),
+            "o": entry.get("orientation"),
+            "s": entry.get("scope"),
+            "c": entry.get("coverage_label"),
         }
         location = {
             key: entry.get(key)
@@ -2391,41 +2517,36 @@ def _red_team_evidence(
             if entry.get(key) is not None
         }
         if location:
-            item["location"] = location
+            item["loc"] = location
         representation_kind = str(entry.get("representation_kind") or "none")
         representation_required = bool(entry.get("representation_required"))
         representation_complete = bool(entry.get("representation_complete"))
         if representation_required or representation_kind not in {"none", "fixed_metric"}:
-            item["representation"] = {
-                "kind": representation_kind,
+            item["r"] = {
+                "k": representation_kind,
                 "complete": representation_complete,
                 "required": representation_required,
             }
-        evidence.append(item)
+        evidence[metric_id] = _without_empty(item)
     return evidence
 
 
 def _compact_red_team_flag(flag: Mapping[str, Any]) -> Dict[str, Any]:
-    fields = (
-        "flag_id",
-        "source",
-        "code",
-        "severity",
-        "artifact_type",
-        "artifact_id",
-        "field_name",
-        "claim_id",
-        "message",
-        "recommendation",
-        "metric_ids",
-        "document_ids",
-        "repairable",
+    return _without_empty(
+        {
+            "code": flag.get("code"),
+            "severity": flag.get("severity"),
+            "a": flag.get("artifact_type"),
+            "aid": flag.get("artifact_id"),
+            "f": flag.get("field_name"),
+            "cid": flag.get("claim_id"),
+            "message": flag.get("message"),
+        }
     )
-    return {field: flag.get(field) for field in fields}
 
 
 def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
-    """Build the complete but compact deterministic Red-Team v3 input contract."""
+    """Build the lossless compact deterministic Red-Team v4 input contract."""
     claims = _red_team_claim_rows(state)
     profile = state.get("assessment_profile") or {}
     dimension_profiles = {
@@ -2439,24 +2560,33 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
         if isinstance(item, Mapping) and item.get("market_name")
     }
     dimensions = [
-        {
-            "dimension": name,
-            "is_priority": bool(dimension_profiles.get(name, {}).get("is_priority")),
-            "rank": dimension_profiles.get(name, {}).get("profile_rank"),
-        }
+        _without_empty(
+            {
+                "id": name,
+                "priority": bool(
+                    dimension_profiles.get(name, {}).get("is_priority")
+                ),
+                "rank": dimension_profiles.get(name, {}).get("profile_rank"),
+            }
+        )
         for name in profile.get("priority_dimension_names", []) or []
     ]
     markets = [
-        {
-            "market_name": name,
-            "score_rank": market_profiles.get(name, {}).get("score_rank"),
-            "selection_order": market_profiles.get(name, {}).get("selection_order"),
-            "weak_dimensions": [
-                item.get("dimension")
-                for item in market_profiles.get(name, {}).get("weak_dimensions", []) or []
-                if isinstance(item, Mapping) and item.get("dimension")
-            ],
-        }
+        _without_empty(
+            {
+                "id": name,
+                "rank": market_profiles.get(name, {}).get("score_rank"),
+                "order": market_profiles.get(name, {}).get("selection_order"),
+                "weak": [
+                    item.get("dimension")
+                    for item in market_profiles.get(name, {}).get(
+                        "weak_dimensions", []
+                    )
+                    or []
+                    if isinstance(item, Mapping) and item.get("dimension")
+                ],
+            }
+        )
         for name in profile.get("priority_market_names", []) or []
     ]
 
@@ -2479,46 +2609,72 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
             continue
         cited_document_ids.update(document_ids)
         contexts.append(
-            {
-                "statement_id": statement.get("statement_id"),
-                "text": statement.get("text"),
-                "classification": statement.get("classification"),
-                "document_ids": document_ids,
-            }
+            _without_empty(
+                {
+                    "id": statement.get("statement_id"),
+                    "text": statement.get("text"),
+                    "class": statement.get("classification"),
+                    "docs": document_ids,
+                }
+            )
         )
     documents = [
-        {
-            "document_id": document_id,
-            "title": documents_by_id[document_id].get("title"),
-            "date": documents_by_id[document_id].get("date"),
-            "source": documents_by_id[document_id].get("source"),
-        }
+        _without_empty(
+            {
+                "id": document_id,
+                "title": documents_by_id[document_id].get("title"),
+                "date": documents_by_id[document_id].get("date"),
+                "source": documents_by_id[document_id].get("source"),
+            }
+        )
         for document_id in sorted(cited_document_ids)
     ]
     limitations = [
-        {
-            key: item.get(key)
-            for key in (
-                "code",
-                "severity",
-                "message",
-                "dimension",
-                "market_name",
-                "region",
-                "metric_ids",
-            )
-        }
+        _without_empty(
+            {
+                "code": item.get("code"),
+                "severity": item.get("severity"),
+                "message": item.get("message"),
+                "dimension": item.get("dimension"),
+                "market": item.get("market_name"),
+                "region": item.get("region"),
+            }
+        )
         for item in profile.get("limitations", []) or []
         if isinstance(item, Mapping)
     ]
     return {
-        "contract_version": "mfi-red-team-input-v3",
+        "contract_version": "mfi-red-team-input-v4",
+        "legend": {
+            "claim": {
+                "a": "artifact_type",
+                "aid": "artifact_id",
+                "f": "field_name",
+                "p": "one_based_position",
+                "id": "canonical_claim_id",
+                "s": "scope",
+                "o": "polarity",
+                "m": "metric_ids",
+                "d": "document_ids",
+                "sub": "subdimension_name",
+            },
+            "evidence": {
+                "l": "label",
+                "v": "formatted_value",
+                "u": "unit",
+                "o": "orientation",
+                "s": "scope",
+                "c": "coverage",
+                "loc": "location_context",
+                "r": "representation",
+            },
+        },
         "claims": claims,
         "priority_context": {
             "dimensions": dimensions,
             "markets": markets,
         },
-        "cited_evidence": _red_team_evidence(
+        "evidence_by_metric_id": _red_team_evidence(
             state.get("claim_catalog", {}) or {},
             claims,
         ),
@@ -2530,8 +2686,29 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
             for item in state.get("deterministic_flags", []) or []
             if isinstance(item, Mapping)
         ],
+        "deterministic_flag_instruction": (
+            "Use these as context; do not repeat an existing deterministic flag."
+        ),
         "prohibitions": list(NARRATIVE_PROHIBITIONS),
     }
+
+
+def _validate_red_team_response(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    validated = MFIRedTeamResponse.model_validate(payload)
+    return normalize_red_team_flags(validated.model_dump(mode="json"))
+
+
+def _red_team_format_repair_prompt(raw_text: str) -> str:
+    return f"""Normalize the attempted Red-Team response below into the required JSON schema.
+
+Preserve every supplied flag and every field value exactly. Do not add findings,
+remove findings, reinterpret content, or perform a new review. Return one JSON
+object only, with one top-level flags array and no surrounding prose.
+
+ATTEMPTED_RESPONSE_BEGIN
+{raw_text}
+ATTEMPTED_RESPONSE_END
+"""
 
 
 def node_red_team(state: MFIReportState) -> dict:
@@ -2552,6 +2729,7 @@ def node_red_team(state: MFIReportState) -> dict:
         sort_keys=True,
         separators=(",", ":"),
     )
+    package_character_count = len(review_json)
     prompt = f"""Red-Team this structured MFI assessment narrative.
 
 Use English only. Review every claim against the supplied cited evidence,
@@ -2560,92 +2738,66 @@ interpretation, polarity, scope, coverage qualification, recommendation
 linkage, unsupported causal or affordability claims, priority drill-downs,
 and any conclusion about transfer modality. Do not invent new facts or
 recalculate values. The package is complete: do not request omitted report or
-rendering metadata. Return valid JSON only.
+rendering metadata. The provider enforces the response schema. Return one JSON
+object only and do not repeat deterministic flags already included in the input.
 
-REVIEW_PACKAGE_V3:
+REVIEW_PACKAGE_V4:
 {review_json}
 
-Return:
-{{"flags": [{{
-  "flag_id": "stable id",
-  "code": "...",
-  "severity": "high|medium|low",
-  "artifact_type": "context|dimension|market|executive_summary|global",
-  "artifact_id": "dimension or market name, or null",
-  "field_name": "exact output field, or null",
-  "claim_id": "exact claim id, or null",
-  "message": "...",
-  "recommendation": "...",
-  "metric_ids": [],
-  "document_ids": [],
-  "repairable": true
-}}]}}
+Return only semantic findings that are not already represented by a supplied
+deterministic flag. Use exact canonical claim, metric, and document IDs from the
+package. Return an empty flags array when no additional finding is necessary.
 """
-    def _validate_red_team(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        if not isinstance(payload, dict) or not isinstance(
-            payload.get("flags"), list
-        ):
-            raise ValueError("Red-Team response does not satisfy its schema")
-        required = {
-            "flag_id",
-            "code",
-            "severity",
-            "artifact_type",
-            "artifact_id",
-            "field_name",
-            "claim_id",
-            "message",
-            "recommendation",
-            "metric_ids",
-            "document_ids",
-            "repairable",
-        }
-        for index, flag in enumerate(payload["flags"]):
-            if not isinstance(flag, dict):
-                raise ValueError(f"flags[{index}] must be an object")
-            missing = sorted(required - set(flag))
-            if missing:
-                raise ValueError(f"flags[{index}] is missing: {', '.join(missing)}")
-            if flag.get("severity") not in {"high", "medium", "low"}:
-                raise ValueError(f"flags[{index}].severity is invalid")
-            if flag.get("artifact_type") not in {
-                "context",
-                "dimension",
-                "market",
-                "executive_summary",
-                "global",
-            }:
-                raise ValueError(f"flags[{index}].artifact_type is invalid")
-            if not str(flag.get("code") or "").strip() or not str(
-                flag.get("message") or ""
-            ).strip():
-                raise ValueError(f"flags[{index}] requires code and message")
-            if not isinstance(flag.get("metric_ids"), list) or not isinstance(
-                flag.get("document_ids"), list
-            ):
-                raise ValueError(f"flags[{index}] citations must be lists")
-            if not isinstance(flag.get("repairable"), bool):
-                raise ValueError(f"flags[{index}].repairable must be boolean")
-        return normalize_red_team_flags(payload)
-
     runtime = llm_runtime_config()
-    traced = trace.invoke_json(
-        model=get_model(
-            timeout_seconds=runtime.mfi_red_team_timeout_seconds,
-            max_retries=runtime.max_retries,
-        ),
-        messages=[HumanMessage(content=prompt)],
-        node="red_team",
-        operation="mfi.red_team_review.v3",
-        artifact_type="global",
-        artifact_id="qa_review",
-        correction_attempt=int(state.get("correction_attempts", 0) or 0),
-        validator=_validate_red_team,
+    base_model = get_model(
         timeout_seconds=runtime.mfi_red_team_timeout_seconds,
         max_retries=runtime.max_retries,
     )
-    flags = traced.value
+    structured_model = _bind_red_team_schema(base_model)
     llm_calls = 1
+    repair_attempted = False
+    repair_status = "not_needed"
+    initial_call_id: Optional[str] = None
+    repair_call_id: Optional[str] = None
+    try:
+        traced = trace.invoke_json(
+            model=structured_model,
+            messages=[HumanMessage(content=prompt)],
+            node="red_team",
+            operation=MFI_RED_TEAM_REVIEW_OPERATION,
+            artifact_type="global",
+            artifact_id="qa_review",
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=_validate_red_team_response,
+            timeout_seconds=runtime.mfi_red_team_timeout_seconds,
+            max_retries=runtime.max_retries,
+        )
+    except LLMCallError as exc:
+        if exc.failure_code != "llm_invalid_json" or not exc.raw_text:
+            raise
+        repair_attempted = True
+        repair_status = "failed"
+        initial_call_id = exc.call_id
+        llm_calls += 1
+        repaired = trace.invoke_json(
+            model=structured_model,
+            messages=[
+                HumanMessage(content=_red_team_format_repair_prompt(exc.raw_text))
+            ],
+            node="red_team",
+            operation=MFI_RED_TEAM_FORMAT_REPAIR_OPERATION,
+            artifact_type="global",
+            artifact_id="qa_review",
+            correction_attempt=int(state.get("correction_attempts", 0) or 0),
+            validator=_validate_red_team_response,
+            timeout_seconds=runtime.mfi_red_team_timeout_seconds,
+            max_retries=runtime.max_retries,
+        )
+        repair_call_id = repaired.call_id
+        repair_status = "completed"
+        trace.mark_recovered(initial_call_id)
+        traced = repaired
+    flags = traced.value
     red_team_status = "completed"
     qa_review = build_qa_review(
         state.get("deterministic_flags", []),
@@ -2655,6 +2807,20 @@ Return:
     )
     diagnostics = _generation_diagnostics(state)
     diagnostics["red_team_status"] = red_team_status
+    diagnostics["red_team_contract_version"] = "mfi-red-team-input-v4"
+    diagnostics["red_team_review_operation"] = MFI_RED_TEAM_REVIEW_OPERATION
+    diagnostics["red_team_structured_output"] = True
+    diagnostics["red_team_package_character_count"] = package_character_count
+    diagnostics["red_team_package_target_characters"] = (
+        MFI_RED_TEAM_PACKAGE_TARGET_CHARACTERS
+    )
+    diagnostics["red_team_package_within_target"] = (
+        package_character_count <= MFI_RED_TEAM_PACKAGE_TARGET_CHARACTERS
+    )
+    diagnostics["red_team_format_repair_attempted"] = repair_attempted
+    diagnostics["red_team_format_repair_status"] = repair_status
+    diagnostics["red_team_initial_call_id"] = initial_call_id or traced.call_id
+    diagnostics["red_team_format_repair_call_id"] = repair_call_id
     return {
         "red_team_flags": flags,
         "qa_review": qa_review,

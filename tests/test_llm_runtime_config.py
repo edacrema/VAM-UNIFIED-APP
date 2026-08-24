@@ -111,7 +111,7 @@ def test_call_can_complete_after_sixty_seconds_with_red_team_deadline(
         model=Model(),
         messages=[{"role": "user", "content": "review"}],
         node="red_team",
-        operation="mfi.red_team_review.v3",
+        operation="mfi.red_team_review.v4",
         validator=lambda payload: payload["flags"],
         timeout_seconds=180,
         max_retries=2,
@@ -127,7 +127,7 @@ def test_red_team_deadline_failure_updates_live_generation_status() -> None:
         failure_code="llm_transport_error",
         call_id="llm-0027-timeout",
         node="red_team",
-        operation="mfi.red_team_review.v3",
+        operation="mfi.red_team_review.v4",
         stage="transport",
     )
     diagnostics = graph.reconcile_generation_diagnostics_for_llm_failure(
@@ -135,3 +135,39 @@ def test_red_team_deadline_failure_updates_live_generation_status() -> None:
         error,
     )
     assert diagnostics["red_team_status"] == "failed"
+    assert diagnostics["red_team_review_operation"] == "mfi.red_team_review.v4"
+    assert diagnostics["red_team_structured_output"] is True
+
+
+def test_red_team_format_repair_failure_reconciles_both_call_ids() -> None:
+    error = LLMCallError(
+        failure_code="llm_invalid_json",
+        call_id="llm-0028-repair",
+        node="red_team",
+        operation="mfi.red_team_response_repair.v1",
+        stage="json_parse",
+    )
+    diagnostics = graph.reconcile_generation_diagnostics_for_llm_failure(
+        {
+            "generation_diagnostics": {"red_team_status": "not_started"},
+            "llm_diagnostics": {
+                "calls": [
+                    {
+                        "call_id": "llm-0027-review",
+                        "operation": "mfi.red_team_review.v4",
+                    },
+                    {
+                        "call_id": "llm-0028-repair",
+                        "operation": "mfi.red_team_response_repair.v1",
+                    },
+                ]
+            },
+        },
+        error,
+    )
+
+    assert diagnostics["red_team_status"] == "failed"
+    assert diagnostics["red_team_format_repair_attempted"] is True
+    assert diagnostics["red_team_format_repair_status"] == "failed"
+    assert diagnostics["red_team_initial_call_id"] == "llm-0027-review"
+    assert diagnostics["red_team_format_repair_call_id"] == "llm-0028-repair"

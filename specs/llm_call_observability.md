@@ -54,5 +54,16 @@ which do not alter a successfully validated model response.
 
 Invalid timeout or retry settings fail report generation before an asynchronous
 run is created with stable code `llm_runtime_configuration_invalid`. The MFI
-Red-Team operation is `mfi.red_team_review.v3`; it receives one compact,
-canonical claim package and retains the existing structured flag response.
+Red-Team operation is `mfi.red_team_review.v4`; it receives a compact,
+canonical claim package and uses Vertex controlled JSON generation with a
+single response root. Red-Team flag IDs are assigned by the application after
+validation and are never accepted from the model.
+
+If the provider returns syntactically malformed JSON, the original response is
+held in process memory only and passed once to
+`mfi.red_team_response_repair.v1`. That call may normalize formatting but may
+not add, remove, or reinterpret findings. Contract-valid repair marks the
+initial call as recovered and preserves content-free JSON-shape diagnostics.
+An unsuccessful repair, or a semantically incomplete response, fails the run.
+No prompt or response body is written to public metadata or logs, and this
+recovery path does not require GCS payload capture.

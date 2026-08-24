@@ -182,7 +182,7 @@ def test_synchronous_dispatchers_map_llm_failures_to_502(monkeypatch):
             failure_code="llm_transport_error",
             call_id="llm-0001-sync",
             node="red_team",
-            operation="mfi.red_team_review.v3",
+            operation="mfi.red_team_review.v4",
             stage="transport",
         )
 
@@ -226,7 +226,7 @@ def test_dispatcher_red_team_failure_sets_generation_status_failed(monkeypatch):
             failure_code="llm_transport_error",
             call_id="llm-0027-timeout",
             node="red_team",
-            operation="mfi.red_team_review.v3",
+            operation="mfi.red_team_review.v4",
             stage="transport",
         )
 
@@ -357,7 +357,7 @@ def test_fastapi_async_red_team_failure_sets_generation_status_failed(monkeypatc
             failure_code="llm_transport_error",
             call_id="llm-0027-timeout",
             node="red_team",
-            operation="mfi.red_team_review.v3",
+            operation="mfi.red_team_review.v4",
             stage="transport",
         )
 

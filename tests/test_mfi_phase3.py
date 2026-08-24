@@ -11,6 +11,7 @@ import pytest
 from docx import Document
 
 from app.services.mfi_drafter import graph
+from app.services.mfi_drafter import narrative as narrative_module
 from app.services.mfi_drafter.analysis import build_assessment_profile
 from app.services.mfi_drafter.narrative import (
     build_claim_catalog,
@@ -19,6 +20,7 @@ from app.services.mfi_drafter.narrative import (
     fallback_dimension_narrative,
     fallback_executive_narrative,
     fallback_market_narrative,
+    normalize_red_team_flags,
     validate_structured_narratives,
 )
 from app.services.mfi_drafter.router import _build_mfi_output
@@ -382,7 +384,7 @@ def test_deterministic_validator_makes_no_llm_call(monkeypatch, phase3_bundle):
     assert update["claim_validation"]["status"] == "passed"
 
 
-def test_red_team_v3_package_is_complete_deterministic_and_compact(
+def test_red_team_v4_package_is_complete_deterministic_and_compact(
     phase3_bundle,
 ) -> None:
     state = {
@@ -393,17 +395,17 @@ def test_red_team_v3_package_is_complete_deterministic_and_compact(
     package = graph._build_red_team_review_package(state)
     repeated = graph._build_red_team_review_package(copy.deepcopy(state))
     assert package == repeated
-    assert package["contract_version"] == "mfi-red-team-input-v3"
+    assert package["contract_version"] == "mfi-red-team-input-v4"
 
-    claim_ids = [item["claim_id"] for item in package["claims"]]
+    claim_ids = [item["id"] for item in package["claims"]]
     assert claim_ids
     assert len(claim_ids) == len(set(claim_ids))
     cited_ids = {
         str(metric_id)
         for claim in package["claims"]
-        for metric_id in claim.get("metric_ids", [])
+        for metric_id in claim.get("m", [])
     }
-    evidence_ids = {item["metric_id"] for item in package["cited_evidence"]}
+    evidence_ids = set(package["evidence_by_metric_id"])
     assert evidence_ids == cited_ids & set(phase3_bundle["catalog"])
 
     compact = json.dumps(package, sort_keys=True, separators=(",", ":"))
@@ -424,13 +426,58 @@ def test_red_team_v3_package_is_complete_deterministic_and_compact(
     assert len(compact) < len(legacy) * 0.85
 
 
-def test_red_team_v3_uses_operation_specific_timeout(
+def test_red_team_flag_identity_is_application_owned_and_collision_safe() -> None:
+    supplied = {
+        "flag_id": "model-controlled-id",
+        "code": "semantic_scope_error",
+        "severity": "medium",
+        "artifact_type": "dimension",
+        "artifact_id": "Price",
+        "field_name": "key_findings",
+        "claim_id": "dimension-price-key-finding-1",
+        "message": "The scope requires qualification.",
+        "recommendation": "Qualify the claim scope.",
+        "metric_ids": ["metric-price"],
+        "document_ids": [],
+        "repairable": True,
+    }
+    first = normalize_red_team_flags({"flags": [supplied]})[0]
+    repeated = normalize_red_team_flags({"flags": [copy.deepcopy(supplied)]})[0]
+    duplicated = normalize_red_team_flags({"flags": [supplied, supplied]})
+
+    assert first["flag_id"] == repeated["flag_id"]
+    assert first["flag_id"].startswith("red-team-semantic_scope_error-")
+    assert first["flag_id"] != supplied["flag_id"]
+    assert duplicated[0]["flag_id"] == duplicated[1]["flag_id"]
+
+
+def test_deterministic_flag_identity_includes_evidence_context() -> None:
+    base = {
+        "code": "subsection_mismatch",
+        "severity": "medium",
+        "artifact_type": "dimension",
+        "artifact_id": "Price",
+        "field_name": "subdimension_analysis",
+        "claim_id": "dimension-price-subdimension-1",
+        "message": "The cited subsection is inconsistent with stored evidence.",
+    }
+    first = narrative_module._flag(**base, metric_ids=["price-increase"])
+    second = narrative_module._flag(**base, metric_ids=["price-stability"])
+
+    assert first["flag_id"] != second["flag_id"]
+
+
+def test_red_team_v4_uses_structured_output_and_operation_specific_timeout(
     monkeypatch,
     phase3_bundle,
 ) -> None:
     observed = {}
 
     class Model:
+        def bind(self, **kwargs):
+            observed["bind_kwargs"] = kwargs
+            return self
+
         def invoke(self, messages):
             observed["prompt"] = messages[0].content
             return type("Response", (), {"content": '{"flags": []}'})()
@@ -448,12 +495,234 @@ def test_red_team_v3_uses_operation_specific_timeout(
     }
     update = graph.node_red_team(state)
     assert observed["model_kwargs"]["timeout_seconds"] == 180.0
-    assert "REVIEW_PACKAGE_V3" in observed["prompt"]
+    assert "REVIEW_PACKAGE_V4" in observed["prompt"]
+    assert observed["bind_kwargs"]["response_mime_type"] == "application/json"
+    assert observed["bind_kwargs"]["response_schema"]["required"] == ["flags"]
     call = update["llm_diagnostics"]["calls"][-1]
-    assert call["operation"] == "mfi.red_team_review.v3"
+    assert call["operation"] == "mfi.red_team_review.v4"
     assert call["configured_timeout_seconds"] == 180.0
     assert call["configured_max_retries"] == 2
     assert update["generation_diagnostics"]["red_team_status"] == "completed"
+    assert update["generation_diagnostics"]["red_team_structured_output"] is True
+    assert update["generation_diagnostics"]["red_team_package_within_target"] is True
+
+
+def test_red_team_v4_repairs_one_malformed_json_response_in_memory(
+    monkeypatch,
+    phase3_bundle,
+) -> None:
+    responses = [
+        '{"flags": []}\n{"flags": []}',
+        '{"flags": []}',
+    ]
+    observed = {"operations": []}
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def invoke(self, _messages):
+            return type("Response", (), {"content": responses.pop(0)})()
+
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: Model())
+    state = {
+        **phase3_bundle["result"],
+        "run_id": "red-team-format-repair",
+        "deterministic_flags": [],
+        "contextual_documents": [],
+        "llm_diagnostics": {},
+    }
+    update = graph.node_red_team(state)
+
+    calls = update["llm_diagnostics"]["calls"]
+    assert [call["operation"] for call in calls] == [
+        "mfi.red_team_review.v4",
+        "mfi.red_team_response_repair.v1",
+    ]
+    assert calls[0]["status"] == "recovered"
+    assert calls[0]["json_root_value_count"] == 2
+    assert calls[0]["json_trailing_character_count"] > 0
+    assert calls[1]["status"] == "succeeded"
+    assert update["llm_diagnostics"]["status"] == "completed"
+    assert update["llm_diagnostics"]["recovered_calls"] == 1
+    assert update["llm_diagnostics"]["failed_calls"] == 0
+    diagnostics = update["generation_diagnostics"]
+    assert diagnostics["red_team_format_repair_attempted"] is True
+    assert diagnostics["red_team_format_repair_status"] == "completed"
+    assert diagnostics["red_team_initial_call_id"] == calls[0]["call_id"]
+    assert diagnostics["red_team_format_repair_call_id"] == calls[1]["call_id"]
+    assert update["llm_calls"] == state.get("llm_calls", 0) + 2
+
+
+def test_red_team_v4_fails_after_one_unsuccessful_format_repair(
+    monkeypatch,
+    phase3_bundle,
+) -> None:
+    responses = [
+        '{"flags": []}{"flags": []}',
+        "still not json",
+    ]
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def invoke(self, _messages):
+            return type("Response", (), {"content": responses.pop(0)})()
+
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: Model())
+    state = {
+        **phase3_bundle["result"],
+        "run_id": "red-team-format-repair-failed",
+        "deterministic_flags": [],
+        "contextual_documents": [],
+        "llm_diagnostics": {},
+    }
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_red_team(state)
+
+    assert caught.value.failure_code == "llm_invalid_json"
+    assert caught.value.operation == "mfi.red_team_response_repair.v1"
+
+
+def test_red_team_v4_does_not_repair_semantically_incomplete_json(
+    monkeypatch,
+    phase3_bundle,
+) -> None:
+    model_calls = 0
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def invoke(self, _messages):
+            nonlocal model_calls
+            model_calls += 1
+            return type("Response", (), {"content": '{"flags": [{"code": "x"}]}'})()
+
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: Model())
+    state = {
+        **phase3_bundle["result"],
+        "run_id": "red-team-contract-failed",
+        "deterministic_flags": [],
+        "contextual_documents": [],
+        "llm_diagnostics": {},
+    }
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_red_team(state)
+
+    assert caught.value.failure_code == "llm_response_contract_error"
+    assert caught.value.operation == "mfi.red_team_review.v4"
+    assert model_calls == 1
+
+
+def test_red_team_v4_gaza_scale_package_stays_inside_character_target() -> None:
+    catalog = {}
+    dimensions = {}
+    dimension_profiles = []
+    markets = {}
+    market_profiles = []
+    metric_index = 0
+
+    def claim(claim_id: str) -> dict:
+        nonlocal metric_index
+        metric_index += 1
+        metric_id = f"metric-{metric_index:03d}"
+        catalog[metric_id] = {
+            "metric_id": metric_id,
+            "label": f"Evidence {metric_index}",
+            "formatted_value": f"{metric_index % 10}.00",
+            "unit": "score_0_10",
+            "orientation": "higher_is_better",
+            "scope": "assessment",
+            "coverage_label": "27/27 assessed markets",
+            "representation_kind": "fixed_metric",
+            "representation_complete": True,
+            "representation_required": False,
+        }
+        return {
+            "claim_id": claim_id,
+            "text": f"Analytical statement {claim_id} supported by supplied evidence.",
+            "metric_ids": [metric_id],
+            "document_ids": [],
+            "scope": "assessment",
+            "polarity": "neutral",
+        }
+
+    for dimension_position in range(1, 10):
+        name = f"Dimension {dimension_position}"
+        dimensions[name] = {
+            "key_findings": [
+                claim(f"dimension-{dimension_position}-finding-{position}")
+                for position in range(1, 5)
+            ]
+        }
+        dimension_profiles.append(
+            {
+                "dimension": name,
+                "is_priority": dimension_position <= 4,
+                "profile_rank": dimension_position,
+            }
+        )
+    for market_position in range(1, 16):
+        name = f"Market {market_position:02d}"
+        markets[name] = {
+            "priority_issues": [
+                claim(f"market-{market_position}-issue-{position}")
+                for position in range(1, 6)
+            ]
+        }
+        market_profiles.append(
+            {
+                "market_name": name,
+                "is_priority_market": True,
+                "score_rank": market_position,
+                "selection_order": market_position,
+                "weak_dimensions": [{"dimension": "Dimension 1"}],
+            }
+        )
+    executive = {
+        "key_findings": [
+            claim(f"executive-finding-{position}") for position in range(1, 3)
+        ]
+    }
+    state = {
+        "assessment_profile": {
+            "dimensions": dimension_profiles,
+            "markets": market_profiles,
+            "priority_dimension_names": [f"Dimension {position}" for position in range(1, 5)],
+            "priority_market_names": [f"Market {position:02d}" for position in range(1, 16)],
+            "limitations": [],
+        },
+        "dimension_narratives": dimensions,
+        "market_narratives": markets,
+        "executive_summary_narrative": executive,
+        "claim_catalog": catalog,
+        "context_evidence": [],
+        "contextual_documents": [],
+        "deterministic_flags": [
+            {
+                "code": f"deterministic-{position:02d}",
+                "severity": "medium",
+                "artifact_type": "dimension",
+                "artifact_id": "Dimension 1",
+                "field_name": "key_findings",
+                "claim_id": "dimension-1-finding-1",
+                "message": "Existing deterministic finding already handled.",
+            }
+            for position in range(1, 37)
+        ],
+    }
+
+    package = graph._build_red_team_review_package(state)
+    assert len(package["claims"]) == 113
+    serialized = json.dumps(
+        package,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert len(serialized) <= graph.MFI_RED_TEAM_PACKAGE_TARGET_CHARACTERS
 
 
 def test_schema_failure_interrupts_enabled_llm_stage(

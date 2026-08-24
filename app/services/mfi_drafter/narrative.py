@@ -1643,7 +1643,7 @@ def apply_narrative_density_policy(
 def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:
     raw_flags = payload.get("flags", []) if isinstance(payload, Mapping) else []
     flags: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_flags or []):
+    for raw in raw_flags or []:
         if not isinstance(raw, Mapping):
             continue
         artifact_type = str(raw.get("artifact_type") or "global")
@@ -1659,12 +1659,26 @@ def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:
         if severity not in {"high", "medium", "low"}:
             severity = "medium"
         code = str(raw.get("code") or raw.get("issue_type") or "semantic_error")
+        metric_ids = [str(item) for item in raw.get("metric_ids", []) if item]
+        document_ids = [str(item) for item in raw.get("document_ids", []) if item]
+        identity = "|".join(
+            [
+                code,
+                severity,
+                artifact_type,
+                str(raw.get("artifact_id") or ""),
+                str(raw.get("field_name") or ""),
+                str(raw.get("claim_id") or ""),
+                str(raw.get("message") or raw.get("details") or ""),
+                ",".join(metric_ids),
+                ",".join(document_ids),
+                str(raw.get("recommendation") or ""),
+                str(bool(raw.get("repairable", True))),
+            ]
+        )
         flags.append(
             MFINarrativeQAFlag(
-                flag_id=str(
-                    raw.get("flag_id")
-                    or f"red-team-{index + 1}-{_short_hash(str(raw))}"
-                ),
+                flag_id=f"red-team-{_slug(code)}-{_short_hash(identity)}",
                 source="red_team",
                 code=code,
                 severity=severity,
@@ -1678,12 +1692,8 @@ def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:
                     or "Red-Team review identified a narrative issue."
                 ),
                 recommendation=str(raw.get("recommendation") or ""),
-                metric_ids=[
-                    str(item) for item in raw.get("metric_ids", []) if item
-                ],
-                document_ids=[
-                    str(item) for item in raw.get("document_ids", []) if item
-                ],
+                metric_ids=metric_ids,
+                document_ids=document_ids,
                 repairable=bool(raw.get("repairable", True)),
             ).model_dump()
         )
@@ -2933,7 +2943,22 @@ def _flag(
 ) -> dict[str, Any]:
     identity = "|".join(
         str(item or "")
-        for item in (source, code, artifact_type, artifact_id, field_name, claim_id, message)
+        for item in (
+            source,
+            code,
+            severity,
+            artifact_type,
+            artifact_id,
+            field_name,
+            claim_id,
+            message,
+            recommendation,
+            ",".join(str(item) for item in metric_ids or []),
+            ",".join(str(item) for item in document_ids or []),
+            expected_value,
+            actual_value,
+            repairable,
+        )
     )
     return MFINarrativeQAFlag(
         flag_id=f"{source}-{code}-{_short_hash(identity)}",

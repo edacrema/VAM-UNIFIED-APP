@@ -909,6 +909,38 @@ class MFINarrativeQAFlag(BaseModel):
     repairable: bool = True
 
 
+class MFIRedTeamFlagDraft(BaseModel):
+    """Provider-constrained semantic flag before application identity assignment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1)
+    severity: Literal["high", "medium", "low"]
+    artifact_type: Literal[
+        "context",
+        "dimension",
+        "market",
+        "executive_summary",
+        "global",
+    ]
+    artifact_id: Optional[str] = None
+    field_name: Optional[str] = None
+    claim_id: Optional[str] = None
+    message: str = Field(min_length=1)
+    recommendation: str = ""
+    metric_ids: List[str] = Field(default_factory=list)
+    document_ids: List[str] = Field(default_factory=list)
+    repairable: bool = True
+
+
+class MFIRedTeamResponse(BaseModel):
+    """Single JSON root required from Red-Team and format repair calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    flags: List[MFIRedTeamFlagDraft] = Field(default_factory=list)
+
+
 class MFIClaimValidationResult(BaseModel):
     """Deterministic validation result for all structured claims."""
 
@@ -1033,6 +1065,20 @@ class MFIGenerationDiagnostics(BaseModel):
         "completed",
         "failed",
     ] = "not_started"
+    red_team_contract_version: Optional[str] = None
+    red_team_review_operation: Optional[str] = None
+    red_team_structured_output: bool = False
+    red_team_package_character_count: int = Field(default=0, ge=0)
+    red_team_package_target_characters: int = Field(default=0, ge=0)
+    red_team_package_within_target: Optional[bool] = None
+    red_team_format_repair_attempted: bool = False
+    red_team_format_repair_status: Literal[
+        "not_needed",
+        "completed",
+        "failed",
+    ] = "not_needed"
+    red_team_initial_call_id: Optional[str] = None
+    red_team_format_repair_call_id: Optional[str] = None
     correction_attempts: int = 0
     unresolved_high_count: int = 0
     unresolved_medium_count: int = 0

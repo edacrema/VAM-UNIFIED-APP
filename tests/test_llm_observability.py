@@ -149,6 +149,55 @@ def test_json_failures_raise_typed_error_and_preserve_diagnostics(
     assert diagnostic["contract_failed_calls"] == (0 if expected_stage == "transport" else 1)
 
 
+def test_invalid_concatenated_json_records_content_free_structure():
+    raw = '{"flags": []}\n{"flags": []}'
+    session = LLMTraceSession(service="mfi-drafter", run_id="mfi-json-shape")
+
+    with pytest.raises(LLMCallError) as caught:
+        session.invoke_json(
+            model=FakeModel(FakeResponse(raw)),
+            messages=[{"role": "user", "content": "private prompt"}],
+            node="red_team",
+            operation="mfi.red_team_review.v4",
+            validator=lambda payload: payload,
+        )
+
+    assert caught.value.failure_code == "llm_invalid_json"
+    assert caught.value.raw_text == raw
+    assert "raw_text" not in caught.value.to_public_dict()
+    diagnostic = session.snapshot()
+    call = diagnostic["calls"][0]
+    assert call["json_root_value_count"] == 2
+    assert call["json_trailing_character_count"] > 0
+    assert call["json_error_line"] == 2
+    assert call["json_error_column"] == 1
+    public_json = json.dumps(diagnostic)
+    assert raw not in public_json
+    assert '"flags"' not in public_json
+
+
+def test_recovered_call_is_successful_at_run_level_but_remains_auditable():
+    session = LLMTraceSession(service="mfi-drafter", run_id="mfi-recovered")
+    with pytest.raises(LLMCallError) as caught:
+        session.invoke_json(
+            model=FakeModel(FakeResponse('{"flags": []}{"flags": []}')),
+            messages=[{"role": "user", "content": "prompt"}],
+            node="red_team",
+            operation="mfi.red_team_review.v4",
+            validator=lambda payload: payload,
+        )
+    session.mark_recovered(caught.value.call_id)
+
+    diagnostic = session.snapshot()
+    assert diagnostic["status"] == "completed"
+    assert diagnostic["succeeded_calls"] == 1
+    assert diagnostic["recovered_calls"] == 1
+    assert diagnostic["failed_calls"] == 0
+    assert diagnostic["contract_failed_calls"] == 0
+    assert diagnostic["calls"][0]["status"] == "recovered"
+    assert diagnostic["calls"][0]["failure_code"] == "llm_invalid_json"
+
+
 def test_started_snapshot_is_visible_before_blocking_model_returns():
     entered = threading.Event()
     release = threading.Event()
@@ -166,7 +215,7 @@ def test_started_snapshot_is_visible_before_blocking_model_returns():
             model=BlockingModel(),
             messages=[{"role": "user", "content": "prompt"}],
             node="red_team",
-            operation="mfi.red_team_review.v3",
+            operation="mfi.red_team_review.v4",
         )
     )
     thread.start()

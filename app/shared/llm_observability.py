@@ -29,7 +29,7 @@ TRACE_SCHEMA_VERSION = "1.0"
 
 TransportStatus = Literal["not_started", "succeeded", "failed"]
 ProcessingStatus = Literal["not_requested", "passed", "failed"]
-CallStatus = Literal["started", "succeeded", "failed"]
+CallStatus = Literal["started", "succeeded", "recovered", "failed"]
 PayloadStatus = Literal["disabled", "pending", "stored", "failed"]
 
 
@@ -59,6 +59,12 @@ class LLMCallDiagnostic(BaseModel):
     response_extraction_status: ProcessingStatus = "not_requested"
     json_parse_status: ProcessingStatus = "not_requested"
     contract_validation_status: ProcessingStatus = "not_requested"
+    json_root_value_count: Optional[int] = Field(default=None, ge=0)
+    json_code_fence_count: Optional[int] = Field(default=None, ge=0)
+    json_trailing_character_count: Optional[int] = Field(default=None, ge=0)
+    json_error_line: Optional[int] = Field(default=None, ge=1)
+    json_error_column: Optional[int] = Field(default=None, ge=1)
+    json_error_position: Optional[int] = Field(default=None, ge=0)
     prompt_message_count: int = Field(default=0, ge=0)
     prompt_character_count: int = Field(default=0, ge=0)
     prompt_sha256: str = ""
@@ -86,6 +92,7 @@ class LLMRunDiagnostics(BaseModel):
     current_call_id: Optional[str] = None
     total_calls: int = Field(default=0, ge=0)
     succeeded_calls: int = Field(default=0, ge=0)
+    recovered_calls: int = Field(default=0, ge=0)
     failed_calls: int = Field(default=0, ge=0)
     contract_failed_calls: int = Field(default=0, ge=0)
     payload_capture_enabled: bool = False
@@ -113,12 +120,17 @@ class LLMCallError(RuntimeError):
         node: str,
         operation: str,
         stage: str,
+        raw_text: Optional[str] = None,
     ) -> None:
         self.failure_code = failure_code
         self.call_id = call_id
         self.node = node
         self.operation = operation
         self.stage = stage
+        # Kept in memory only so an operation-specific recovery boundary can
+        # normalize formatting. It is deliberately omitted from public metadata,
+        # logs, exception messages, and ``to_public_dict``.
+        self.raw_text = raw_text
         super().__init__(
             f"LLM call failed [{failure_code}] at {node}/{operation} "
             f"(call_id={call_id})"
@@ -280,6 +292,46 @@ def parse_json_object(raw_text: str) -> Dict[str, Any]:
     return parsed
 
 
+def inspect_json_structure(
+    raw_text: str,
+    error: Optional[Exception] = None,
+) -> Dict[str, Optional[int]]:
+    """Describe JSON shape without retaining or emitting response content."""
+    cleaned = re.sub(r"```json\s*", "", raw_text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```", "", cleaned).strip()
+    start_index = cleaned.find("{")
+    candidate = cleaned[start_index:] if start_index >= 0 else cleaned
+    decoder = json.JSONDecoder()
+    cursor = 0
+    roots = 0
+    first_end: Optional[int] = None
+    while cursor < len(candidate):
+        while cursor < len(candidate) and candidate[cursor].isspace():
+            cursor += 1
+        if cursor >= len(candidate):
+            break
+        try:
+            _value, end = decoder.raw_decode(candidate, cursor)
+        except json.JSONDecodeError:
+            break
+        roots += 1
+        if first_end is None:
+            first_end = end
+        cursor = end
+
+    decode_error = error if isinstance(error, json.JSONDecodeError) else None
+    return {
+        "json_root_value_count": roots,
+        "json_code_fence_count": raw_text.count("```"),
+        "json_trailing_character_count": (
+            len(candidate[first_end:].strip()) if first_end is not None else None
+        ),
+        "json_error_line": getattr(decode_error, "lineno", None),
+        "json_error_column": getattr(decode_error, "colno", None),
+        "json_error_position": getattr(decode_error, "pos", None),
+    }
+
+
 def _token_usage(response: Any) -> Dict[str, Optional[int]]:
     usage = getattr(response, "usage_metadata", None) or {}
     if not isinstance(usage, Mapping):
@@ -346,6 +398,7 @@ def log_llm_run_summary(diagnostics: Mapping[str, Any]) -> None:
         status=diagnostics.get("status"),
         total_calls=diagnostics.get("total_calls", 0),
         succeeded_calls=diagnostics.get("succeeded_calls", 0),
+        recovered_calls=diagnostics.get("recovered_calls", 0),
         failed_calls=diagnostics.get("failed_calls", 0),
         contract_failed_calls=diagnostics.get("contract_failed_calls", 0),
         payload_capture_enabled=diagnostics.get("payload_capture_enabled", False),
@@ -445,6 +498,7 @@ class LLMTraceSession:
         with self._lock:
             calls = [item.model_copy(deep=True) for item in self._calls]
         failed = [item for item in calls if item.status == "failed"]
+        recovered = [item for item in calls if item.status == "recovered"]
         active = next((item for item in reversed(calls) if item.status == "started"), None)
         status: Literal["not_started", "running", "completed", "failed"]
         if failed:
@@ -462,7 +516,10 @@ class LLMTraceSession:
             status=status,
             current_call_id=active.call_id if active else None,
             total_calls=len(calls),
-            succeeded_calls=sum(item.status == "succeeded" for item in calls),
+            succeeded_calls=sum(
+                item.status in {"succeeded", "recovered"} for item in calls
+            ),
+            recovered_calls=len(recovered),
             failed_calls=len(failed),
             contract_failed_calls=sum(
                 item.status == "failed" and item.failure_stage != "transport"
@@ -476,6 +533,31 @@ class LLMTraceSession:
             calls=calls,
         )
         return diagnostics.model_dump(mode="json")
+
+    def mark_recovered(
+        self,
+        call_id: str,
+        *,
+        disposition: str = "recovered_by_format_repair",
+    ) -> None:
+        """Mark a failed contract response as losslessly recovered downstream."""
+        with self._lock:
+            diagnostic = next(
+                (item for item in self._calls if item.call_id == call_id),
+                None,
+            )
+            if diagnostic is None or diagnostic.status != "failed":
+                raise ValueError(f"Failed LLM call not found: {call_id}")
+            diagnostic.status = "recovered"
+            diagnostic.disposition = disposition
+        _emit_structured(
+            "llm_call_recovered",
+            service=self.service,
+            run_id=self.run_id,
+            call_id=call_id,
+            disposition=disposition,
+        )
+        self._notify()
 
     def _notify(self) -> None:
         if self.sink is None:
@@ -758,6 +840,8 @@ class LLMTraceSession:
             private_payload["processing"]["json"] = payload
         except Exception as exc:
             diagnostic.json_parse_status = "failed"
+            for field, value in inspect_json_structure(raw_text, exc).items():
+                setattr(diagnostic, field, value)
             self._fail(
                 diagnostic,
                 started=started,
@@ -772,6 +856,7 @@ class LLMTraceSession:
                 node=node,
                 operation=operation,
                 stage="json_parse",
+                raw_text=raw_text,
             ) from exc
         try:
             value = validator(payload)
