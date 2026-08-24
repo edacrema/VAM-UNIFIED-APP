@@ -71,6 +71,8 @@ from .qa_pipeline import (
     apply_field_patch,
     build_red_team_batches,
     build_sequential_correction_tasks,
+    correction_field_patch_contract,
+    project_correction_transport,
     validate_field_patch_payload,
 )
 from .schemas import (
@@ -255,6 +257,7 @@ def create_initial_state(
             "claim_identity_authority": CLAIM_IDENTITY_AUTHORITY,
             "claim_identity_version": CLAIM_IDENTITY_VERSION,
             "ignored_model_identifier_count": 0,
+            "ignored_correction_metadata_field_count": 0,
             "identity_fallback_artifacts": [],
             "delivery_contract_status": "not_validated",
             "fallback_policy": "disabled_live",
@@ -345,6 +348,7 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("claim_identity_authority", CLAIM_IDENTITY_AUTHORITY)
     diagnostics.setdefault("claim_identity_version", CLAIM_IDENTITY_VERSION)
     diagnostics.setdefault("ignored_model_identifier_count", 0)
+    diagnostics.setdefault("ignored_correction_metadata_field_count", 0)
     diagnostics.setdefault("identity_fallback_artifacts", [])
     diagnostics.setdefault("delivery_contract_status", "not_validated")
     diagnostics.setdefault("fallback_policy", "disabled_live")
@@ -1241,17 +1245,45 @@ def node_context_extractor(state: MFIReportState) -> dict:
             "current_node": "context_extractor",
         }
 
-    source_payload = [
-        {
+    seerist_trace = next(
+        (
+            trace_item
+            for trace_item in state.get("retriever_traces", []) or []
+            if isinstance(trace_item, Mapping)
+            and trace_item.get("retriever") == "Seerist"
+        ),
+        {},
+    )
+    source_payload = []
+    for document in docs[:8]:
+        if not isinstance(document, dict) or not document.get("doc_id"):
+            continue
+        payload_item = {
             "document_id": document.get("doc_id"),
             "source": document.get("source"),
             "date": document.get("date"),
             "title": document.get("title"),
             "content": str(document.get("content") or "")[:800],
         }
-        for document in docs[:8]
-        if isinstance(document, dict) and document.get("doc_id")
-    ]
+        if document.get("source") == "Seerist" and seerist_trace:
+            payload_item["report_country"] = state["country"]
+            payload_item["retrieval_scope_country"] = seerist_trace.get(
+                "seerist_query_country"
+            ) or seerist_trace.get("canonical_country")
+            payload_item["retrieval_scope_override"] = seerist_trace.get(
+                "country_override"
+            )
+        source_payload.append(payload_item)
+    broader_scope_rule = ""
+    if seerist_trace.get("country_override") == "gaza_to_palestine_aoi":
+        broader_scope_rule = """
+- Seerist documents were retrieved through the broader Palestine AOI for this
+  Gaza report. Do not treat retrieval as proof that a document concerns Gaza.
+- Classify West Bank-only material as unrelated.
+- Gaza-specific material may be accepted. Broader Palestinian context may be
+  accepted only when its broader scope is explicit in the statement and it is
+  not presented as a local or causal conclusion about Gaza.
+"""
     prompt = f"""Classify source-linked context for the {state['country']} MFI report.
 
 Return only statements directly supported by the supplied documents.
@@ -1265,6 +1297,7 @@ Rules:
 - Cite only supplied document_id values.
 - Never say that contextual events caused an MFI result.
 - Do not invent MFI values or use undocumented risk categories.
+{broader_scope_rule}
 
 DOCUMENTS:
 {json.dumps(source_payload)}
@@ -3218,8 +3251,15 @@ def node_process_correction_task(state: MFIReportState) -> dict:
         if str(flag.get("flag_id") or "") in task_flag_ids
     ]
     field_name = str(task["field_name"])
-    current_value = artifact.get(field_name)
-    read_only = {key: value for key, value in artifact.items() if key != field_name}
+    current_value = project_correction_transport(artifact.get(field_name))
+    read_only = project_correction_transport(
+        {key: value for key, value in artifact.items() if key != field_name}
+    )
+    field_contract = correction_field_patch_contract(
+        task=task,
+        artifact=artifact,
+        assessment_profile=state.get("assessment_profile") or {},
+    )
     authorized_document_ids = _correction_document_ids(state, task, artifact)
     documents = [
         {
@@ -3242,11 +3282,18 @@ the application. Every quantitative statement must cite an exact authorized
 metric ID and value. Preserve the purpose, scope, and valid evidence linkage of
 the field while resolving every supplied QA finding.
 
+The PATCH_CONTRACT below is authoritative. Its allowed field lists are closed:
+do not copy application validation metadata or add any other property. The
+cardinality is a maximum, not a quota.
+
 TASK:
 {json.dumps(task)}
 
 QA_FINDINGS:
 {json.dumps(task_flags)}
+
+PATCH_CONTRACT:
+{json.dumps(field_contract)}
 
 CURRENT_FIELD:
 {json.dumps(current_value)}
@@ -3263,14 +3310,16 @@ AUTHORIZED_DOCUMENTS:
 PROHIBITIONS:
 {json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
-Return exactly: {{"replacement": <replacement for {field_name}>}}.
+Return JSON matching PATCH_CONTRACT.example exactly in structure, replacing
+only the example content with the corrected value for {field_name}.
 """
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
-    operation = f"mfi.{task['artifact_type']}_field_correction.v2"
+    operation = f"mfi.{task['artifact_type']}_field_correction.v3"
+    ignored_metadata_fields: List[str] = []
     traced, call_count = _invoke_json_with_one_normalization(
         trace=trace,
         model=get_model(),
@@ -3280,9 +3329,27 @@ Return exactly: {{"replacement": <replacement for {field_name}>}}.
         artifact_type=str(task["artifact_type"]),
         artifact_id=str(task["artifact_id"]),
         correction_attempt=int(task["attempt_number"]),
-        validator=lambda payload: validate_field_patch_payload(payload, task=task),
+        validator=lambda payload: validate_field_patch_payload(
+            payload,
+            task=task,
+            ignored_metadata_fields=ignored_metadata_fields,
+        ),
         task_id=str(task["task_id"]),
     )
+    if ignored_metadata_fields:
+        logger.info(
+            "MFI correction transport metadata ignored",
+            extra={
+                "mfi_event": "correction_transport_metadata_ignored",
+                "mfi_call_id": traced.call_id,
+                "mfi_task_id": task["task_id"],
+                "mfi_artifact_type": task["artifact_type"],
+                "mfi_artifact_id": task["artifact_id"],
+                "mfi_field_name": field_name,
+                "mfi_ignored_metadata_fields": sorted(ignored_metadata_fields),
+                "mfi_ignored_metadata_field_count": len(ignored_metadata_fields),
+            },
+        )
     try:
         merged = apply_field_patch(
             task=task,
@@ -3316,6 +3383,9 @@ Return exactly: {{"replacement": <replacement for {field_name}>}}.
     )
     remaining = queue[1:]
     diagnostics = _generation_diagnostics(state)
+    diagnostics["ignored_correction_metadata_field_count"] = int(
+        diagnostics.get("ignored_correction_metadata_field_count", 0) or 0
+    ) + len(ignored_metadata_fields)
     diagnostics["correction_tasks_completed"] = int(
         diagnostics.get("correction_tasks_completed", 0) or 0
     ) + 1
@@ -3700,6 +3770,9 @@ def run_mfi_report_generation(
             ),
             "mfi_ignored_model_identifier_count": diagnostics.get(
                 "ignored_model_identifier_count", 0
+            ),
+            "mfi_ignored_correction_metadata_field_count": diagnostics.get(
+                "ignored_correction_metadata_field_count", 0
             ),
             "mfi_delivery_contract_status": diagnostics.get(
                 "delivery_contract_status"

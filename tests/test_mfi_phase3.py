@@ -774,14 +774,6 @@ def test_field_correction_prompt_is_closed_catalog_and_patch_is_targeted(
     )
     drafted = copy.deepcopy(phase3_bundle["dimensions"][dimension])
     replacement = copy.deepcopy(drafted["recommendations"][0])
-    for key in (
-        "claim_id",
-        "validation_status",
-        "validation_flags",
-        "validation_flag_ids",
-        "substituted",
-    ):
-        replacement.pop(key, None)
     replacement["text"] = "Use the cited evidence for review."
 
     class Model:
@@ -840,8 +832,14 @@ def test_field_correction_prompt_is_closed_catalog_and_patch_is_targeted(
     )
     assert len(model.prompts) == 1
     assert "AUTHORIZED_CLAIM_CATALOG" in model.prompts[0]
+    assert "PATCH_CONTRACT" in model.prompts[0]
+    assert '"maximum_items":' in model.prompts[0]
     assert "metric_id" in model.prompts[0]
     assert "sub_scores" not in model.prompts[0]
+    assert "validation_status" not in model.prompts[0]
+    assert "validation_flags" not in model.prompts[0]
+    assert "validation_flag_ids" not in model.prompts[0]
+    assert "substituted" not in model.prompts[0]
     assert (
         update["dimension_narratives"][dimension]["key_findings"]
         == previous["key_findings"]
@@ -849,6 +847,15 @@ def test_field_correction_prompt_is_closed_catalog_and_patch_is_targeted(
     assert (
         update["dimension_narratives"][dimension]["recommendations"][0]["text"]
         == "Use the cited evidence for review."
+    )
+    assert (
+        update["generation_diagnostics"][
+            "ignored_correction_metadata_field_count"
+        ]
+        == 5
+    )
+    assert update["llm_diagnostics"]["calls"][-1]["operation"].endswith(
+        "_field_correction.v3"
     )
 
 

@@ -1210,6 +1210,7 @@ class MFIGenerationDiagnostics(BaseModel):
     claim_identity_authority: Literal["application"] = "application"
     claim_identity_version: Literal["mfi-claim-id-v1"] = "mfi-claim-id-v1"
     ignored_model_identifier_count: int = Field(default=0, ge=0)
+    ignored_correction_metadata_field_count: int = Field(default=0, ge=0)
     identity_fallback_artifacts: List[str] = Field(default_factory=list)
     delivery_contract_status: Literal[
         "not_validated",

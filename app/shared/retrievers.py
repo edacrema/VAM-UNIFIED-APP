@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -18,6 +19,19 @@ from app.shared.countries import resolve_country
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+@dataclass(frozen=True)
+class SeeristCountryContext:
+    """Provider-specific country resolution without changing report identity."""
+
+    canonical_country: Optional[str]
+    canonical_iso3: Optional[str]
+    query_country: Optional[str]
+    query_iso3: Optional[str]
+    aoi_id: Optional[str]
+    override_code: Optional[str] = None
+    error: Optional[str] = None
 
 
 class SeeristRetriever:
@@ -113,7 +127,15 @@ class SeeristRetriever:
         "ZMB": "ZM",
         "ZWE": "ZW",
     }
-    UNMAPPED_CANONICAL_COUNTRIES = {"Gaza Strip", "West Bank"}
+    COUNTRY_OVERRIDES: Dict[str, tuple[str, str, str, str]] = {
+        "Gaza Strip": (
+            "Palestine, State of",
+            "PSE",
+            "PS",
+            "gaza_to_palestine_aoi",
+        )
+    }
+    UNMAPPED_CANONICAL_COUNTRIES = {"West Bank"}
 
     def __init__(
         self,
@@ -206,21 +228,64 @@ class SeeristRetriever:
             return ""
         return str(field)
 
-    def _resolve_country_context(self, country: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def _resolve_country_context(self, country: str) -> SeeristCountryContext:
         try:
             canonical_country, iso3 = resolve_country(country)
         except ValueError as exc:
-            return None, None, None, str(exc)
+            return SeeristCountryContext(
+                canonical_country=None,
+                canonical_iso3=None,
+                query_country=None,
+                query_iso3=None,
+                aoi_id=None,
+                error=str(exc),
+            )
+
+        override = self.COUNTRY_OVERRIDES.get(canonical_country)
+        if override is not None:
+            query_country, query_iso3, aoi_id, override_code = override
+            return SeeristCountryContext(
+                canonical_country=canonical_country,
+                canonical_iso3=iso3,
+                query_country=query_country,
+                query_iso3=query_iso3,
+                aoi_id=aoi_id,
+                override_code=override_code,
+            )
 
         if canonical_country in self.UNMAPPED_CANONICAL_COUNTRIES:
-            return canonical_country, iso3, None, f"Country '{canonical_country}' does not have a Seerist aoiId mapping."
+            return SeeristCountryContext(
+                canonical_country=canonical_country,
+                canonical_iso3=iso3,
+                query_country=canonical_country,
+                query_iso3=iso3,
+                aoi_id=None,
+                error=(
+                    f"Country '{canonical_country}' does not have a Seerist "
+                    "aoiId mapping."
+                ),
+            )
 
         aoi_id = self.ISO3_TO_AOI_ID.get(iso3)
         if not aoi_id:
-            return canonical_country, iso3, None, (
-                f"Country '{canonical_country}' ({iso3}) does not have a Seerist aoiId mapping."
+            return SeeristCountryContext(
+                canonical_country=canonical_country,
+                canonical_iso3=iso3,
+                query_country=canonical_country,
+                query_iso3=iso3,
+                aoi_id=None,
+                error=(
+                    f"Country '{canonical_country}' ({iso3}) does not have a "
+                    "Seerist aoiId mapping."
+                ),
             )
-        return canonical_country, iso3, aoi_id, None
+        return SeeristCountryContext(
+            canonical_country=canonical_country,
+            canonical_iso3=iso3,
+            query_country=canonical_country,
+            query_iso3=iso3,
+            aoi_id=aoi_id,
+        )
 
     def _map_feature_to_document(self, feature: Dict[str, Any], idx: int) -> Dict[str, Any]:
         props = feature.get("properties", {}) if isinstance(feature, dict) else {}
@@ -363,7 +428,7 @@ class SeeristRetriever:
         max_per_query: int = 20,
     ) -> List[Dict[str, Any]]:
         started = time.time()
-        canonical_country, iso3, aoi_id, country_error = self._resolve_country_context(country)
+        country_context = self._resolve_country_context(country)
         unique_queries: List[str] = []
         seen_queries = set()
         for query in queries:
@@ -376,9 +441,12 @@ class SeeristRetriever:
         trace: Dict[str, Any] = {
             "retriever": "Seerist",
             "country": country,
-            "canonical_country": canonical_country,
-            "country_iso3": iso3,
-            "aoi_id": aoi_id,
+            "canonical_country": country_context.canonical_country,
+            "country_iso3": country_context.canonical_iso3,
+            "seerist_query_country": country_context.query_country,
+            "seerist_query_iso3": country_context.query_iso3,
+            "aoi_id": country_context.aoi_id,
+            "country_override": country_context.override_code,
             "start_date": start_date,
             "end_date": end_date,
             "queries": unique_queries,
@@ -398,8 +466,8 @@ class SeeristRetriever:
                 logger.info(json.dumps({"seerist_trace": trace}, ensure_ascii=False))
             return []
 
-        if country_error:
-            trace["error"] = country_error
+        if country_context.error:
+            trace["error"] = country_context.error
             trace["duration_ms"] = int((time.time() - started) * 1000)
             self.last_trace = trace
             if self.verbose:
@@ -427,7 +495,7 @@ class SeeristRetriever:
                 search_query=query,
                 start_iso=start_iso,
                 end_iso=end_iso,
-                aoi_id=aoi_id or "",
+                aoi_id=country_context.aoi_id or "",
                 max_records=max_per_query,
             )
             trace["query_traces"].append(query_trace)

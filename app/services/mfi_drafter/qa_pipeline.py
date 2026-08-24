@@ -18,19 +18,18 @@ from .errors import MFIGenerationBlockedError, claim_identity_blocked
 from .methodology import DISPLAY_DIMENSIONS
 from .narrative import NARRATIVE_DENSITY_POLICY, apply_narrative_density_policy
 from .schemas import (
+    MFIClaimPatchValue,
     MFIContextEvidenceStatement,
     MFIContextClassificationFieldPatch,
     MFIContextDocumentsFieldPatch,
     MFIContextTextFieldPatch,
-    MFIClaimFieldPatch,
-    MFIClaimListFieldPatch,
     MFICorrectionTask,
     MFIDimensionNarrative,
     MFIExecutiveNarrative,
     MFIFieldPatch,
     MFIMarketNarrative,
     MFIRedTeamReviewBatch,
-    MFISubdimensionFieldPatch,
+    MFISubdimensionPatchValue,
 )
 
 MFI_RED_TEAM_BATCH_TARGET_CHARACTERS = 45_000
@@ -85,6 +84,211 @@ _LIST_CLAIM_FIELDS = {
     "limitations",
 }
 _SINGLE_CLAIM_FIELDS = {"summary", "motivation", "scope_statement"}
+
+APPLICATION_OWNED_CLAIM_FIELDS = frozenset(
+    {
+        "claim_id",
+        "validation_status",
+        "validation_flags",
+        "validation_flag_ids",
+        "substituted",
+    }
+)
+
+
+def project_correction_transport(value: Any) -> Any:
+    """Return the LLM-visible projection without application-owned claim state."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): project_correction_transport(item)
+            for key, item in value.items()
+            if str(key) not in APPLICATION_OWNED_CLAIM_FIELDS
+        }
+    if isinstance(value, list):
+        return [project_correction_transport(item) for item in value]
+    if isinstance(value, tuple):
+        return [project_correction_transport(item) for item in value]
+    return deepcopy(value)
+
+
+def _strip_application_owned_claim_fields(
+    value: Any,
+    *,
+    path: str,
+    ignored_metadata_fields: List[str],
+) -> Any:
+    """Strip only known application fields while preserving unknown extras."""
+    if isinstance(value, Mapping):
+        projected: Dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            item_path = f"{path}.{key}" if path else key
+            if key in APPLICATION_OWNED_CLAIM_FIELDS:
+                ignored_metadata_fields.append(item_path)
+                continue
+            projected[key] = _strip_application_owned_claim_fields(
+                item,
+                path=item_path,
+                ignored_metadata_fields=ignored_metadata_fields,
+            )
+        return projected
+    if isinstance(value, list):
+        return [
+            _strip_application_owned_claim_fields(
+                item,
+                path=f"{path}[{index}]",
+                ignored_metadata_fields=ignored_metadata_fields,
+            )
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, tuple):
+        return [
+            _strip_application_owned_claim_fields(
+                item,
+                path=f"{path}[{index}]",
+                ignored_metadata_fields=ignored_metadata_fields,
+            )
+            for index, item in enumerate(value)
+        ]
+    return value
+
+
+def _claim_patch_example(*, claim_kind: str) -> Dict[str, Any]:
+    return {
+        "text": "Revised claim supported by the cited evidence.",
+        "claim_kind": claim_kind,
+        "metric_ids": ["exact.authorized.metric.id"],
+        "document_ids": [],
+        "scope": "assessment",
+        "polarity": "neutral",
+    }
+
+
+def correction_field_patch_contract(
+    *,
+    task: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    assessment_profile: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Describe the exact field-only response contract and R8 cardinality."""
+    artifact_type = str(task["artifact_type"])
+    field_name = str(task["field_name"])
+    if artifact_type == "context":
+        examples: Dict[str, Any] = {
+            "text": {"replacement": "Revised source-supported statement."},
+            "classification": {"replacement": "corroborating"},
+            "document_ids": {"replacement": ["supplied-document-id"]},
+        }
+        shapes = {
+            "text": "non-empty string",
+            "classification": (
+                "one of: corroborating, potentially_explanatory, unrelated"
+            ),
+            "document_ids": "array of supplied document IDs",
+        }
+        return {
+            "field": field_name,
+            "replacement_shape": shapes[field_name],
+            "nullable": False,
+            "example": examples[field_name],
+        }
+
+    claim_kind = _claim_kind_for_field(field_name)
+    claim_example = _claim_patch_example(claim_kind=claim_kind)
+    if field_name in _SINGLE_CLAIM_FIELDS:
+        nullable = field_name in {"motivation", "scope_statement"}
+        return {
+            "field": field_name,
+            "replacement_shape": "one claim object",
+            "allowed_claim_fields": list(claim_example),
+            "nullable": nullable,
+            "example": {"replacement": claim_example},
+        }
+
+    if field_name == "subdimension_analysis":
+        maximum_items = (
+            NARRATIVE_DENSITY_POLICY.priority_subdimensions
+            if bool(artifact.get("is_priority"))
+            else 0
+        )
+        return {
+            "field": field_name,
+            "replacement_shape": "array of subdimension objects",
+            "allowed_subdimension_fields": [
+                "name",
+                "subsection_metric_id",
+                "score_0_10",
+                "interpretation",
+                "driver_metric_ids",
+            ],
+            "allowed_interpretation_fields": list(claim_example),
+            "minimum_items": 0,
+            "maximum_items": maximum_items,
+            "nullable": False,
+            "example": {
+                "replacement": [
+                    {
+                        "name": "Authorized subsection label",
+                        "subsection_metric_id": "exact.authorized.metric.id",
+                        "score_0_10": 5.0,
+                        "interpretation": claim_example,
+                        "driver_metric_ids": [],
+                    }
+                ]
+            },
+        }
+
+    if field_name not in _LIST_CLAIM_FIELDS:
+        raise ValueError(f"Unsupported correction field: {field_name}")
+    if artifact_type == "dimension":
+        priority = bool(artifact.get("is_priority"))
+        maximum_items = {
+            "key_findings": (
+                NARRATIVE_DENSITY_POLICY.priority_findings
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_findings
+            ),
+            "geographic_patterns": (
+                NARRATIVE_DENSITY_POLICY.priority_geographic_patterns
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_geographic_patterns
+            ),
+            "data_limitations": (
+                NARRATIVE_DENSITY_POLICY.priority_limitations
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_limitations
+            ),
+            "recommendations": (
+                NARRATIVE_DENSITY_POLICY.priority_recommendations
+                if priority
+                else NARRATIVE_DENSITY_POLICY.non_priority_recommendations
+            ),
+        }[field_name]
+    elif artifact_type == "market":
+        maximum_items = {
+            "priority_issues": NARRATIVE_DENSITY_POLICY.market_priority_issues,
+            "recommended_interventions": (
+                NARRATIVE_DENSITY_POLICY.market_recommendations
+            ),
+            "limitations": NARRATIVE_DENSITY_POLICY.market_limitations,
+        }[field_name]
+    else:
+        maximum_items = {
+            "key_findings": len(
+                assessment_profile.get("priority_dimension_names", []) or []
+            ),
+            "recommendations": NARRATIVE_DENSITY_POLICY.executive_recommendations,
+            "limitations": NARRATIVE_DENSITY_POLICY.executive_limitations,
+        }[field_name]
+    return {
+        "field": field_name,
+        "replacement_shape": "array of claim objects",
+        "allowed_claim_fields": list(claim_example),
+        "minimum_items": 0,
+        "maximum_items": maximum_items,
+        "nullable": False,
+        "example": {"replacement": [claim_example]},
+    }
 
 
 def _short_hash(value: str) -> str:
@@ -193,32 +397,20 @@ def build_sequential_correction_tasks(
     return tasks
 
 
-def _validate_claim_transport(value: Any, *, field_name: str) -> Dict[str, Any]:
+def _validate_claim_transport(
+    value: Any,
+    *,
+    field_name: str,
+    ignored_metadata_fields: List[str],
+) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field_name} replacement must be a claim object")
-    claim = dict(value)
-    for key in (
-        "claim_id",
-        "validation_status",
-        "validation_flags",
-        "validation_flag_ids",
-        "substituted",
-    ):
-        claim.pop(key, None)
-    if not str(claim.get("text") or "").strip():
-        raise ValueError(f"{field_name}.text is required")
-    for key in ("metric_ids", "document_ids"):
-        if not isinstance(claim.get(key), list):
-            raise ValueError(f"{field_name}.{key} must be a list")
-    if str(claim.get("scope") or "") not in {
-        "assessment", "region", "market", "surveyed_traders", "context"
-    }:
-        raise ValueError(f"{field_name}.scope is invalid")
-    if str(claim.get("polarity") or "") not in {
-        "favorable", "unfavorable", "neutral", "descriptive"
-    }:
-        raise ValueError(f"{field_name}.polarity is invalid")
-    return claim
+    claim = _strip_application_owned_claim_fields(
+        value,
+        path=field_name,
+        ignored_metadata_fields=ignored_metadata_fields,
+    )
+    return MFIClaimPatchValue.model_validate(claim).model_dump()
 
 
 def _claim_kind_for_field(field_name: str) -> str:
@@ -242,8 +434,12 @@ def validate_field_patch_payload(
     payload: Any,
     *,
     task: Mapping[str, Any],
+    ignored_metadata_fields: List[str] | None = None,
 ) -> Any:
     """Validate only the field requested by a correction task."""
+    ignored_fields = (
+        ignored_metadata_fields if ignored_metadata_fields is not None else []
+    )
     artifact_type = str(task["artifact_type"])
     field_name = str(task["field_name"])
     if artifact_type == "context":
@@ -264,45 +460,46 @@ def validate_field_patch_payload(
         raise ValueError(
             f"Unsupported {artifact_type} correction field: {field_name}"
         )
+    replacement = MFIFieldPatch.model_validate(payload).replacement
     if field_name in _SINGLE_CLAIM_FIELDS:
-        replacement = MFIClaimFieldPatch.model_validate(payload).model_dump()[
-            "replacement"
-        ]
         if replacement is None and field_name in {"motivation", "scope_statement"}:
             return None
-        claim = _validate_claim_transport(replacement, field_name=field_name)
+        claim = _validate_claim_transport(
+            replacement,
+            field_name=field_name,
+            ignored_metadata_fields=ignored_fields,
+        )
         claim["claim_kind"] = _claim_kind_for_field(field_name)
         return claim
     if field_name in _LIST_CLAIM_FIELDS:
-        replacement = MFIClaimListFieldPatch.model_validate(payload).model_dump()[
-            "replacement"
-        ]
+        if not isinstance(replacement, list):
+            raise ValueError(f"{field_name} replacement must be a list")
         claims = []
         for index, item in enumerate(replacement):
             claim = _validate_claim_transport(
-                item, field_name=f"{field_name}[{index}]"
+                item,
+                field_name=f"{field_name}[{index}]",
+                ignored_metadata_fields=ignored_fields,
             )
             claim["claim_kind"] = _claim_kind_for_field(field_name)
             claims.append(claim)
         return claims
     if field_name == "subdimension_analysis":
-        replacement = MFISubdimensionFieldPatch.model_validate(payload).model_dump()[
-            "replacement"
-        ]
+        if not isinstance(replacement, list):
+            raise ValueError("subdimension_analysis replacement must be a list")
         result: List[Dict[str, Any]] = []
         for index, item in enumerate(replacement):
             if not isinstance(item, Mapping):
                 raise ValueError(f"subdimension_analysis[{index}] must be an object")
-            normalized = dict(item)
-            normalized["interpretation"] = _validate_claim_transport(
-                normalized.get("interpretation"),
-                field_name=f"subdimension_analysis[{index}].interpretation",
+            normalized = _strip_application_owned_claim_fields(
+                item,
+                path=f"subdimension_analysis[{index}]",
+                ignored_metadata_fields=ignored_fields,
             )
+            normalized = MFISubdimensionPatchValue.model_validate(
+                normalized
+            ).model_dump()
             normalized["interpretation"]["claim_kind"] = "finding"
-            if not isinstance(normalized.get("driver_metric_ids", []), list):
-                raise ValueError(
-                    f"subdimension_analysis[{index}].driver_metric_ids must be a list"
-                )
             result.append(normalized)
         return result
     raise ValueError(f"Unsupported correction field: {field_name}")

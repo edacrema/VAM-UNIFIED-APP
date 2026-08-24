@@ -206,13 +206,69 @@ def test_seerist_normalizes_country_and_skips_unmapped_without_call():
         queries=["inflation"],
         start_date="2026-01-01",
         end_date="2026-01-31",
-        country="Gaza Strip",
+        country="West Bank",
         max_per_query=3,
     )
 
     assert documents == []
     assert "does not have a Seerist aoiId mapping" in unmapped_retriever.last_trace["error"]
     assert unmapped_session.gets == []
+
+
+def test_seerist_gaza_uses_palestine_aoi_without_changing_search():
+    for country in ("Gaza", "Gaza Strip", "  gAzA  "):
+        session = FakeSession(
+            gets=[FakeResponse({"metadata": {"total": 0}, "features": []})]
+        )
+        retriever = SeeristRetriever(api_key="test-key", session=session)
+
+        documents = retriever.fetch_batch(
+            queries=["market availability"],
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+            country=country,
+            max_per_query=3,
+        )
+
+        assert documents == []
+        assert len(session.gets) == 1
+        assert session.gets[0]["params"]["aoiId"] == "PS"
+        assert session.gets[0]["params"]["search"] == "market availability"
+        assert retriever.last_trace["canonical_country"] == "Gaza Strip"
+        assert retriever.last_trace["country_iso3"] == "PSG"
+        assert retriever.last_trace["seerist_query_country"] == "Palestine, State of"
+        assert retriever.last_trace["seerist_query_iso3"] == "PSE"
+        assert retriever.last_trace["country_override"] == "gaza_to_palestine_aoi"
+        assert retriever.last_trace["error"] is None
+
+
+def test_seerist_palestine_uses_ps_without_gaza_override():
+    session = FakeSession(
+        gets=[FakeResponse({"metadata": {"total": 0}, "features": []})]
+    )
+    retriever = SeeristRetriever(api_key="test-key", session=session)
+
+    retriever.fetch(
+        search_query="prices",
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+        country="Palestine",
+        max_records=3,
+    )
+
+    assert session.gets[0]["params"]["aoiId"] == "PS"
+    assert retriever.last_trace["canonical_country"] == "Palestine, State of"
+    assert retriever.last_trace["country_iso3"] == "PSE"
+    assert retriever.last_trace["seerist_query_country"] == "Palestine, State of"
+    assert retriever.last_trace["country_override"] is None
+
+
+def test_mfi_and_market_monitor_share_the_gaza_aware_seerist_retriever():
+    mfi_graph = import_graph_module("app.services.mfi_drafter.graph")
+    market_graph = import_graph_module("app.services.market_monitor.graph")
+
+    assert mfi_graph.SeeristRetriever is SeeristRetriever
+    assert market_graph.SeeristRetriever is SeeristRetriever
 
 
 def test_market_monitor_news_retrieval_combines_and_deduplicates(monkeypatch):

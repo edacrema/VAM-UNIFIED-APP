@@ -20,6 +20,8 @@ from app.services.mfi_drafter.qa_pipeline import (
     apply_field_patch,
     build_red_team_batches,
     build_sequential_correction_tasks,
+    correction_field_patch_contract,
+    project_correction_transport,
     validate_field_patch_payload,
 )
 from app.services.mfi_drafter.schemas import MFIReleaseControl
@@ -141,7 +143,7 @@ def test_field_only_geographic_patch_merges_without_requiring_summary() -> None:
     )
 
 
-def test_patch_contract_rejects_complete_artifact_and_model_identity() -> None:
+def test_patch_contract_rejects_complete_artifact() -> None:
     task = build_sequential_correction_tasks(
         [_flag("geo")],
         attempt_number=1,
@@ -150,8 +152,253 @@ def test_patch_contract_rejects_complete_artifact_and_model_identity() -> None:
     with pytest.raises(Exception):
         validate_field_patch_payload(
             {
-                "replacement": [{**_claim("Pattern.", scope="market"), "claim_id": "model-id"}],
+                "replacement": [{**_claim("Pattern.", scope="market")}],
                 "summary": _claim("Unrequested field."),
+            },
+            task=task,
+        )
+
+
+def test_patch_contract_ignores_only_application_owned_claim_metadata() -> None:
+    original = _dimension_narrative("Infrastructure")
+    task = build_sequential_correction_tasks(
+        [
+            _flag(
+                "recommendation",
+                artifact_id="Infrastructure",
+                field_name="recommendations",
+                claim_id="dimension.infrastructure.recommendation.1",
+            )
+        ],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": []},
+    )[0]
+    ignored: list[str] = []
+    payload = {
+        "replacement": [
+            {
+                **_claim("Review the cited Infrastructure evidence."),
+                "claim_kind": "recommendation",
+                "claim_id": "model-owned-id",
+                "validation_status": "verified",
+                "validation_flags": [],
+                "validation_flag_ids": [],
+                "substituted": False,
+            }
+        ]
+    }
+
+    replacement = validate_field_patch_payload(
+        payload,
+        task=task,
+        ignored_metadata_fields=ignored,
+    )
+
+    assert len(ignored) == 5
+    assert {item.rsplit(".", 1)[-1] for item in ignored} == {
+        "claim_id",
+        "validation_status",
+        "validation_flags",
+        "validation_flag_ids",
+        "substituted",
+    }
+    assert not set(payload["replacement"][0]) <= set(replacement[0])
+    assert all(
+        key not in replacement[0]
+        for key in (
+            "claim_id",
+            "validation_status",
+            "validation_flags",
+            "validation_flag_ids",
+            "substituted",
+        )
+    )
+    merged = apply_field_patch(
+        task=task,
+        replacement=replacement,
+        dimension_narratives={"Infrastructure": original},
+        market_narratives={},
+        executive_narrative={},
+        context_evidence=[],
+        assessment_profile={
+            "dimensions": [{"dimension": "Infrastructure", "is_priority": True}],
+            "priority_dimension_names": ["Infrastructure"],
+        },
+    )
+    claim = merged["dimension_narratives"]["Infrastructure"]["recommendations"][0]
+    assert claim["claim_id"] == dimension_claim_id(
+        "Infrastructure", "recommendation", 1
+    )
+    assert "validation_status" not in claim
+
+
+def test_patch_contract_keeps_unknown_extras_fail_closed() -> None:
+    task = build_sequential_correction_tasks(
+        [_flag("geo")],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": []},
+    )[0]
+    with pytest.raises(Exception):
+        validate_field_patch_payload(
+            {
+                "replacement": [
+                    {
+                        **_claim("Pattern.", scope="market"),
+                        "unknown_model_field": "must fail",
+                    }
+                ]
+            },
+            task=task,
+        )
+
+
+def test_patch_transport_projection_and_contract_are_closed_and_bounded() -> None:
+    artifact = _dimension_narrative("Infrastructure")
+    artifact["recommendations"] = [
+        {
+            **_claim("Current recommendation."),
+            "claim_id": "canonical-id",
+            "validation_status": "unverified",
+            "validation_flags": ["scope_mismatch"],
+            "validation_flag_ids": ["flag-1"],
+            "substituted": False,
+        }
+    ]
+    projected = project_correction_transport(artifact)
+    serialized = json.dumps(projected)
+    assert "claim_id" not in serialized
+    assert "validation_status" not in serialized
+    assert "validation_flags" not in serialized
+    assert "validation_flag_ids" not in serialized
+    assert "substituted" not in serialized
+
+    task = build_sequential_correction_tasks(
+        [
+            _flag(
+                "recommendation",
+                artifact_id="Infrastructure",
+                field_name="recommendations",
+            )
+        ],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": []},
+    )[0]
+    contract = correction_field_patch_contract(
+        task=task,
+        artifact=artifact,
+        assessment_profile={"priority_dimension_names": ["Infrastructure"]},
+    )
+    assert contract["replacement_shape"] == "array of claim objects"
+    assert contract["maximum_items"] == 3
+    assert list(contract["example"]) == ["replacement"]
+    assert contract["allowed_claim_fields"] == [
+        "text",
+        "claim_kind",
+        "metric_ids",
+        "document_ids",
+        "scope",
+        "polarity",
+    ]
+
+
+def test_subdimension_patch_strips_nested_application_metadata_only() -> None:
+    task = build_sequential_correction_tasks(
+        [
+            _flag(
+                "subdimension",
+                artifact_id="Infrastructure",
+                field_name="subdimension_analysis",
+                claim_id=None,
+            )
+        ],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": []},
+    )[0]
+    ignored: list[str] = []
+    replacement = validate_field_patch_payload(
+        {
+            "replacement": [
+                {
+                    "name": "Condition",
+                    "subsection_metric_id": "infrastructure.condition",
+                    "score_0_10": 6.5,
+                    "interpretation": {
+                        **_claim("Condition evidence should guide review."),
+                        "claim_id": "model-subdimension-id",
+                        "validation_status": "verified",
+                    },
+                    "driver_metric_ids": [],
+                }
+            ]
+        },
+        task=task,
+        ignored_metadata_fields=ignored,
+    )
+
+    assert len(ignored) == 2
+    assert replacement[0]["interpretation"]["claim_kind"] == "finding"
+    assert "claim_id" not in replacement[0]["interpretation"]
+    assert "validation_status" not in replacement[0]["interpretation"]
+
+
+@pytest.mark.parametrize(
+    ("artifact_type", "artifact_id", "field_name", "is_list"),
+    [
+        ("dimension", "Infrastructure", "summary", False),
+        ("market", "Market A", "priority_issues", True),
+        ("executive_summary", "executive_summary", "motivation", False),
+    ],
+)
+def test_known_metadata_is_ignored_for_each_claim_patch_shape(
+    artifact_type: str,
+    artifact_id: str,
+    field_name: str,
+    is_list: bool,
+) -> None:
+    task = build_sequential_correction_tasks(
+        [
+            _flag(
+                "field",
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                field_name=field_name,
+            )
+        ],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": ["Market A"]},
+    )[0]
+    claim = {
+        **_claim("Corrected field."),
+        "claim_id": "model-id",
+        "validation_status": "verified",
+    }
+    ignored: list[str] = []
+    replacement = validate_field_patch_payload(
+        {"replacement": [claim] if is_list else claim},
+        task=task,
+        ignored_metadata_fields=ignored,
+    )
+    parsed_claim = replacement[0] if is_list else replacement
+    assert len(ignored) == 2
+    assert "claim_id" not in parsed_claim
+    assert "validation_status" not in parsed_claim
+
+
+def test_patch_contract_rejects_missing_required_claim_fields() -> None:
+    task = build_sequential_correction_tasks(
+        [_flag("geo")],
+        attempt_number=1,
+        assessment_profile={"priority_market_names": []},
+    )[0]
+    with pytest.raises(Exception):
+        validate_field_patch_payload(
+            {
+                "replacement": [
+                    {
+                        "text": "Missing citations and semantic fields.",
+                        "metric_ids": [],
+                    }
+                ]
             },
             task=task,
         )

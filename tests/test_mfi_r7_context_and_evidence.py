@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 
 import pytest
@@ -269,8 +270,10 @@ def test_finalize_qa_blocks_material_context_instead_of_withdrawing_it() -> None
 class _Model:
     def __init__(self, content: str):
         self.content = content
+        self.messages = []
 
     def invoke(self, _messages):
+        self.messages.extend(_messages)
         return type("Response", (), {"content": self.content})()
 
 
@@ -299,6 +302,84 @@ def test_context_extractor_distinguishes_schema_failure_and_no_accepted(monkeypa
     )
     unrelated = graph.node_context_extractor(state)
     assert unrelated["context_status"]["status"] == "no_accepted_statements"
+
+
+def test_gaza_context_classifier_receives_broader_palestine_scope(monkeypatch) -> None:
+    documents = [
+        {
+            "doc_id": "gaza-doc",
+            "source": "Seerist",
+            "date": "2026-01-01",
+            "title": "Gaza market update",
+            "content": "The document explicitly discusses Gaza market access.",
+        },
+        {
+            "doc_id": "west-bank-doc",
+            "source": "Seerist",
+            "date": "2026-01-02",
+            "title": "West Bank update",
+            "content": "This document concerns only markets in the West Bank.",
+        },
+        {
+            "doc_id": "palestine-doc",
+            "source": "Seerist",
+            "date": "2026-01-03",
+            "title": "Palestinian context",
+            "content": "This document describes broader Palestinian conditions.",
+        },
+    ]
+    model = _Model(
+        json.dumps(
+            {
+                "statements": [
+                    {
+                        "text": "The source reports Gaza-specific market access constraints.",
+                        "classification": "corroborating",
+                        "document_ids": ["gaza-doc"],
+                    },
+                    {
+                        "text": "The source concerns only the West Bank.",
+                        "classification": "unrelated",
+                        "document_ids": ["west-bank-doc"],
+                    },
+                    {
+                        "text": "At the broader Palestinian scope, conditions may inform interpretation.",
+                        "classification": "potentially_explanatory",
+                        "document_ids": ["palestine-doc"],
+                    },
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(graph, "get_model", lambda: model)
+
+    update = graph.node_context_extractor(
+        {
+            "country": "Gaza",
+            "contextual_documents": documents,
+            "retriever_traces": [
+                {
+                    "retriever": "Seerist",
+                    "canonical_country": "Gaza Strip",
+                    "seerist_query_country": "Palestine, State of",
+                    "country_override": "gaza_to_palestine_aoi",
+                    "error": None,
+                }
+            ],
+            "generation_diagnostics": {
+                "retrievers": {"ReliefWeb": "no_results", "Seerist": "completed"}
+            },
+            "llm_calls": 0,
+        }
+    )
+
+    prompt = model.messages[0].content
+    assert '"report_country": "Gaza"' in prompt
+    assert '"retrieval_scope_country": "Palestine, State of"' in prompt
+    assert "Classify West Bank-only material as unrelated" in prompt
+    assert "not presented as a local or causal conclusion about Gaza" in prompt
+    assert update["context_status"]["status"] == "available"
+    assert update["context_status"]["final_accepted_statements"] == 2
 
 
 def test_partial_live_retrieval_keeps_raw_error_only_in_trace(monkeypatch) -> None:
