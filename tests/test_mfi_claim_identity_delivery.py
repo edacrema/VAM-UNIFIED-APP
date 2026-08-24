@@ -7,6 +7,7 @@ import re
 import pytest
 
 from app.services.mfi_drafter import graph, router
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.claim_identity import (
     CLAIM_IDENTITY_AUTHORITY,
     CLAIM_IDENTITY_VERSION,
@@ -134,7 +135,7 @@ def test_market_limitations_use_the_canonical_singular_identity_token(
     assert limitation_id in index
 
 
-def test_localized_market_identity_failure_preserves_other_llm_artifacts() -> None:
+def test_localized_market_identity_failure_blocks_without_replacement() -> None:
     profile = {
         "dimensions": [],
         "markets": [_market_profile("Dangbo"), _market_profile("Café")],
@@ -149,31 +150,24 @@ def test_localized_market_identity_failure_preserves_other_llm_artifacts() -> No
     valid_market["priority_issues"][0]["text"] = "Preserve this LLM-authored issue."
     malformed_market = fallback_market_narrative(_market_profile("Dangbo"))
     malformed_market["priority_issues"] = ["malformed claim"]
-    result = graph.node_deterministic_claim_validator(
-        {
-            "assessment_profile": profile,
-            "claim_catalog": {},
-            "contextual_documents": [],
-            "context_evidence": [],
-            "dimension_narratives": {},
-            "market_narratives": {
-                "Dangbo": malformed_market,
-                "Café": valid_market,
-            },
-            "executive_summary_narrative": fallback_executive_narrative(profile),
-            "generation_diagnostics": {},
-        }
-    )
-    assert result["market_narratives"]["Café"]["priority_issues"][0][
-        "text"
-    ] == "Preserve this LLM-authored issue."
-    assert result["generation_diagnostics"]["identity_fallback_artifacts"] == [
-        "market:Dangbo"
-    ]
-    assert any(
-        flag.get("code") == "claim_identity_contract_failure"
-        for flag in result["deterministic_flags"]
-    )
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_deterministic_claim_validator(
+            {
+                "assessment_profile": profile,
+                "claim_catalog": {},
+                "contextual_documents": [],
+                "context_evidence": [],
+                "dimension_narratives": {},
+                "market_narratives": {
+                    "Dangbo": malformed_market,
+                    "Café": valid_market,
+                },
+                "executive_summary_narrative": fallback_executive_narrative(profile),
+                "generation_diagnostics": {},
+            }
+        )
+    assert caught.value.code == "mfi_claim_identity_contract_failed"
+    assert caught.value.status_code == 500
 
 
 def test_all_initial_model_identifiers_are_ignored_and_globally_unique() -> None:
@@ -273,7 +267,7 @@ def test_missing_empty_malformed_and_cross_artifact_model_ids_are_non_authoritat
     assert executive["motivation"]["claim_id"] == "executive.motivation.1"
 
 
-def test_internal_identity_failure_becomes_nonrepairable_global_high_fallback() -> None:
+def test_internal_identity_failure_is_fail_closed() -> None:
     profile = {
         "dimensions": [_dimension_profile(priority=False)],
         "markets": [],
@@ -282,28 +276,20 @@ def test_internal_identity_failure_becomes_nonrepairable_global_high_fallback() 
         "limitations": [],
         "metric_ledger": {},
     }
-    result = graph.node_deterministic_claim_validator(
-        {
-            "assessment_profile": profile,
-            "claim_catalog": {},
-            "contextual_documents": [],
-            "context_evidence": [],
-            "dimension_narratives": {"Price": {"summary": "malformed"}},
-            "market_narratives": {},
-            "executive_summary_narrative": {},
-            "generation_diagnostics": {},
-        }
-    )
-    identity_flags = [
-        flag
-        for flag in result["deterministic_flags"]
-        if flag.get("code") == "claim_identity_contract_failure"
-    ]
-    assert len(identity_flags) == 1
-    assert identity_flags[0]["artifact_type"] == "global"
-    assert identity_flags[0]["severity"] == "high"
-    assert identity_flags[0]["repairable"] is False
-    assert result["generation_diagnostics"]["identity_fallback_artifacts"]
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_deterministic_claim_validator(
+            {
+                "assessment_profile": profile,
+                "claim_catalog": {},
+                "contextual_documents": [],
+                "context_evidence": [],
+                "dimension_narratives": {"Price": {"summary": "malformed"}},
+                "market_narratives": {},
+                "executive_summary_narrative": {},
+                "generation_diagnostics": {},
+            }
+        )
+    assert caught.value.code == "mfi_claim_identity_contract_failed"
 
 
 def test_ids_stay_stable_after_density_and_recommendation_deduplication() -> None:
@@ -389,7 +375,7 @@ def test_resolver_prefers_persisted_validated_blocks(monkeypatch) -> None:
 class _RepeatedIdModel:
     def invoke(self, messages):
         prompt = str(messages[0].content)
-        if "Red-Team this structured" in prompt:
+        if "Red-Team this bounded" in prompt:
             return type("Response", (), {"content": '{"flags": []}'})()
         metric_match = re.search(r'"metric_id":\s*"([^"]+)"', prompt)
         metric_ids = [metric_match.group(1)] if metric_match else []
@@ -442,6 +428,35 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
 ) -> None:
     loaded = build_loaded(SyntheticSpec(market_count=1, region_count=1))
     monkeypatch.setattr(graph, "get_model", lambda **_kwargs: _RepeatedIdModel())
+
+    def identity_only_validation(**kwargs):
+        dimensions, markets, executive, context = canonicalize_narrative_identities(
+            dimension_narratives=kwargs["dimension_narratives"],
+            market_narratives=kwargs["market_narratives"],
+            executive_narrative=kwargs["executive_narrative"],
+            context_evidence=kwargs["context_evidence"],
+        )
+        claim_count = len(
+            canonical_claim_index(dimensions, markets, executive, context)
+        )
+        return (
+            {
+                "status": "passed",
+                "validated_claim_count": claim_count,
+                "verified_claim_count": claim_count,
+                "unverified_claim_count": 0,
+                "flags": [],
+            },
+            dimensions,
+            markets,
+            executive,
+            context,
+            {"flags": []},
+        )
+
+    monkeypatch.setattr(
+        graph, "validate_structured_narratives", identity_only_validation
+    )
     monkeypatch.setattr(
         graph,
         "node_context_retrieval",
@@ -486,14 +501,12 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     assert result["generation_diagnostics"]["ignored_model_identifier_count"] > 0
     assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
     assert result["generation_diagnostics"]["red_team_status"] == "completed"
-    assert result["llm_diagnostics"]["calls"][-1]["operation"] == (
-        "mfi.red_team_review.v4"
+    assert any(
+        call["operation"] == "mfi.red_team_review.v5"
+        for call in result["llm_diagnostics"]["calls"]
     )
-    assert result["correction_attempts"] == 3
-    assert result["generation_diagnostics"]["delivery_contract_status"] in {
-        "validated",
-        "fallback_validated",
-    }
+    assert result["correction_attempts"] == 0
+    assert result["generation_diagnostics"]["delivery_contract_status"] == "validated"
     assert result["report_blocks"]
 
     run_id = "mfi_claim_identity_delivery_test"

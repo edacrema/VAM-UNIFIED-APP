@@ -901,6 +901,33 @@ def render_run_status(
         if isinstance(llm_diagnostics, dict) and llm_diagnostics:
             render_llm_diagnostics(llm_diagnostics, live=True)
 
+        generation_diagnostics = metadata.get("generation_diagnostics")
+        if (
+            isinstance(generation_diagnostics, dict)
+            and generation_diagnostics.get("fallback_policy") == "disabled_live"
+        ):
+            workflow_columns = st.columns(2)
+            workflow_columns[0].metric(
+                "MFI correction tasks",
+                (
+                    f"{generation_diagnostics.get('correction_tasks_completed', 0)}/"
+                    f"{generation_diagnostics.get('correction_tasks_total', 0)}"
+                ),
+            )
+            workflow_columns[1].metric(
+                "MFI Red-Team batches",
+                (
+                    f"{generation_diagnostics.get('red_team_batches_completed', 0)}/"
+                    f"{generation_diagnostics.get('red_team_batches_total', 0)}"
+                ),
+            )
+            active_task = generation_diagnostics.get("active_correction_task")
+            active_batch = generation_diagnostics.get("active_red_team_batch")
+            if active_task:
+                st.info(f"Active MFI correction task: {active_task}")
+            if active_batch:
+                st.info(f"Active MFI Red-Team batch: {active_batch}")
+
         live_outputs = metadata.get("live_outputs")
         if isinstance(live_outputs, dict) and live_outputs:
             render_live_outputs(

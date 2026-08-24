@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.shared.llm_observability import LLMCallError
 
 from app.services.mfi_drafter import graph, router
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.features import (
     MFIAnalysisVersionDisabled,
     MFI_DRAFTER_ANALYSIS_VERSION_ENV,
@@ -381,7 +382,7 @@ def test_drafting_transport_failure_interrupts_enabled_stage(monkeypatch):
     assert caught.value.node == "dimension_drafter"
 
 
-def test_final_qa_records_unresolved_counts():
+def test_final_qa_blocks_unresolved_material_findings():
     state = graph.create_initial_state(
         country="Testland",
         data_collection_start="2026-01-01",
@@ -407,10 +408,10 @@ def test_final_qa_records_unresolved_counts():
     }
     state["deterministic_flags"] = [flag]
 
-    update = graph.node_finalize_qa(state)
-
-    assert update["generation_diagnostics"]["unresolved_high_count"] == 1
-    assert update["qa_review"]["status"] == "completed_with_warnings"
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_finalize_qa(state)
+    assert caught.value.code == "mfi_narrative_qa_unresolved"
+    assert caught.value.status_code == 502
 
 
 def test_public_schema_marks_phase4_aliases_deprecated():

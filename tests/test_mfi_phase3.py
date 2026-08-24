@@ -13,6 +13,7 @@ from docx import Document
 from app.services.mfi_drafter import graph
 from app.services.mfi_drafter import narrative as narrative_module
 from app.services.mfi_drafter.analysis import build_assessment_profile
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.narrative import (
     build_claim_catalog,
     build_qa_review,
@@ -467,7 +468,7 @@ def test_deterministic_flag_identity_includes_evidence_context() -> None:
     assert first["flag_id"] != second["flag_id"]
 
 
-def test_red_team_v4_uses_structured_output_and_operation_specific_timeout(
+def test_red_team_v5_uses_persisted_batches_and_operation_specific_timeout(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -493,21 +494,23 @@ def test_red_team_v4_uses_structured_output_and_operation_specific_timeout(
         "contextual_documents": [],
         "llm_diagnostics": {},
     }
-    update = graph.node_red_team(state)
+    prepared = graph.node_red_team(state)
+    assert prepared["red_team_queue"]
+    update = graph.node_process_red_team_batch({**state, **prepared})
     assert observed["model_kwargs"]["timeout_seconds"] == 180.0
-    assert "REVIEW_PACKAGE_V4" in observed["prompt"]
+    assert "REVIEW_BATCH" in observed["prompt"]
     assert observed["bind_kwargs"]["response_mime_type"] == "application/json"
     assert observed["bind_kwargs"]["response_schema"]["required"] == ["flags"]
     call = update["llm_diagnostics"]["calls"][-1]
-    assert call["operation"] == "mfi.red_team_review.v4"
+    assert call["operation"] == "mfi.red_team_review.v5"
     assert call["configured_timeout_seconds"] == 180.0
     assert call["configured_max_retries"] == 2
-    assert update["generation_diagnostics"]["red_team_status"] == "completed"
+    assert update["generation_diagnostics"]["red_team_status"] == "in_progress"
     assert update["generation_diagnostics"]["red_team_structured_output"] is True
     assert update["generation_diagnostics"]["red_team_package_within_target"] is True
 
 
-def test_red_team_v4_repairs_one_malformed_json_response_in_memory(
+def test_red_team_v5_normalizes_one_malformed_json_response_in_memory(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -532,12 +535,13 @@ def test_red_team_v4_repairs_one_malformed_json_response_in_memory(
         "contextual_documents": [],
         "llm_diagnostics": {},
     }
-    update = graph.node_red_team(state)
+    prepared = graph.node_red_team(state)
+    update = graph.node_process_red_team_batch({**state, **prepared})
 
     calls = update["llm_diagnostics"]["calls"]
     assert [call["operation"] for call in calls] == [
-        "mfi.red_team_review.v4",
-        "mfi.red_team_response_repair.v1",
+        "mfi.red_team_review.v5",
+        "mfi.red_team_review.v5.json_normalization.v1",
     ]
     assert calls[0]["status"] == "recovered"
     assert calls[0]["json_root_value_count"] == 2
@@ -554,7 +558,7 @@ def test_red_team_v4_repairs_one_malformed_json_response_in_memory(
     assert update["llm_calls"] == state.get("llm_calls", 0) + 2
 
 
-def test_red_team_v4_fails_after_one_unsuccessful_format_repair(
+def test_red_team_v5_fails_after_one_unsuccessful_format_normalization(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -579,13 +583,15 @@ def test_red_team_v4_fails_after_one_unsuccessful_format_repair(
         "llm_diagnostics": {},
     }
     with pytest.raises(LLMCallError) as caught:
-        graph.node_red_team(state)
+        prepared = graph.node_red_team(state)
+        graph.node_process_red_team_batch({**state, **prepared})
 
     assert caught.value.failure_code == "llm_invalid_json"
-    assert caught.value.operation == "mfi.red_team_response_repair.v1"
+    assert caught.value.operation == "mfi.red_team_review.v5.json_normalization.v1"
+    assert caught.value.batch_id
 
 
-def test_red_team_v4_does_not_repair_semantically_incomplete_json(
+def test_red_team_v5_does_not_normalize_semantically_incomplete_json(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -609,14 +615,15 @@ def test_red_team_v4_does_not_repair_semantically_incomplete_json(
         "llm_diagnostics": {},
     }
     with pytest.raises(LLMCallError) as caught:
-        graph.node_red_team(state)
+        prepared = graph.node_red_team(state)
+        graph.node_process_red_team_batch({**state, **prepared})
 
     assert caught.value.failure_code == "llm_response_contract_error"
-    assert caught.value.operation == "mfi.red_team_review.v4"
+    assert caught.value.operation == "mfi.red_team_review.v5"
     assert model_calls == 1
 
 
-def test_red_team_v4_gaza_scale_package_stays_inside_character_target() -> None:
+def test_red_team_v5_gaza_scale_is_partitioned_inside_character_target() -> None:
     catalog = {}
     dimensions = {}
     dimension_profiles = []
@@ -716,13 +723,20 @@ def test_red_team_v4_gaza_scale_package_stays_inside_character_target() -> None:
 
     package = graph._build_red_team_review_package(state)
     assert len(package["claims"]) == 113
-    serialized = json.dumps(
-        package,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    batches = graph.build_red_team_batches(package)
+    assert batches
+    assert all(
+        batch.character_count <= graph.MFI_RED_TEAM_BATCH_TARGET_CHARACTERS
+        for batch in batches
     )
-    assert len(serialized) <= graph.MFI_RED_TEAM_PACKAGE_TARGET_CHARACTERS
+    local_claim_ids = [
+        claim_id
+        for batch in batches
+        if batch.batch_kind == "local"
+        for claim_id in batch.claim_ids
+    ]
+    assert len(local_claim_ids) == 113
+    assert len(local_claim_ids) == len(set(local_claim_ids))
 
 
 def test_schema_failure_interrupts_enabled_llm_stage(
@@ -749,7 +763,7 @@ def test_schema_failure_interrupts_enabled_llm_stage(
     assert caught.value.node == "dimension_drafter"
 
 
-def test_dimension_prompt_is_closed_catalog_and_field_repair_is_targeted(
+def test_field_correction_prompt_is_closed_catalog_and_patch_is_targeted(
     monkeypatch, phase3_bundle
 ):
     dimension = phase3_bundle["profile"]["priority_dimension_names"][0]
@@ -759,7 +773,16 @@ def test_dimension_prompt_is_closed_catalog_and_field_repair_is_targeted(
         if item["dimension"] == dimension
     )
     drafted = copy.deepcopy(phase3_bundle["dimensions"][dimension])
-    drafted["recommendations"][0]["text"] = "Use the cited evidence for review."
+    replacement = copy.deepcopy(drafted["recommendations"][0])
+    for key in (
+        "claim_id",
+        "validation_status",
+        "validation_flags",
+        "validation_flag_ids",
+        "substituted",
+    ):
+        replacement.pop(key, None)
+    replacement["text"] = "Use the cited evidence for review."
 
     class Model:
         def __init__(self):
@@ -767,33 +790,56 @@ def test_dimension_prompt_is_closed_catalog_and_field_repair_is_targeted(
 
         def invoke(self, messages):
             self.prompts.append(messages[0].content)
-            return type("Response", (), {"content": json.dumps(drafted)})()
+            return type(
+                "Response",
+                (),
+                {"content": json.dumps({"replacement": [replacement]})},
+            )()
 
     model = Model()
     monkeypatch.setattr(graph, "get_model", lambda: model)
     previous = copy.deepcopy(phase3_bundle["dimensions"][dimension])
-    update = graph.node_dimension_drafter(
+    flag = {
+        "flag_id": "flag-1",
+        "source": "deterministic",
+        "code": "test_repair",
+        "severity": "medium",
+        "artifact_type": "dimension",
+        "artifact_id": dimension,
+        "field_name": "recommendations",
+        "claim_id": previous["recommendations"][0]["claim_id"],
+        "message": "Rewrite the recommendation.",
+        "repairable": True,
+    }
+    task = {
+        "task_id": "task-1",
+        "attempt_number": 1,
+        "artifact_type": "dimension",
+        "artifact_id": dimension,
+        "field_name": "recommendations",
+        "claim_ids": [previous["recommendations"][0]["claim_id"]],
+        "flag_ids": ["flag-1"],
+        "flag_codes": ["test_repair"],
+    }
+    update = graph.node_process_correction_task(
         {
-            "assessment_profile": {
-                **phase3_bundle["profile"],
-                "dimensions": [profile],
-            },
+            "assessment_profile": phase3_bundle["profile"],
             "claim_catalog": phase3_bundle["catalog"],
-            "dimension_narratives": {dimension: previous},
-            "correction_targets": [
-                {
-                    "artifact_type": "dimension",
-                    "artifact_id": dimension,
-                    "field_name": "recommendations",
-                    "claim_ids": [],
-                    "flag_ids": ["flag-1"],
-                }
-            ],
+            "dimension_narratives": phase3_bundle["dimensions"],
+            "market_narratives": phase3_bundle["markets"],
+            "executive_summary_narrative": phase3_bundle["executive"],
+            "context_evidence": [],
+            "contextual_documents": [],
+            "deterministic_flags": [flag],
+            "red_team_flags": [],
+            "correction_queue": [task],
+            "correction_history": [],
+            "generation_diagnostics": {},
             "llm_calls": 0,
         }
     )
     assert len(model.prompts) == 1
-    assert "CLAIM_CATALOG" in model.prompts[0]
+    assert "AUTHORIZED_CLAIM_CATALOG" in model.prompts[0]
     assert "metric_id" in model.prompts[0]
     assert "sub_scores" not in model.prompts[0]
     assert (
@@ -806,7 +852,7 @@ def test_dimension_prompt_is_closed_catalog_and_field_repair_is_targeted(
     )
 
 
-def test_correction_attempt_limit_and_unresolved_delivery_warning():
+def test_correction_attempt_limit_blocks_unresolved_material_qa():
     flag = {
         "flag_id": "material-1",
         "source": "deterministic",
@@ -825,7 +871,7 @@ def test_correction_attempt_limit_and_unresolved_delivery_warning():
         "repairable": True,
     }
     assert (
-        graph.should_correct(
+        graph.route_after_deterministic_validation(
             {
                 "deterministic_flags": [flag],
                 "red_team_flags": [],
@@ -834,41 +880,15 @@ def test_correction_attempt_limit_and_unresolved_delivery_warning():
         )
         == "correct"
     )
-    assert (
-        graph.should_correct(
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.route_after_deterministic_validation(
             {
                 "deterministic_flags": [flag],
                 "red_team_flags": [],
                 "correction_attempts": 3,
             }
         )
-        == "finish"
-    )
-    update = graph.node_finalize_qa(
-        {
-            "deterministic_flags": [flag],
-            "red_team_flags": [],
-            "correction_attempts": 3,
-            "dimension_narratives": {},
-            "market_narratives": {},
-            "executive_summary_narrative": {
-                "motivation": {
-                    "claim_id": "model-owned-id-is-ignored",
-                    "text": "Invalid claim.",
-                    "validation_status": "pending",
-                    "validation_flags": [],
-                }
-            },
-        }
-    )
-    assert update["qa_review"]["status"] == "completed_with_warnings"
-    assert update["warnings"]
-    assert (
-        update["executive_summary_narrative"]["motivation"][
-            "validation_status"
-        ]
-        == "unverified"
-    )
+    assert caught.value.code == "mfi_narrative_qa_unresolved"
 
 
 def test_graph_reruns_both_validators_after_targeted_repair():
@@ -881,9 +901,12 @@ def test_graph_reruns_both_validators_after_targeted_repair():
         "deterministic_claim_validator",
     ) in edges
     assert ("deterministic_claim_validator", "red_team") in edges
-    assert ("red_team", "targeted_correction") in edges
-    assert ("targeted_correction", "dimension_drafter") in edges
-    assert ("red_team", "finalize_qa") in edges
+    assert ("red_team", "red_team_batch") in edges
+    assert ("red_team_batch", "red_team_finalize") in edges
+    assert ("red_team_finalize", "targeted_correction") in edges
+    assert ("targeted_correction", "correction_task") in edges
+    assert ("correction_task", "deterministic_claim_validator") in edges
+    assert ("red_team_finalize", "finalize_qa") in edges
     assert ("finalize_qa", "finalize_delivery") in edges
 
 

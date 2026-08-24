@@ -121,12 +121,20 @@ class LLMCallError(RuntimeError):
         operation: str,
         stage: str,
         raw_text: Optional[str] = None,
+        artifact_type: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
     ) -> None:
         self.failure_code = failure_code
         self.call_id = call_id
         self.node = node
         self.operation = operation
         self.stage = stage
+        self.artifact_type = artifact_type
+        self.artifact_id = artifact_id
+        self.task_id = task_id
+        self.batch_id = batch_id
         # Kept in memory only so an operation-specific recovery boundary can
         # normalize formatting. It is deliberately omitted from public metadata,
         # logs, exception messages, and ``to_public_dict``.
@@ -144,6 +152,10 @@ class LLMCallError(RuntimeError):
             "node": self.node,
             "operation": self.operation,
             "stage": self.stage,
+            **({"artifact_type": self.artifact_type} if self.artifact_type else {}),
+            **({"artifact_id": self.artifact_id} if self.artifact_id else {}),
+            **({"task_id": self.task_id} if self.task_id else {}),
+            **({"batch_id": self.batch_id} if self.batch_id else {}),
         }
 
 
@@ -754,6 +766,8 @@ class LLMTraceSession:
         correction_attempt: int = 0,
         timeout_seconds: Optional[float] = None,
         max_retries: Optional[int] = None,
+        task_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
     ) -> TracedLLMResult[T]:
         diagnostic, started, serialized_messages = self._start_call(
             messages=messages,
@@ -795,6 +809,10 @@ class LLMTraceSession:
                 node=node,
                 operation=operation,
                 stage="transport",
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                task_id=task_id,
+                batch_id=batch_id,
             ) from exc
         try:
             raw_text, shape, raw_content = extract_response_text(response)
@@ -833,6 +851,10 @@ class LLMTraceSession:
                 node=node,
                 operation=operation,
                 stage="response_extraction",
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                task_id=task_id,
+                batch_id=batch_id,
             ) from exc
         try:
             payload = parse_json_object(raw_text)
@@ -857,6 +879,10 @@ class LLMTraceSession:
                 operation=operation,
                 stage="json_parse",
                 raw_text=raw_text,
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                task_id=task_id,
+                batch_id=batch_id,
             ) from exc
         try:
             value = validator(payload)
@@ -882,6 +908,10 @@ class LLMTraceSession:
                 node=node,
                 operation=operation,
                 stage="contract_validation",
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                task_id=task_id,
+                batch_id=batch_id,
             ) from exc
         diagnostic.status = "succeeded"
         diagnostic.completed_at = _utc_now()

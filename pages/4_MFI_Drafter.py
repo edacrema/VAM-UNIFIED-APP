@@ -234,6 +234,29 @@ if isinstance(result, dict):
         st.markdown("**Release control**")
         st.json(result.get("release_control") or release_control)
         st.markdown("**Generation diagnostics**")
+        task_columns = st.columns(4)
+        task_columns[0].metric(
+            "Correction tasks",
+            (
+                f"{diagnostics.get('correction_tasks_completed', 0)}/"
+                f"{diagnostics.get('correction_tasks_total', 0)}"
+            ),
+        )
+        task_columns[1].metric(
+            "Failed correction tasks",
+            str(diagnostics.get("correction_tasks_failed", 0)),
+        )
+        task_columns[2].metric(
+            "Red-Team batches",
+            (
+                f"{diagnostics.get('red_team_batches_completed', 0)}/"
+                f"{diagnostics.get('red_team_batches_total', 0)}"
+            ),
+        )
+        task_columns[3].metric(
+            "Failed Red-Team batches",
+            str(diagnostics.get("red_team_batches_failed", 0)),
+        )
         st.json(result.get("generation_diagnostics") or {})
         st.markdown("**LLM call diagnostics**")
         render_llm_diagnostics(result.get("llm_diagnostics") or {})

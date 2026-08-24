@@ -7,6 +7,7 @@ from docx import Document
 from pydantic import ValidationError
 
 from app.services.mfi_drafter import graph
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.context_status import (
     not_attempted_context_status,
     reconcile_context_status,
@@ -222,7 +223,7 @@ def test_offline_context_is_not_attempted_and_qa_withdrawal_removes_acceptance()
     assert reconciled.final_accepted_statements == 0
 
 
-def test_finalize_qa_reconciles_withdrawn_context_to_no_accepted_statements() -> None:
+def test_finalize_qa_blocks_material_context_instead_of_withdrawing_it() -> None:
     document = _document()
     statement = _statement()
     available = resolve_context_status(
@@ -246,45 +247,23 @@ def test_finalize_qa_reconciles_withdrawn_context_to_no_accepted_statements() ->
         "document_ids": ["doc-1"],
         "repairable": True,
     }
-    final = graph.node_finalize_qa(
-        {
-            "deterministic_flags": [flag],
-            "red_team_flags": [],
-            "correction_attempts": 0,
-            "correction_history": [],
-            "dimension_narratives": {},
-            "market_narratives": {},
-            "executive_summary_narrative": {},
-            "context_evidence": [statement],
-            "contextual_documents": [document],
-            "context_status": available.model_dump(),
-        }
-    )
-    assert final["context_evidence"][0]["substituted"] is True
-    assert final["context_status"]["status"] == "no_accepted_statements"
-    report_result = _report_result(
-        context_status=final["context_status"],
-        evidence=final["context_evidence"],
-        docs=[document],
-    )
-    report_result.update(
-        {
-            "qa_review": final["qa_review"],
-            "generation_diagnostics": final["generation_diagnostics"],
-            "claim_substitutions": final["claim_substitutions"],
-        }
-    )
-    blocks = build_mfi_report_blocks(report_result)
-    rejected_text = statement["text"]
-    assert rejected_text not in "\n".join(block.text or "" for block in blocks)
-    context_claim_index = next(
-        index
-        for index, block in enumerate(blocks)
-        if block.type == "paragraph"
-        and isinstance(block.meta, dict)
-        and block.meta.get("claim_id") == "context.statement.1"
-    )
-    assert blocks[context_claim_index + 1].type == "claim_warning"
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_finalize_qa(
+            {
+                "deterministic_flags": [flag],
+                "red_team_flags": [],
+                "correction_attempts": 0,
+                "correction_history": [],
+                "dimension_narratives": {},
+                "market_narratives": {},
+                "executive_summary_narrative": {},
+                "context_evidence": [statement],
+                "contextual_documents": [document],
+                "context_status": available.model_dump(),
+            }
+        )
+    assert caught.value.code == "mfi_narrative_qa_unresolved"
+    assert statement["text"] == _statement()["text"]
 
 
 class _Model:

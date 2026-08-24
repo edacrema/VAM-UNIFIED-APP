@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from app.shared.llm_observability import LLMCallError
 from app.services.market_monitor import router as market_router
 from app.services.mfi_drafter import router as mfi_router
 from app.services.mfi_drafter.features import MFI_DRAFTER_ANALYSIS_VERSION_ENV
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.streamlit_backend import dispatcher
 
 
@@ -25,7 +27,9 @@ def reset_memory_runs(monkeypatch):
     monkeypatch.setattr(async_runs, "_BACKEND", "memory")
     async_runs._RUNS.clear()
     async_runs._RUN_ARTIFACTS.clear()
-    monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        dispatcher, "threading", SimpleNamespace(Thread=ImmediateThread)
+    )
 
 
 def test_mfi_dispatcher_uses_public_run_id_for_graph_and_live_trace(monkeypatch):
@@ -156,7 +160,8 @@ def test_async_llm_failure_stops_at_active_node_and_retains_trace(monkeypatch):
             "markets": ["Central"],
         }
     )
-    run = async_runs.get_run(response.json()["run_id"])
+    run_id = response.json()["run_id"]
+    run = async_runs.get_run(run_id)
 
     assert run is not None and run.status == "failed"
     assert run.progress_pct < 100
@@ -182,7 +187,7 @@ def test_synchronous_dispatchers_map_llm_failures_to_502(monkeypatch):
             failure_code="llm_transport_error",
             call_id="llm-0001-sync",
             node="red_team",
-            operation="mfi.red_team_review.v4",
+            operation="mfi.red_team_review.v5",
             stage="transport",
         )
 
@@ -226,7 +231,7 @@ def test_dispatcher_red_team_failure_sets_generation_status_failed(monkeypatch):
             failure_code="llm_transport_error",
             call_id="llm-0027-timeout",
             node="red_team",
-            operation="mfi.red_team_review.v4",
+            operation="mfi.red_team_review.v5",
             stage="transport",
         )
 
@@ -239,7 +244,8 @@ def test_dispatcher_red_team_failure_sets_generation_status_failed(monkeypatch):
             "markets": ["Dangbo"],
         }
     )
-    run = async_runs.get_run(response.json()["run_id"])
+    run_id = response.json()["run_id"]
+    run = async_runs.get_run(run_id)
     assert run is not None and run.status == "failed"
     assert run.current_node == "red_team"
     assert run.progress_pct < 100
@@ -332,6 +338,113 @@ def test_fastapi_async_mfi_public_and_graph_run_ids_match(monkeypatch):
     assert run is not None and run.status == "completed"
 
 
+def test_async_fail_closed_mfi_run_publishes_no_result_or_artifact(monkeypatch):
+    monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
+
+    def blocked_generation(*, run_id, **_kwargs):
+        raise MFIGenerationBlockedError(
+            "mfi_narrative_qa_unresolved",
+            "Material narrative QA remains unresolved.",
+            stage="targeted_correction",
+            status_code=502,
+            task_id="task-3",
+            attempt=3,
+        )
+
+    monkeypatch.setattr(mfi_router, "run_mfi_report_generation", blocked_generation)
+    app = FastAPI()
+    app.include_router(mfi_router.router)
+    response = TestClient(app).post(
+        "/generate-async",
+        json={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+            "markets": ["Central"],
+        },
+    )
+    assert response.status_code == 200
+    blocked_run_id = response.json()["run_id"]
+    run = async_runs.get_run(blocked_run_id)
+    assert run is not None
+    assert run.status == "failed"
+    assert run.progress_pct < 100
+    assert run.result is None
+    assert not any(
+        key[0] == blocked_run_id for key in async_runs._RUN_ARTIFACTS
+    )
+    public_error = json.loads(run.error)
+    assert public_error["code"] == "mfi_narrative_qa_unresolved"
+    assert public_error["task_id"] == "task-3"
+
+
+def test_dispatcher_async_fail_closed_mfi_run_publishes_no_result(monkeypatch):
+    monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
+
+    def blocked_generation(*, run_id, **_kwargs):
+        raise MFIGenerationBlockedError(
+            "mfi_report_delivery_contract_failed",
+            "Delivery blocks are invalid.",
+            stage="finalize_delivery",
+            status_code=500,
+        )
+
+    monkeypatch.setattr(dispatcher, "run_mfi_report_generation", blocked_generation)
+    response = dispatcher._mfi_drafter_generate_async(
+        json_body={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+            "markets": ["Central"],
+        }
+    )
+    run = async_runs.get_run(response.json()["run_id"])
+    assert run is not None and run.status == "failed"
+    assert run.progress_pct < 100
+    assert run.result is None
+    assert json.loads(run.error)["code"] == "mfi_report_delivery_contract_failed"
+    assert run.metadata["generation_diagnostics"]["delivery_contract_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("code", "status_code"),
+    [
+        ("mfi_narrative_qa_unresolved", 502),
+        ("mfi_claim_identity_contract_failed", 500),
+        ("mfi_report_delivery_contract_failed", 500),
+    ],
+)
+def test_fastapi_maps_typed_fail_closed_errors(monkeypatch, code, status_code):
+    monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
+
+    def blocked(**_kwargs):
+        raise MFIGenerationBlockedError(
+            code,
+            "Generation cannot be delivered.",
+            stage=(
+                "targeted_correction"
+                if status_code == 502
+                else "finalize_delivery"
+            ),
+            status_code=status_code,
+        )
+
+    monkeypatch.setattr(mfi_router, "run_mfi_report_generation", blocked)
+    app = FastAPI()
+    app.include_router(mfi_router.router)
+    response = TestClient(app).post(
+        "/generate",
+        json={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+            "markets": ["Central"],
+        },
+    )
+    assert response.status_code == status_code
+    assert response.json()["detail"]["code"] == code
+
+
 def test_fastapi_async_red_team_failure_sets_generation_status_failed(monkeypatch):
     monkeypatch.setenv(MFI_DRAFTER_ANALYSIS_VERSION_ENV, "2")
 
@@ -357,7 +470,7 @@ def test_fastapi_async_red_team_failure_sets_generation_status_failed(monkeypatc
             failure_code="llm_transport_error",
             call_id="llm-0027-timeout",
             node="red_team",
-            operation="mfi.red_team_review.v4",
+            operation="mfi.red_team_review.v5",
             stage="transport",
         )
 

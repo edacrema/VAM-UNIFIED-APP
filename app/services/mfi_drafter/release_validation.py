@@ -33,12 +33,14 @@ from .graph import node_mfi_graph_designer
 from .methodology import OFFICIAL_SCORE_DEFINITIONS
 from .narrative import (
     build_claim_catalog,
-        build_qa_review,
-        deduplicate_dimension_recommendations,
-    fallback_dimension_narrative,
-    fallback_executive_narrative,
-    fallback_market_narrative,
+    build_qa_review,
+    deduplicate_dimension_recommendations,
     validate_structured_narratives,
+)
+from .offline_narrative_fixtures import (
+    build_offline_dimension_fixture,
+    build_offline_executive_fixture,
+    build_offline_market_fixture,
 )
 
 
@@ -335,7 +337,7 @@ def _deterministic_result(
     profile = profile_model.model_dump()
     catalog = build_claim_catalog(profile)
     dimension_narratives = {
-        item["dimension"]: fallback_dimension_narrative(
+        item["dimension"]: build_offline_dimension_fixture(
             item,
             assessment_profile=profile,
         )
@@ -346,11 +348,11 @@ def _deterministic_result(
         profile["dimensions"],
     )
     market_narratives = {
-        item["market_name"]: fallback_market_narrative(item)
+        item["market_name"]: build_offline_market_fixture(item)
         for item in profile["markets"]
         if item["is_priority_market"]
     }
-    executive = fallback_executive_narrative(profile)
+    executive = build_offline_executive_fixture(profile)
     (
         validation,
         dimension_narratives,
@@ -374,6 +376,7 @@ def _deterministic_result(
         if isinstance(flag, Mapping)
     )
     diagnostics = {
+        "fallback_policy": "offline_fixture",
         "dimensions": {
             "llm": [],
             "fallback": sorted(dimension_narratives, key=str.casefold),
@@ -391,6 +394,7 @@ def _deterministic_result(
         "unresolved_medium_count": severity_counts.get("medium", 0),
         "unresolved_low_count": severity_counts.get("low", 0),
         "retrievers": {},
+        "delivery_contract_status": "validated",
     }
     result = {
         **loaded,

@@ -907,6 +907,7 @@ class MFINarrativeQAFlag(BaseModel):
     expected_value: Optional[str] = None
     actual_value: Optional[str] = None
     repairable: bool = True
+    review_batch_id: Optional[str] = None
 
 
 class MFIRedTeamFlagDraft(BaseModel):
@@ -931,6 +932,124 @@ class MFIRedTeamFlagDraft(BaseModel):
     metric_ids: List[str] = Field(default_factory=list)
     document_ids: List[str] = Field(default_factory=list)
     repairable: bool = True
+
+
+class MFICorrectionTask(BaseModel):
+    """One sequential live repair for exactly one canonical artifact field."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str = Field(min_length=1)
+    attempt_number: int = Field(ge=1, le=3)
+    artifact_type: Literal[
+        "context", "dimension", "market", "executive_summary"
+    ]
+    artifact_id: str = Field(min_length=1)
+    field_name: str = Field(min_length=1)
+    claim_ids: List[str] = Field(default_factory=list)
+    flag_ids: List[str] = Field(default_factory=list, min_length=1)
+    flag_codes: List[str] = Field(default_factory=list, min_length=1)
+
+
+class MFIFieldPatch(BaseModel):
+    """Transport envelope for a field-specific correction response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    replacement: Any
+
+
+class MFIClaimPatchValue(BaseModel):
+    """Claim transport used only inside one field-level correction response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    claim_kind: Optional[Literal[
+        "summary",
+        "finding",
+        "geographic_pattern",
+        "limitation",
+        "recommendation",
+        "context",
+    ]] = None
+    metric_ids: List[str]
+    document_ids: List[str]
+    scope: Literal[
+        "assessment", "region", "market", "surveyed_traders", "context"
+    ]
+    polarity: Literal["favorable", "unfavorable", "neutral", "descriptive"]
+
+
+class MFIClaimFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: Optional[MFIClaimPatchValue]
+
+
+class MFIClaimListFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: List[MFIClaimPatchValue]
+
+
+class MFISubdimensionPatchValue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    subsection_metric_id: Optional[str] = None
+    score_0_10: Optional[float] = None
+    interpretation: MFIClaimPatchValue
+    driver_metric_ids: List[str] = Field(default_factory=list)
+
+
+class MFISubdimensionFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: List[MFISubdimensionPatchValue]
+
+
+class MFIContextTextFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: str = Field(min_length=1)
+
+
+class MFIContextClassificationFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: Literal[
+        "corroborating", "potentially_explanatory", "unrelated"
+    ]
+
+
+class MFIContextDocumentsFieldPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: List[str]
+
+
+class MFIRedTeamBatchDiagnostic(BaseModel):
+    """Sanitized execution record for one deterministic Red-Team batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str = Field(min_length=1)
+    batch_kind: Literal["local", "dimension_coherence", "market_coherence"]
+    sequence: int = Field(ge=1)
+    character_count: int = Field(ge=0)
+    claim_count: int = Field(ge=0)
+    status: Literal["pending", "completed", "failed", "retained"]
+    call_id: Optional[str] = None
+    flag_count: int = Field(default=0, ge=0)
+
+
+class MFIRedTeamReviewBatch(BaseModel):
+    """Immutable internal package for one bounded Red-Team invocation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    batch_id: str = Field(min_length=1)
+    signature: str = Field(min_length=1)
+    batch_kind: Literal["local", "dimension_coherence", "market_coherence"]
+    sequence: int = Field(ge=1)
+    package: Dict[str, Any]
+    claim_ids: List[str] = Field(default_factory=list)
+    artifact_refs: List[str] = Field(default_factory=list)
+    character_count: int = Field(ge=0)
 
 
 class MFIRedTeamResponse(BaseModel):
@@ -976,6 +1095,7 @@ class MFICorrectionAttemptRecord(BaseModel):
     """Audit record for one claim or artifact targeted in a correction cycle."""
 
     attempt_number: int = Field(ge=1)
+    task_id: Optional[str] = None
     artifact_type: Literal[
         "context",
         "dimension",
@@ -1062,6 +1182,7 @@ class MFIGenerationDiagnostics(BaseModel):
     ] = "not_started"
     red_team_status: Literal[
         "not_started",
+        "in_progress",
         "completed",
         "failed",
     ] = "not_started"
@@ -1094,7 +1215,18 @@ class MFIGenerationDiagnostics(BaseModel):
         "not_validated",
         "validated",
         "fallback_validated",
+        "failed",
     ] = "not_validated"
+    fallback_policy: Literal["disabled_live", "offline_fixture"] = "disabled_live"
+    correction_tasks_total: int = Field(default=0, ge=0)
+    correction_tasks_completed: int = Field(default=0, ge=0)
+    correction_tasks_failed: int = Field(default=0, ge=0)
+    active_correction_task: Optional[str] = None
+    red_team_batches_total: int = Field(default=0, ge=0)
+    red_team_batches_completed: int = Field(default=0, ge=0)
+    red_team_batches_failed: int = Field(default=0, ge=0)
+    active_red_team_batch: Optional[str] = None
+    red_team_batches: List[MFIRedTeamBatchDiagnostic] = Field(default_factory=list)
 
 
 class MFIMarketScoreDistributionEntry(BaseModel):

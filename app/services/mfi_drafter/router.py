@@ -11,9 +11,12 @@ import json
 import logging
 
 from .graph import (
+    reconcile_correction_history_for_failure,
+    reconcile_generation_diagnostics_for_blocked_failure,
     reconcile_generation_diagnostics_for_llm_failure,
     run_mfi_report_generation,
 )
+from .errors import MFIGenerationBlockedError
 from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .compatibility import canonical_and_legacy_response_fields
 from .context_status import not_attempted_context_status
@@ -102,6 +105,7 @@ def _analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "generation_diagnostics": state.get("generation_diagnostics", {}),
         "context_status": state.get("context_status", {}),
         "llm_diagnostics": state.get("llm_diagnostics", {}),
+        "correction_history": state.get("correction_history", []),
     }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
@@ -128,7 +132,28 @@ def _record_llm_failure_metadata(run_id: str, error: LLMCallError) -> None:
         metadata={
             "generation_diagnostics": (
                 reconcile_generation_diagnostics_for_llm_failure(metadata, error)
-            )
+            ),
+            "correction_history": reconcile_correction_history_for_failure(
+                metadata, task_id=error.task_id
+            ),
+        },
+    )
+
+
+def _record_blocked_failure_metadata(
+    run_id: str, error: MFIGenerationBlockedError
+) -> None:
+    run = get_run(run_id)
+    metadata = dict(getattr(run, "metadata", {}) or {})
+    update_run(
+        run_id,
+        metadata={
+            "generation_diagnostics": (
+                reconcile_generation_diagnostics_for_blocked_failure(metadata, error)
+            ),
+            "correction_history": reconcile_correction_history_for_failure(
+                metadata, task_id=error.task_id
+            ),
         },
     )
 
@@ -279,6 +304,9 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
     except LLMCallError as e:
         logger.error("MFI report generation stopped: %s", e)
         raise HTTPException(status_code=502, detail=e.to_public_dict())
+    except MFIGenerationBlockedError as e:
+        logger.error("MFI report generation blocked: %s", e)
+        raise HTTPException(status_code=e.status_code, detail=e.to_public_dict())
     except Exception as e:
         logger.error(f"MFI report generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -321,6 +349,9 @@ async def generate_mfi_report_from_csv(
     except LLMCallError as e:
         logger.error("MFI report generation from CSV stopped: %s", e)
         raise HTTPException(status_code=502, detail=e.to_public_dict())
+    except MFIGenerationBlockedError as e:
+        logger.error("MFI report generation from CSV blocked: %s", e)
+        raise HTTPException(status_code=e.status_code, detail=e.to_public_dict())
     except ValueError as e:
         logger.error(f"CSV validation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -391,7 +422,10 @@ async def generate_mfi_report_from_csv_async(
         "executive_summary_drafter": 88,
         "deterministic_claim_validator": 92,
         "red_team": 96,
+        "red_team_batch": 96,
+        "red_team_finalize": 96,
         "targeted_correction": 94,
+        "correction_task": 95,
         "finalize_qa": 97,
         "finalize_delivery": 99,
     }
@@ -487,13 +521,16 @@ async def generate_mfi_report_from_csv_async(
 
             if isinstance(e, LLMCallError):
                 _record_llm_failure_metadata(run_id, e)
-            tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
+            elif isinstance(e, MFIGenerationBlockedError):
+                _record_blocked_failure_metadata(run_id, e)
+            public_failure = isinstance(e, (LLMCallError, MFIGenerationBlockedError))
+            tb_str = None if public_failure else traceback.format_exc()
             current_node = (
                 e.node
-                if isinstance(e, LLMCallError)
+                if public_failure
                 else (get_run(run_id).current_node if get_run(run_id) is not None else None)
             )
-            error = json.dumps(e.to_public_dict(), sort_keys=True) if isinstance(e, LLMCallError) else str(e)
+            error = json.dumps(e.to_public_dict(), sort_keys=True) if public_failure else str(e)
             set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     background_tasks.add_task(run_in_background)
@@ -541,7 +578,10 @@ async def generate_mfi_report_async(
         "executive_summary_drafter": 88,
         "deterministic_claim_validator": 92,
         "red_team": 96,
+        "red_team_batch": 96,
+        "red_team_finalize": 96,
         "targeted_correction": 94,
+        "correction_task": 95,
         "finalize_qa": 97,
         "finalize_delivery": 99,
     }
@@ -589,13 +629,16 @@ async def generate_mfi_report_async(
 
             if isinstance(e, LLMCallError):
                 _record_llm_failure_metadata(run_id, e)
-            tb_str = None if isinstance(e, LLMCallError) else traceback.format_exc()
+            elif isinstance(e, MFIGenerationBlockedError):
+                _record_blocked_failure_metadata(run_id, e)
+            public_failure = isinstance(e, (LLMCallError, MFIGenerationBlockedError))
+            tb_str = None if public_failure else traceback.format_exc()
             current_node = (
                 e.node
-                if isinstance(e, LLMCallError)
+                if public_failure
                 else (get_run(run_id).current_node if get_run(run_id) is not None else None)
             )
-            error = json.dumps(e.to_public_dict(), sort_keys=True) if isinstance(e, LLMCallError) else str(e)
+            error = json.dumps(e.to_public_dict(), sort_keys=True) if public_failure else str(e)
             set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
     
     background_tasks.add_task(run_in_background)
@@ -783,7 +826,10 @@ def get_service_info():
             {"id": "executive_summary_drafter", "name": "Executive Summary", "description": "Drafts executive summary"},
             {"id": "deterministic_claim_validator", "name": "Claim Validator", "description": "Validates every claim against the closed catalog"},
             {"id": "red_team", "name": "Red Team QA", "description": "Semantic quality assurance"},
+            {"id": "red_team_batch", "name": "Red Team Batch", "description": "Reviews one persisted bounded narrative batch"},
+            {"id": "red_team_finalize", "name": "Finalize Red Team", "description": "Merges completed batch findings"},
             {"id": "targeted_correction", "name": "Targeted Correction", "description": "Repairs only affected narrative fields"},
+            {"id": "correction_task", "name": "Field Correction", "description": "Repairs and validates one narrative field"},
             {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes warnings and claim status"},
             {"id": "finalize_delivery", "name": "Validate Delivery", "description": "Validates and stores reader-facing report blocks"},
         ],

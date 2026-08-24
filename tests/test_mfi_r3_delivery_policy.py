@@ -1,4 +1,4 @@
-"""Phase R3 tests for the unresolved-claim delivery policy and prompt contracts.
+"""Historical R3 compatibility plus the current fail-closed delivery contract.
 
 Repair is attempted first and bounded at three passes. These tests cover what happens
 after that: a statement the assessment cannot support is withdrawn rather than delivered
@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.mfi_drafter import graph
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.narrative import (
     apply_unresolved_claim_policy,
     unmatched_high_claim_ids,
@@ -197,7 +198,7 @@ def test_a_finding_pointing_at_no_claim_is_reported(narratives) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_withdraws_and_records_without_calling_a_model(
+def test_live_finalize_blocks_material_qa_without_calling_a_model(
     narratives, monkeypatch
 ) -> None:
     """The delivery policy is deterministic; it must never reach for the model."""
@@ -208,31 +209,21 @@ def test_finalize_withdraws_and_records_without_calling_a_model(
 
     monkeypatch.setattr(graph, "get_model", _fail)
 
-    update = graph.node_finalize_qa(
-        {
-            "dimension_narratives": dimensions,
-            "market_narratives": markets,
-            "executive_summary_narrative": executive,
-            "deterministic_flags": [
-                _flag("dimension.price.finding.1", "high")
-            ],
-            "red_team_flags": [],
-            "correction_attempts": 3,
-        }
-    )
-
-    finding = update["dimension_narratives"]["Price"]["key_findings"][0]
-    assert finding["substituted"] is True
-    assert finding["validation_status"] == "unverified"
-    assert update["qa_review"]["status"] == "completed_with_warnings"
-
-    diagnostics = update["generation_diagnostics"]
-    assert len(diagnostics["claim_substitutions"]) == 1
-    assert diagnostics["claim_substitutions"][0]["claim_id"] == (
-        "dimension.price.finding.1"
-    )
-    assert diagnostics["unmatched_high_claim_ids"] == []
-    assert any("withdrawn" in warning for warning in update["warnings"])
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_finalize_qa(
+            {
+                "dimension_narratives": dimensions,
+                "market_narratives": markets,
+                "executive_summary_narrative": executive,
+                "deterministic_flags": [
+                    _flag("dimension.price.finding.1", "high")
+                ],
+                "red_team_flags": [],
+                "correction_attempts": 3,
+            }
+        )
+    assert caught.value.code == "mfi_narrative_qa_unresolved"
+    assert caught.value.status_code == 502
 
 
 def test_finalize_leaves_a_clean_run_alone(narratives) -> None:
@@ -256,35 +247,27 @@ def test_finalize_leaves_a_clean_run_alone(narratives) -> None:
         "text"
     ] == dimensions["Price"]["key_findings"][0]["text"]
     assert update["generation_diagnostics"]["claim_substitutions"] == []
-    assert update["warnings"] == []
 
 
-def test_flag_identifiers_are_kept_apart_from_flag_codes(narratives) -> None:
-    """Identifiers hash the message and churn; codes are stable and displayable."""
+def test_material_flag_codes_cannot_be_delivered_after_attempt_limit(narratives) -> None:
     dimensions, markets, executive = narratives
     dimensions["Price"]["key_findings"][0]["validation_flags"] = [
         "unsupported_modality_conclusion"
     ]
 
-    update = graph.node_finalize_qa(
-        {
-            "dimension_narratives": dimensions,
-            "market_narratives": markets,
-            "executive_summary_narrative": executive,
-            "deterministic_flags": [
-                _flag("dimension.price.finding.1", "high")
-            ],
-            "red_team_flags": [],
-            "correction_attempts": 3,
-        }
-    )
-
-    finding = update["dimension_narratives"]["Price"]["key_findings"][0]
-    assert finding["validation_flags"] == ["unsupported_modality_conclusion"]
-    assert finding["validation_flag_ids"] == [
-        "deterministic-unsupported_modality_conclusion-"
-        "dimension.price.finding.1"
-    ]
+    with pytest.raises(MFIGenerationBlockedError):
+        graph.node_finalize_qa(
+            {
+                "dimension_narratives": dimensions,
+                "market_narratives": markets,
+                "executive_summary_narrative": executive,
+                "deterministic_flags": [
+                    _flag("dimension.price.finding.1", "high")
+                ],
+                "red_team_flags": [],
+                "correction_attempts": 3,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +291,7 @@ def test_the_market_prompt_no_longer_requests_a_modality_conclusion() -> None:
         "node_dimension_drafter",
         "node_market_recommendations_drafter",
         "node_executive_summary_drafter",
-        "node_red_team",
+        "_build_red_team_review_package",
     ],
 )
 def test_every_prompt_carries_the_prohibitions(node_name) -> None:

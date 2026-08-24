@@ -141,10 +141,12 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         build_claim_catalog,
         build_qa_review,
         deduplicate_dimension_recommendations,
-        fallback_dimension_narrative,
-        fallback_executive_narrative,
-        fallback_market_narrative,
         validate_structured_narratives,
+    )
+    from .offline_narrative_fixtures import (
+        build_offline_dimension_fixture,
+        build_offline_executive_fixture,
+        build_offline_market_fixture,
     )
 
     profile = build_assessment_profile(
@@ -154,7 +156,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
     ).model_dump()
     catalog = build_claim_catalog(profile)
     dimension_narratives = {
-        item["dimension"]: fallback_dimension_narrative(item, assessment_profile=profile)
+        item["dimension"]: build_offline_dimension_fixture(item, assessment_profile=profile)
         for item in profile["dimensions"]
     }
     dimension_narratives = deduplicate_dimension_recommendations(
@@ -162,11 +164,11 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         profile["dimensions"],
     )
     market_narratives = {
-        item["market_name"]: fallback_market_narrative(item)
+        item["market_name"]: build_offline_market_fixture(item)
         for item in profile["markets"]
         if item["is_priority_market"]
     }
-    executive = fallback_executive_narrative(profile)
+    executive = build_offline_executive_fixture(profile)
     (
         validation,
         dimension_narratives,
@@ -188,6 +190,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         str(flag.get("severity")) for flag in flags if isinstance(flag, Mapping)
     )
     diagnostics = {
+        "fallback_policy": "offline_fixture",
         "dimensions": {"llm": [], "fallback": sorted(dimension_narratives, key=str.casefold)},
         "markets": {"llm": [], "fallback": sorted(market_narratives, key=str.casefold)},
         "context_extraction_mode": "not_applicable",
@@ -199,6 +202,7 @@ def _build_result(loaded: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "unresolved_medium_count": severity_counts.get("medium", 0),
         "unresolved_low_count": severity_counts.get("low", 0),
         "retrievers": {},
+        "delivery_contract_status": "validated",
     }
     result = {
         **loaded,

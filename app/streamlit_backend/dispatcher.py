@@ -61,9 +61,12 @@ from app.services.mfi_drafter.features import (
 )
 from app.services.mfi_drafter.graph import (
     DIMENSION_DESCRIPTIONS,
+    reconcile_correction_history_for_failure,
+    reconcile_generation_diagnostics_for_blocked_failure,
     reconcile_generation_diagnostics_for_llm_failure,
     run_mfi_report_generation,
 )
+from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
 from app.services.market_monitor.graph import (
@@ -389,6 +392,7 @@ def _mfi_analysis_run_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
         "generation_diagnostics": state.get("generation_diagnostics", {}),
         "context_status": state.get("context_status", {}),
         "llm_diagnostics": state.get("llm_diagnostics", {}),
+        "correction_history": state.get("correction_history", []),
     }
     profile = state.get("assessment_profile")
     if not isinstance(profile, dict):
@@ -415,7 +419,28 @@ def _record_mfi_llm_failure_metadata(run_id: str, error: LLMCallError) -> None:
         metadata={
             "generation_diagnostics": (
                 reconcile_generation_diagnostics_for_llm_failure(metadata, error)
-            )
+            ),
+            "correction_history": reconcile_correction_history_for_failure(
+                metadata, task_id=error.task_id
+            ),
+        },
+    )
+
+
+def _record_mfi_blocked_failure_metadata(
+    run_id: str, error: MFIGenerationBlockedError
+) -> None:
+    run = get_run(run_id)
+    metadata = dict(getattr(run, "metadata", {}) or {})
+    update_run(
+        run_id,
+        metadata={
+            "generation_diagnostics": (
+                reconcile_generation_diagnostics_for_blocked_failure(metadata, error)
+            ),
+            "correction_history": reconcile_correction_history_for_failure(
+                metadata, task_id=error.task_id
+            ),
         },
     )
 
@@ -1176,6 +1201,8 @@ def _mfi_drafter_generate(*, json_body: Any) -> LocalResponse:
         )
     except LLMCallError as exc:
         raise LocalHTTPException(502, exc.to_public_dict())
+    except MFIGenerationBlockedError as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1224,6 +1251,8 @@ def _mfi_drafter_generate_from_csv(
         raise LocalHTTPException(400, str(exc))
     except LLMCallError as exc:
         raise LocalHTTPException(502, exc.to_public_dict())
+    except MFIGenerationBlockedError as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1236,6 +1265,10 @@ def _mfi_drafter_generate_from_csv(
             csv_data=csv_data,
             release_control=release_control,
         )
+    except LLMCallError as exc:
+        raise LocalHTTPException(502, exc.to_public_dict())
+    except MFIGenerationBlockedError as exc:
+        raise LocalHTTPException(exc.status_code, exc.to_public_dict())
     except Exception as exc:
         raise LocalHTTPException(500, str(exc))
 
@@ -1315,7 +1348,10 @@ def _mfi_drafter_generate_from_csv_async(
         "executive_summary_drafter": 88,
         "deterministic_claim_validator": 92,
         "red_team": 96,
+        "red_team_batch": 96,
+        "red_team_finalize": 96,
         "targeted_correction": 94,
+        "correction_task": 95,
         "finalize_qa": 97,
         "finalize_delivery": 99,
     }
@@ -1409,13 +1445,16 @@ def _mfi_drafter_generate_from_csv_async(
         except Exception as exc:
             if isinstance(exc, LLMCallError):
                 _record_mfi_llm_failure_metadata(run_id, exc)
-            tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
+            elif isinstance(exc, MFIGenerationBlockedError):
+                _record_mfi_blocked_failure_metadata(run_id, exc)
+            public_failure = isinstance(exc, (LLMCallError, MFIGenerationBlockedError))
+            tb_str = None if public_failure else traceback.format_exc()
             current_node = (
                 exc.node
-                if isinstance(exc, LLMCallError)
+                if public_failure
                 else (get_run(run_id).current_node if get_run(run_id) is not None else None)
             )
-            error = json.dumps(exc.to_public_dict(), sort_keys=True) if isinstance(exc, LLMCallError) else str(exc)
+            error = json.dumps(exc.to_public_dict(), sort_keys=True) if public_failure else str(exc)
             set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()
@@ -1450,7 +1489,10 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
         "executive_summary_drafter": 88,
         "deterministic_claim_validator": 92,
         "red_team": 96,
+        "red_team_batch": 96,
+        "red_team_finalize": 96,
         "targeted_correction": 94,
+        "correction_task": 95,
         "finalize_qa": 97,
         "finalize_delivery": 99,
     }
@@ -1543,13 +1585,16 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
         except Exception as exc:
             if isinstance(exc, LLMCallError):
                 _record_mfi_llm_failure_metadata(run_id, exc)
-            tb_str = None if isinstance(exc, LLMCallError) else traceback.format_exc()
+            elif isinstance(exc, MFIGenerationBlockedError):
+                _record_mfi_blocked_failure_metadata(run_id, exc)
+            public_failure = isinstance(exc, (LLMCallError, MFIGenerationBlockedError))
+            tb_str = None if public_failure else traceback.format_exc()
             current_node = (
                 exc.node
-                if isinstance(exc, LLMCallError)
+                if public_failure
                 else (get_run(run_id).current_node if get_run(run_id) is not None else None)
             )
-            error = json.dumps(exc.to_public_dict(), sort_keys=True) if isinstance(exc, LLMCallError) else str(exc)
+            error = json.dumps(exc.to_public_dict(), sort_keys=True) if public_failure else str(exc)
             set_run_failed(run_id, error=error, traceback=tb_str, current_node=current_node)
 
     threading.Thread(target=run_in_background, daemon=True).start()
@@ -1736,7 +1781,10 @@ def _mfi_drafter_info() -> Dict[str, Any]:
             },
             {"id": "deterministic_claim_validator", "name": "Claim Validator", "description": "Validates every claim against the closed catalog"},
             {"id": "red_team", "name": "Red Team QA", "description": "Semantic quality assurance"},
+            {"id": "red_team_batch", "name": "Red Team Batch", "description": "Reviews one persisted bounded narrative batch"},
+            {"id": "red_team_finalize", "name": "Finalize Red Team", "description": "Merges completed batch findings"},
             {"id": "targeted_correction", "name": "Targeted Correction", "description": "Repairs affected fields only"},
+            {"id": "correction_task", "name": "Field Correction", "description": "Repairs and validates one narrative field"},
             {"id": "finalize_qa", "name": "Finalize QA", "description": "Finalizes claim and QA status"},
             {"id": "finalize_delivery", "name": "Validate Delivery", "description": "Validates and stores reader-facing report blocks"},
         ],

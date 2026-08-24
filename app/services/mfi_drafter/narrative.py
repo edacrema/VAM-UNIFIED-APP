@@ -435,6 +435,15 @@ def _validate_claim_list_payload(payload: Any, *, field: str) -> None:
         _validate_claim_payload(item, field=f"{field}[{index}]")
 
 
+def _require_payload_fields(payload: Mapping[str, Any], fields: Sequence[str]) -> None:
+    missing = [field for field in fields if field not in payload]
+    if missing:
+        raise ValueError(
+            "Narrative response is missing required field(s): "
+            + ", ".join(missing)
+        )
+
+
 def parse_dimension_narrative(
     payload: Any,
     *,
@@ -445,16 +454,26 @@ def parse_dimension_narrative(
     """Normalize one LLM dimension payload into the canonical schema."""
     dimension = str(dimension_profile["dimension"])
     is_priority = bool(dimension_profile.get("is_priority"))
-    fallback = fallback_dimension_narrative(
-        dimension_profile,
-        assessment_profile=assessment_profile,
-    )
     if not isinstance(payload, Mapping):
         if strict:
             raise ValueError("Dimension narrative response must be an object")
-        return fallback
+        return fallback_dimension_narrative(
+            dimension_profile,
+            assessment_profile=assessment_profile,
+        )
     try:
         if strict:
+            _require_payload_fields(
+                payload,
+                (
+                    "summary",
+                    "key_findings",
+                    "subdimension_analysis",
+                    "geographic_patterns",
+                    "data_limitations",
+                    "recommendations",
+                ),
+            )
             _validate_claim_payload(payload.get("summary"), field="summary")
             for field in (
                 "key_findings",
@@ -585,7 +604,10 @@ def parse_dimension_narrative(
     except (TypeError, ValueError, ValidationError):
         if strict:
             raise
-        return fallback
+        return fallback_dimension_narrative(
+            dimension_profile,
+            assessment_profile=assessment_profile,
+        )
 
 
 def parse_market_narrative(
@@ -595,13 +617,20 @@ def parse_market_narrative(
     strict: bool = False,
 ) -> dict[str, Any]:
     market_name = str(market_profile["market_name"])
-    fallback = fallback_market_narrative(market_profile)
     if not isinstance(payload, Mapping):
         if strict:
             raise ValueError("Market narrative response must be an object")
-        return fallback
+        return fallback_market_narrative(market_profile)
     try:
         if strict:
+            _require_payload_fields(
+                payload,
+                (
+                    "priority_issues",
+                    "recommended_interventions",
+                    "limitations",
+                ),
+            )
             for field in (
                 "priority_issues",
                 "recommended_interventions",
@@ -652,7 +681,7 @@ def parse_market_narrative(
     except (TypeError, ValueError, ValidationError):
         if strict:
             raise
-        return fallback
+        return fallback_market_narrative(market_profile)
 
 
 def parse_executive_narrative(
@@ -661,13 +690,16 @@ def parse_executive_narrative(
     assessment_profile: Mapping[str, Any],
     strict: bool = False,
 ) -> dict[str, Any]:
-    fallback = fallback_executive_narrative(assessment_profile)
     if not isinstance(payload, Mapping):
         if strict:
             raise ValueError("Executive narrative response must be an object")
-        return fallback
+        return fallback_executive_narrative(assessment_profile)
     try:
         if strict:
+            _require_payload_fields(
+                payload,
+                ("motivation", "key_findings", "recommendations", "limitations"),
+            )
             if payload.get("motivation") is not None:
                 _validate_claim_payload(payload.get("motivation"), field="motivation")
             for field in ("key_findings", "recommendations", "limitations"):
@@ -714,7 +746,7 @@ def parse_executive_narrative(
     except (TypeError, ValueError, ValidationError):
         if strict:
             raise
-        return fallback
+        return fallback_executive_narrative(assessment_profile)
 
 
 def fallback_dimension_narrative(
@@ -1495,6 +1527,7 @@ def validate_structured_narratives(
         )
     )
     flags.extend(_recommendation_linkage_flags(dimension_copy, market_copy, executive_copy))
+    flags.extend(_duplicate_dimension_recommendation_flags(dimension_copy))
     flags.extend(_context_contract_flags(context_copy, known_documents))
 
     material_claim_ids = {
@@ -1602,11 +1635,6 @@ def apply_narrative_density_policy(
                 else NARRATIVE_DENSITY_POLICY.non_priority_recommendations
             )
         ]
-    dimensions = deduplicate_dimension_recommendations(
-        dimensions,
-        assessment_profile.get("dimensions", []) or [],
-    )
-
     markets = deepcopy(dict(market_narratives))
     for narrative in markets.values():
         if not isinstance(narrative, dict):
@@ -1638,6 +1666,56 @@ def apply_narrative_density_policy(
         : NARRATIVE_DENSITY_POLICY.executive_limitations
     ]
     return dimensions, markets, executive
+
+
+def _duplicate_dimension_recommendation_flags(
+    dimension_narratives: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flag later cross-dimension boilerplate instead of replacing live prose."""
+    ordered = [name for name in DISPLAY_DIMENSIONS if name in dimension_narratives]
+    ordered.extend(
+        sorted(
+            (str(name) for name in dimension_narratives if str(name) not in ordered),
+            key=lambda value: (value.casefold(), value),
+        )
+    )
+    first_by_text: dict[str, tuple[str, str]] = {}
+    flags: list[dict[str, Any]] = []
+    for dimension in ordered:
+        narrative = dimension_narratives.get(dimension)
+        if not isinstance(narrative, Mapping):
+            continue
+        for recommendation in narrative.get("recommendations", []) or []:
+            if not isinstance(recommendation, Mapping):
+                continue
+            normalized = _normalized_narrative_text(recommendation.get("text"))
+            if not normalized:
+                continue
+            claim_id = str(recommendation.get("claim_id") or "")
+            first = first_by_text.get(normalized)
+            if first is None:
+                first_by_text[normalized] = (dimension, claim_id)
+                continue
+            flags.append(
+                _flag(
+                    code="duplicate_dimension_recommendation",
+                    severity="medium",
+                    artifact_type="dimension",
+                    artifact_id=dimension,
+                    field_name="recommendations",
+                    claim_id=claim_id or None,
+                    message=(
+                        "Recommendation duplicates wording already used for "
+                        f"{first[0]}; provide dimension-specific review guidance."
+                    ),
+                    recommendation=(
+                        "Rewrite this recommendation using the cited evidence for "
+                        f"{dimension} while preserving its scope and linkage."
+                    ),
+                    repairable=True,
+                )
+            )
+    return flags
 
 
 def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:

@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 from app.shared import async_runs
 from app.services.market_monitor.price_backfill import (
@@ -64,7 +65,9 @@ def _reset_run_store(monkeypatch):
 
 def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypatch):
     _reset_run_store(monkeypatch)
-    monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        dispatcher, "threading", SimpleNamespace(Thread=ImmediateThread)
+    )
     selections = []
     graph_calls = []
 
@@ -194,7 +197,9 @@ def test_market_monitor_async_status_exposes_live_outputs_and_artifacts(monkeypa
 
 def test_market_monitor_async_failure_stores_price_gap_report(monkeypatch):
     _reset_run_store(monkeypatch)
-    monkeypatch.setattr(dispatcher.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        dispatcher, "threading", SimpleNamespace(Thread=ImmediateThread)
+    )
     monkeypatch.setattr(
         dispatcher,
         "resolve_baskets_for_report",
