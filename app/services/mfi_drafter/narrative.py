@@ -1742,16 +1742,10 @@ def normalize_red_team_flags(payload: Any) -> list[dict[str, Any]]:
         identity = "|".join(
             [
                 code,
-                severity,
                 artifact_type,
                 str(raw.get("artifact_id") or ""),
                 str(raw.get("field_name") or ""),
                 str(raw.get("claim_id") or ""),
-                str(raw.get("message") or raw.get("details") or ""),
-                ",".join(metric_ids),
-                ",".join(document_ids),
-                str(raw.get("recommendation") or ""),
-                str(bool(raw.get("repairable", True))),
             ]
         )
         flags.append(

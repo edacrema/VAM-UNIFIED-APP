@@ -502,7 +502,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
     assert result["generation_diagnostics"]["red_team_status"] == "completed"
     assert any(
-        call["operation"] == "mfi.red_team_review.v5"
+        call["operation"] == "mfi.red_team_review.v6"
         for call in result["llm_diagnostics"]["calls"]
     )
     assert result["correction_attempts"] == 0

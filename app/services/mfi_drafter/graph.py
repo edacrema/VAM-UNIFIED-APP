@@ -56,7 +56,9 @@ from .claim_identity import (
     MFIClaimIdentityError,
     assert_claim_identity_contract,
     canonicalize_narrative_identities,
+    context_token,
     count_model_identifiers,
+    normalized_slug,
 )
 from .context_status import (
     not_attempted_context_status,
@@ -268,7 +270,16 @@ def create_initial_state(
             "red_team_batches_total": 0,
             "red_team_batches_completed": 0,
             "red_team_batches_failed": 0,
+            "red_team_batches_retained": 0,
+            "red_team_batches_pending": 0,
+            "red_team_batches_by_kind": {},
+            "red_team_max_batch_character_count": 0,
             "active_red_team_batch": None,
+            "failed_red_team_batch": None,
+            "failed_red_team_batch_kind": None,
+            "failed_red_team_shard_key": None,
+            "failed_red_team_artifact": None,
+            "failed_red_team_character_count": None,
             "red_team_batches": [],
         },
         excluded_market_records=(csv_data or {}).get("excluded_market_records", []),
@@ -359,9 +370,52 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("red_team_batches_total", 0)
     diagnostics.setdefault("red_team_batches_completed", 0)
     diagnostics.setdefault("red_team_batches_failed", 0)
+    diagnostics.setdefault("red_team_batches_retained", 0)
+    diagnostics.setdefault("red_team_batches_pending", 0)
+    diagnostics.setdefault("red_team_batches_by_kind", {})
+    diagnostics.setdefault("red_team_max_batch_character_count", 0)
     diagnostics.setdefault("active_red_team_batch", None)
+    diagnostics.setdefault("failed_red_team_batch", None)
+    diagnostics.setdefault("failed_red_team_batch_kind", None)
+    diagnostics.setdefault("failed_red_team_shard_key", None)
+    diagnostics.setdefault("failed_red_team_artifact", None)
+    diagnostics.setdefault("failed_red_team_character_count", None)
     diagnostics.setdefault("red_team_batches", [])
     return diagnostics
+
+
+def _red_team_batch_rollup(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Derive deterministic queue counters from canonical batch diagnostics."""
+    statuses = Counter(str(item.get("status") or "") for item in rows)
+    kinds = Counter(str(item.get("batch_kind") or "") for item in rows)
+    return {
+        "red_team_batches_total": len(rows),
+        "red_team_batches_completed": int(statuses.get("completed", 0))
+        + int(statuses.get("retained", 0)),
+        "red_team_batches_failed": int(statuses.get("failed", 0)),
+        "red_team_batches_retained": int(statuses.get("retained", 0)),
+        "red_team_batches_pending": int(statuses.get("pending", 0)),
+        "red_team_batches_by_kind": {
+            key: int(value) for key, value in sorted(kinds.items()) if key
+        },
+        "red_team_max_batch_character_count": max(
+            (int(item.get("character_count") or 0) for item in rows),
+            default=0,
+        ),
+    }
+
+
+def _correction_llm_call_count(llm_diagnostics: Mapping[str, Any] | None) -> int:
+    calls = (
+        llm_diagnostics.get("calls", [])
+        if isinstance(llm_diagnostics, Mapping)
+        else []
+    )
+    return sum(
+        1
+        for item in calls or []
+        if isinstance(item, Mapping) and item.get("node") == "correction_task"
+    )
 
 
 def reconcile_generation_diagnostics_for_llm_failure(
@@ -371,22 +425,34 @@ def reconcile_generation_diagnostics_for_llm_failure(
     """Return the live generation diagnostics implied by a failed LLM node."""
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     if error.node == "red_team":
+        prior_failed = int(diagnostics.get("red_team_batches_failed", 0) or 0)
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = MFI_RED_TEAM_BATCH_CONTRACT_VERSION
         diagnostics["red_team_review_operation"] = MFI_RED_TEAM_REVIEW_OPERATION
         diagnostics["red_team_structured_output"] = True
-        diagnostics["red_team_batches_failed"] = int(
-            diagnostics.get("red_team_batches_failed", 0) or 0
-        ) + 1
         active_batch = error.batch_id or diagnostics.get("active_red_team_batch")
         diagnostics["active_red_team_batch"] = active_batch
+        diagnostics["failed_red_team_batch"] = active_batch
         rows = list(diagnostics.get("red_team_batches", []) or [])
         for item in rows:
             if item.get("batch_id") == active_batch:
                 item["status"] = "failed"
                 item["call_id"] = error.call_id
+                item["failure_code"] = error.failure_code
+                diagnostics["failed_red_team_batch_kind"] = item.get("batch_kind")
+                diagnostics["failed_red_team_shard_key"] = item.get("shard_key")
+                diagnostics["failed_red_team_artifact"] = item.get(
+                    "scope_artifact_ref"
+                ) or next(iter(item.get("artifact_refs", []) or []), None)
+                diagnostics["failed_red_team_character_count"] = item.get(
+                    "character_count"
+                )
                 break
         diagnostics["red_team_batches"] = rows
+        if rows:
+            diagnostics.update(_red_team_batch_rollup(rows))
+        else:
+            diagnostics["red_team_batches_failed"] = prior_failed + 1
         if error.operation == MFI_RED_TEAM_NORMALIZATION_OPERATION:
             diagnostics["red_team_format_repair_attempted"] = True
             diagnostics["red_team_format_repair_status"] = "failed"
@@ -411,6 +477,10 @@ def reconcile_generation_diagnostics_for_llm_failure(
         diagnostics["correction_tasks_failed"] = int(
             diagnostics.get("correction_tasks_failed", 0) or 0
         ) + 1
+        diagnostics["correction_attempts"] = max(
+            int(diagnostics.get("correction_attempts", 0) or 0),
+            _correction_llm_call_count(metadata.get("llm_diagnostics")),
+        )
         diagnostics["active_correction_task"] = (
             error.task_id or diagnostics.get("active_correction_task")
         )
@@ -423,24 +493,56 @@ def reconcile_generation_diagnostics_for_blocked_failure(
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     diagnostics.setdefault("fallback_policy", "disabled_live")
     if error.stage == "red_team":
+        prior_failed = int(diagnostics.get("red_team_batches_failed", 0) or 0)
         diagnostics["red_team_status"] = "failed"
-        diagnostics["red_team_batches_failed"] = int(
-            diagnostics.get("red_team_batches_failed", 0) or 0
-        ) + 1
-        if error.batch_id:
-            diagnostics["active_red_team_batch"] = error.batch_id
-        rows = list(diagnostics.get("red_team_batches", []) or [])
+        diagnostics["red_team_contract_version"] = MFI_RED_TEAM_BATCH_CONTRACT_VERSION
+        diagnostics["red_team_review_operation"] = MFI_RED_TEAM_REVIEW_OPERATION
+        diagnostics["red_team_structured_output"] = True
+        diagnostics["red_team_package_target_characters"] = int(
+            error.target_characters or MFI_RED_TEAM_BATCH_TARGET_CHARACTERS
+        )
+        diagnostics["active_red_team_batch"] = error.batch_id or diagnostics.get(
+            "active_red_team_batch"
+        )
+        diagnostics["failed_red_team_batch"] = error.batch_id
+        diagnostics["failed_red_team_batch_kind"] = error.batch_kind
+        diagnostics["failed_red_team_shard_key"] = error.shard_key
+        diagnostics["failed_red_team_artifact"] = (
+            f"{error.artifact_type}:{error.artifact_id}"
+            if error.artifact_type and error.artifact_id
+            else None
+        )
+        diagnostics["failed_red_team_character_count"] = error.character_count
+        rows = deepcopy(error.batch_diagnostics) or list(
+            diagnostics.get("red_team_batches", []) or []
+        )
         for item in rows:
             if item.get("batch_id") == diagnostics.get("active_red_team_batch"):
                 item["status"] = "failed"
+                item["failure_code"] = error.code
                 break
         diagnostics["red_team_batches"] = rows
+        if rows:
+            diagnostics.update(_red_team_batch_rollup(rows))
+        else:
+            diagnostics["red_team_batches_failed"] = prior_failed + 1
+        diagnostics["red_team_package_character_count"] = sum(
+            int(item.get("character_count") or 0) for item in rows
+        )
+        if error.character_count is not None and error.target_characters is not None:
+            diagnostics["red_team_package_within_target"] = (
+                error.character_count <= error.target_characters
+            )
     if error.stage in {"targeted_correction", "correction_task"}:
         diagnostics["correction_tasks_failed"] = int(
             diagnostics.get("correction_tasks_failed", 0) or 0
         ) + 1
         diagnostics["active_correction_task"] = error.task_id or diagnostics.get(
             "active_correction_task"
+        )
+        diagnostics["correction_attempts"] = max(
+            int(diagnostics.get("correction_attempts", 0) or 0),
+            _correction_llm_call_count(metadata.get("llm_diagnostics")),
         )
     diagnostics["delivery_contract_status"] = (
         "failed" if error.stage == "finalize_delivery" else "not_validated"
@@ -2149,7 +2251,7 @@ _RED_TEAM_CLAIM_FIELDS = (
     "scope_statement",
 )
 
-MFI_RED_TEAM_REVIEW_OPERATION = "mfi.red_team_review.v5"
+MFI_RED_TEAM_REVIEW_OPERATION = "mfi.red_team_review.v6"
 MFI_RED_TEAM_NORMALIZATION_OPERATION = (
     f"{MFI_RED_TEAM_REVIEW_OPERATION}.json_normalization.v1"
 )
@@ -2426,7 +2528,7 @@ def _compact_red_team_flag(flag: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
-    """Build the lossless source manifest for deterministic Red-Team v5 batches."""
+    """Build the lossless source manifest for deterministic Red-Team v6 batches."""
     claims = _red_team_claim_rows(state)
     profile = state.get("assessment_profile") or {}
     dimension_profiles = {
@@ -2443,6 +2545,7 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
         _without_empty(
             {
                 "id": name,
+                "token": normalized_slug(name),
                 "priority": bool(
                     dimension_profiles.get(name, {}).get("is_priority")
                 ),
@@ -2455,6 +2558,7 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
         _without_empty(
             {
                 "id": name,
+                "token": context_token(name),
                 "rank": market_profiles.get(name, {}).get("score_rank"),
                 "order": market_profiles.get(name, {}).get("selection_order"),
                 "weak": [
@@ -2524,7 +2628,7 @@ def _build_red_team_review_package(state: MFIReportState) -> Dict[str, Any]:
         if isinstance(item, Mapping)
     ]
     return {
-        "contract_version": "mfi-red-team-input-v4",
+        "contract_version": "mfi-red-team-input-v5",
         "legend": {
             "claim": {
                 "a": "artifact_type",
@@ -2629,6 +2733,22 @@ def _validate_red_team_batch_response(
 def node_red_team(state: MFIReportState) -> dict:
     """Prepare a persisted queue of bounded Red-Team batches."""
     logger.info("[RedTeam] Preparing bounded MFI narrative review batches")
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "red_team_status": "in_progress",
+            "red_team_contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
+            "red_team_review_operation": MFI_RED_TEAM_REVIEW_OPERATION,
+            "red_team_structured_output": True,
+            "red_team_package_target_characters": MFI_RED_TEAM_BATCH_TARGET_CHARACTERS,
+            "red_team_package_within_target": None,
+            "failed_red_team_batch": None,
+            "failed_red_team_batch_kind": None,
+            "failed_red_team_shard_key": None,
+            "failed_red_team_artifact": None,
+            "failed_red_team_character_count": None,
+        }
+    )
     review_package = _build_red_team_review_package(state)
     batches = build_red_team_batches(review_package)
     existing_flags = dict(state.get("red_team_batch_flags", {}) or {})
@@ -2637,7 +2757,6 @@ def node_red_team(state: MFIReportState) -> dict:
     signatures: Dict[str, str] = {}
     queue: List[Dict[str, Any]] = []
     batch_diagnostics: List[Dict[str, Any]] = []
-    retained_count = 0
     for batch in batches:
         signatures[batch.batch_id] = batch.signature
         retained = (
@@ -2645,7 +2764,6 @@ def node_red_team(state: MFIReportState) -> dict:
             and batch.batch_id in existing_flags
         )
         if retained:
-            retained_count += 1
             batch_flags[batch.batch_id] = list(existing_flags[batch.batch_id])
         else:
             queue.append(batch.model_dump(mode="json"))
@@ -2653,24 +2771,31 @@ def node_red_team(state: MFIReportState) -> dict:
             {
                 "batch_id": batch.batch_id,
                 "batch_kind": batch.batch_kind,
+                "contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
+                "shard_key": batch.shard_key,
                 "sequence": batch.sequence,
+                "artifact_refs": batch.artifact_refs,
+                "scope_artifact_ref": (
+                    f"{batch.package['coherence_scope']['artifact_type']}:"
+                    f"{batch.package['coherence_scope']['artifact_id']}"
+                    if batch.package.get("coherence_scope", {}).get("artifact_type")
+                    and batch.package.get("coherence_scope", {}).get("artifact_id")
+                    else None
+                ),
                 "character_count": batch.character_count,
+                "target_character_count": MFI_RED_TEAM_BATCH_TARGET_CHARACTERS,
                 "claim_count": len(batch.claim_ids),
                 "status": "retained" if retained else "pending",
                 "flag_count": len(batch_flags.get(batch.batch_id, [])),
+                "failure_code": None,
             }
         )
-    diagnostics = _generation_diagnostics(state)
+    rollup = _red_team_batch_rollup(batch_diagnostics)
     diagnostics.update(
         {
-            "red_team_status": "in_progress",
-            "red_team_contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
-            "red_team_review_operation": MFI_RED_TEAM_REVIEW_OPERATION,
-            "red_team_structured_output": True,
             "red_team_package_character_count": sum(
                 batch.character_count for batch in batches
             ),
-            "red_team_package_target_characters": MFI_RED_TEAM_BATCH_TARGET_CHARACTERS,
             "red_team_package_within_target": all(
                 batch.character_count <= MFI_RED_TEAM_BATCH_TARGET_CHARACTERS
                 for batch in batches
@@ -2679,11 +2804,9 @@ def node_red_team(state: MFIReportState) -> dict:
             "red_team_format_repair_status": "not_needed",
             "red_team_initial_call_id": None,
             "red_team_format_repair_call_id": None,
-            "red_team_batches_total": len(batches),
-            "red_team_batches_completed": retained_count,
-            "red_team_batches_failed": 0,
             "active_red_team_batch": queue[0]["batch_id"] if queue else None,
             "red_team_batches": batch_diagnostics,
+            **rollup,
         }
     )
     return {
@@ -2726,11 +2849,21 @@ def node_process_red_team_batch(state: MFIReportState) -> dict:
     try:
         batch = MFIRedTeamReviewBatch.model_validate(queue[0])
     except ValidationError as exc:
+        raw_batch = queue[0] if isinstance(queue[0], Mapping) else {}
         raise MFIGenerationBlockedError(
             "mfi_red_team_batch_contract_failed",
             "A persisted Red-Team batch violates its internal contract.",
             stage="red_team",
             status_code=500,
+            batch_id=str(raw_batch.get("batch_id") or "") or None,
+            batch_kind=str(raw_batch.get("batch_kind") or "") or None,
+            shard_key=str(raw_batch.get("shard_key") or "") or None,
+            character_count=(
+                int(raw_batch.get("character_count"))
+                if str(raw_batch.get("character_count") or "").isdigit()
+                else None
+            ),
+            target_characters=MFI_RED_TEAM_BATCH_TARGET_CHARACTERS,
         ) from exc
     runtime = llm_runtime_config()
     structured_model = _bind_red_team_schema(
@@ -2762,6 +2895,7 @@ def node_process_red_team_batch(state: MFIReportState) -> dict:
     for flag in traced.value:
         item = dict(flag)
         item["review_batch_id"] = batch.batch_id
+        item["review_batch_ids"] = [batch.batch_id]
         normalized.append(item)
     batch_flags = dict(state.get("red_team_batch_flags", {}) or {})
     batch_flags[batch.batch_id] = normalized
@@ -2775,13 +2909,12 @@ def node_process_red_team_batch(state: MFIReportState) -> dict:
                     "status": "completed",
                     "call_id": traced.call_id,
                     "flag_count": len(normalized),
+                    "failure_code": None,
                 }
             )
             break
     diagnostics["red_team_batches"] = rows
-    diagnostics["red_team_batches_completed"] = int(
-        diagnostics.get("red_team_batches_completed", 0) or 0
-    ) + 1
+    diagnostics.update(_red_team_batch_rollup(rows))
     diagnostics["active_red_team_batch"] = (
         remaining[0].get("batch_id") if remaining else None
     )
@@ -2833,18 +2966,68 @@ def node_finalize_red_team(state: MFIReportState) -> dict:
         if item.get("status") not in {"completed", "retained"}
     ]
     if incomplete:
+        failed = incomplete[0]
+        artifact_ref = next(iter(failed.get("artifact_refs", []) or []), "")
+        artifact_type, _, artifact_id = str(artifact_ref).partition(":")
         raise MFIGenerationBlockedError(
             "mfi_red_team_batch_contract_failed",
             "Red-Team review reached finalization with incomplete batches.",
             stage="red_team",
             status_code=500,
-            batch_id=str(incomplete[0].get("batch_id") or "") or None,
+            artifact_type=artifact_type or None,
+            artifact_id=artifact_id or None,
+            batch_id=str(failed.get("batch_id") or "") or None,
+            batch_kind=str(failed.get("batch_kind") or "") or None,
+            shard_key=str(failed.get("shard_key") or "") or None,
+            character_count=int(failed.get("character_count") or 0),
+            target_characters=int(
+                failed.get("target_character_count")
+                or MFI_RED_TEAM_BATCH_TARGET_CHARACTERS
+            ),
         )
     batch_flags = dict(state.get("red_team_batch_flags", {}) or {})
-    unique_flags: Dict[str, Dict[str, Any]] = {}
+    unique_flags: Dict[tuple[str, str, str, str, str], Dict[str, Any]] = {}
+    severity_rank = {"low": 0, "medium": 1, "high": 2}
     for row in batch_rows:
-        for flag in batch_flags.get(str(row.get("batch_id")), []):
-            unique_flags.setdefault(str(flag.get("flag_id")), dict(flag))
+        batch_id = str(row.get("batch_id") or "")
+        for flag in batch_flags.get(batch_id, []):
+            key = (
+                str(flag.get("code") or ""),
+                str(flag.get("artifact_type") or ""),
+                str(flag.get("artifact_id") or ""),
+                str(flag.get("field_name") or ""),
+                str(flag.get("claim_id") or ""),
+            )
+            existing = unique_flags.get(key)
+            if existing is None:
+                item = dict(flag)
+                item["review_batch_id"] = batch_id or item.get("review_batch_id")
+                item["review_batch_ids"] = [batch_id] if batch_id else []
+                unique_flags[key] = item
+                continue
+            contributing = list(existing.get("review_batch_ids", []) or [])
+            if batch_id and batch_id not in contributing:
+                contributing.append(batch_id)
+            existing["review_batch_ids"] = contributing
+            if severity_rank.get(str(flag.get("severity")), -1) > severity_rank.get(
+                str(existing.get("severity")), -1
+            ):
+                existing["severity"] = flag.get("severity")
+            existing["metric_ids"] = sorted(
+                {
+                    *[str(value) for value in existing.get("metric_ids", []) or []],
+                    *[str(value) for value in flag.get("metric_ids", []) or []],
+                }
+            )
+            existing["document_ids"] = sorted(
+                {
+                    *[str(value) for value in existing.get("document_ids", []) or []],
+                    *[str(value) for value in flag.get("document_ids", []) or []],
+                }
+            )
+            existing["repairable"] = bool(existing.get("repairable", True)) and bool(
+                flag.get("repairable", True)
+            )
     flags = [unique_flags[key] for key in sorted(unique_flags)]
     qa_review = build_qa_review(
         state.get("deterministic_flags", []),
@@ -2854,8 +3037,12 @@ def node_finalize_red_team(state: MFIReportState) -> dict:
     )
     diagnostics["red_team_status"] = "completed"
     diagnostics["active_red_team_batch"] = None
-    diagnostics["red_team_batches_completed"] = len(batch_rows)
-    diagnostics["red_team_batches_failed"] = 0
+    diagnostics["failed_red_team_batch"] = None
+    diagnostics["failed_red_team_batch_kind"] = None
+    diagnostics["failed_red_team_shard_key"] = None
+    diagnostics["failed_red_team_artifact"] = None
+    diagnostics["failed_red_team_character_count"] = None
+    diagnostics.update(_red_team_batch_rollup(batch_rows))
     return {
         "red_team_flags": flags,
         "red_team_dirty_artifacts": [],
@@ -3389,6 +3576,8 @@ only the example content with the corrected value for {field_name}.
     diagnostics["correction_tasks_completed"] = int(
         diagnostics.get("correction_tasks_completed", 0) or 0
     ) + 1
+    trace_snapshot = trace.snapshot()
+    diagnostics["correction_attempts"] = _correction_llm_call_count(trace_snapshot)
     diagnostics["active_correction_task"] = (
         remaining[0].get("task_id") if remaining else None
     )
@@ -3400,7 +3589,7 @@ only the example content with the corrected value for {field_name}.
         "correction_history": history,
         "red_team_dirty_artifacts": sorted(dirty),
         "llm_calls": state.get("llm_calls", 0) + call_count,
-        "llm_diagnostics": trace.snapshot(),
+        "llm_diagnostics": trace_snapshot,
         "generation_diagnostics": diagnostics,
         "current_node": "correction_task",
     }
@@ -3463,7 +3652,10 @@ def node_finalize_qa(state: MFIReportState) -> dict:
     )
     diagnostics.update(
         {
-            "correction_attempts": state.get("correction_attempts", 0),
+            "correction_attempts": max(
+                int(diagnostics.get("correction_attempts", 0) or 0),
+                _correction_llm_call_count(state.get("llm_diagnostics")),
+            ),
             "unresolved_high_count": int(severity_counts.get("high", 0)),
             "unresolved_medium_count": int(severity_counts.get("medium", 0)),
             "unresolved_low_count": int(severity_counts.get("low", 0)),
@@ -3751,6 +3943,18 @@ def run_mfi_report_generation(
             ),
             "mfi_red_team_batches_total": diagnostics.get(
                 "red_team_batches_total", 0
+            ),
+            "mfi_red_team_batches_by_kind": diagnostics.get(
+                "red_team_batches_by_kind", {}
+            ),
+            "mfi_red_team_batches_retained": diagnostics.get(
+                "red_team_batches_retained", 0
+            ),
+            "mfi_red_team_max_batch_character_count": diagnostics.get(
+                "red_team_max_batch_character_count", 0
+            ),
+            "mfi_red_team_contract_version": diagnostics.get(
+                "red_team_contract_version"
             ),
             "mfi_methodology_warning_codes": sorted(
                 str(item.get("code"))

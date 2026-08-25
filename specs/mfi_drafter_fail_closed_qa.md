@@ -35,13 +35,18 @@ not called again. A global, unsafe, or non-repairable material finding blocks th
 
 Local review units are canonical `(artifact, field)` pairs. Units are packed in stable
 order into packages no larger than 45,000 serialized characters and are never split.
-Every claim appears once across local packages. Separate dimension/executive and
-market/executive packages check cross-artifact coherence. Packages contain only cited
-metric and document evidence.
+Every claim appears once across local packages. Contract
+`mfi-red-team-batches-v2` adds one coherence shard per priority dimension and one per
+selected market. Each shard compares that artifact with the complete bounded
+executive summary, contains only its cited metric and document evidence, and remains
+within the same 45,000-character limit without truncation.
 
 Each package is a persisted graph step. Unchanged signatures retain their prior
-finding set after a correction; changed local packages and affected coherence packages
-are rerun. A failed or incomplete package blocks the entire run.
+finding set after a correction. Stable membership-derived IDs ensure that a market or
+dimension correction reruns only its affected local and coherence packages; an
+executive-summary correction invalidates every coherence shard. Semantically duplicate
+findings about repeated executive claims are consolidated application-side. A failed
+or incomplete package blocks the entire run.
 
 ## Malformed responses
 

@@ -158,7 +158,7 @@ def test_invalid_concatenated_json_records_content_free_structure():
             model=FakeModel(FakeResponse(raw)),
             messages=[{"role": "user", "content": "private prompt"}],
             node="red_team",
-            operation="mfi.red_team_review.v5",
+            operation="mfi.red_team_review.v6",
             validator=lambda payload: payload,
         )
 
@@ -183,7 +183,7 @@ def test_recovered_call_is_successful_at_run_level_but_remains_auditable():
             model=FakeModel(FakeResponse('{"flags": []}{"flags": []}')),
             messages=[{"role": "user", "content": "prompt"}],
             node="red_team",
-            operation="mfi.red_team_review.v5",
+            operation="mfi.red_team_review.v6",
             validator=lambda payload: payload,
         )
     session.mark_recovered(caught.value.call_id)
@@ -215,7 +215,7 @@ def test_started_snapshot_is_visible_before_blocking_model_returns():
             model=BlockingModel(),
             messages=[{"role": "user", "content": "prompt"}],
             node="red_team",
-            operation="mfi.red_team_review.v5",
+            operation="mfi.red_team_review.v6",
         )
     )
     thread.start()

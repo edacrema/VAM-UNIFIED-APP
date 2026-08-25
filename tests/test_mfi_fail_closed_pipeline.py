@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.services.mfi_drafter import graph
-from app.services.mfi_drafter.claim_identity import dimension_claim_id
+from app.services.mfi_drafter.claim_identity import context_token, dimension_claim_id
 from app.services.mfi_drafter.claim_identity import (
     canonical_claim_index,
     canonicalize_narrative_identities,
@@ -24,7 +25,7 @@ from app.services.mfi_drafter.qa_pipeline import (
     project_correction_transport,
     validate_field_patch_payload,
 )
-from app.services.mfi_drafter.schemas import MFIReleaseControl
+from app.services.mfi_drafter.schemas import MFIGenerationDiagnostics, MFIReleaseControl
 from app.services.mfi_drafter.synthetic_fixtures import SyntheticSpec, build_loaded
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
 from app.shared.llm_observability import LLMCallError
@@ -507,6 +508,138 @@ def _review_source(*, long_text: str = "") -> dict:
     }
 
 
+def _gaza_sized_review_source(*, text_size: int = 400) -> dict:
+    """Return 174 realistic review rows with the maximum selected-market set."""
+    rows: list[dict] = []
+    evidence: dict[str, dict] = {}
+
+    def add_rows(
+        artifact_type: str,
+        artifact_id: str,
+        field_name: str,
+        count: int,
+    ) -> None:
+        for position in range(1, count + 1):
+            claim_id = (
+                f"{artifact_type}.{context_token(artifact_id)}."
+                f"{field_name}.{position}"
+            )
+            metric_id = f"metric.{len(evidence) + 1:03d}"
+            rows.append(
+                {
+                    "a": artifact_type,
+                    "aid": artifact_id,
+                    "f": field_name,
+                    "p": position,
+                    "id": claim_id,
+                    "text": f"{artifact_id} {field_name} {position} "
+                    + ("x" * text_size),
+                    "s": "market" if artifact_type == "market" else "assessment",
+                    "o": "neutral",
+                    "m": [metric_id],
+                    "d": [],
+                }
+            )
+            evidence[metric_id] = {
+                "label": f"Evidence {metric_id}",
+                "formatted_value": f"{len(evidence) + 1}.00",
+                "unit": "score",
+                "scope": "assessed markets",
+            }
+
+    priority_dimensions = ["Service", "Price", "Infrastructure", "Food Quality"]
+    other_dimensions = [
+        "Assortment",
+        "Availability",
+        "Resilience",
+        "Competition",
+        "Access and Protection",
+    ]
+    for dimension in priority_dimensions:
+        for field_name, count in (
+            ("summary", 1),
+            ("key_findings", 3),
+            ("subdimension_analysis", 2),
+            ("geographic_patterns", 2),
+            ("data_limitations", 1),
+            ("recommendations", 3),
+        ):
+            add_rows("dimension", dimension, field_name, count)
+    for dimension in other_dimensions:
+        add_rows("dimension", dimension, "summary", 1)
+
+    market_names = [
+        "Gaza City",
+        "Rafah",
+        "Khan Younis",
+        "Deir al-Balah",
+        "Jabalia",
+        "Beit Lahia",
+        "Beit Hanoun",
+        "Nuseirat",
+        "Bureij",
+        "Maghazi",
+        "Al Qarara",
+        "Abasan al-Kabira",
+        "Az Zawayda",
+        "Shuja'iyya",
+        "Al Mawasi",
+    ]
+    for market_name in market_names:
+        add_rows("market", market_name, "priority_issues", 3)
+        add_rows("market", market_name, "recommended_interventions", 3)
+        add_rows("market", market_name, "limitations", 1)
+
+    for field_name, count in (
+        ("motivation", 1),
+        ("key_findings", 4),
+        ("recommendations", 3),
+        ("limitations", 3),
+        ("scope_statement", 1),
+    ):
+        add_rows("executive_summary", "executive_summary", field_name, count)
+
+    context_statements = [
+        {
+            "id": f"context.statement.{index}",
+            "text": f"Context statement {index} " + ("c" * 80),
+            "class": "corroborating",
+            "docs": [f"doc-{index}"],
+        }
+        for index in range(1, 5)
+    ]
+    assert len(rows) + len(context_statements) == 174
+    return {
+        "contract_version": "mfi-red-team-input-v5",
+        "claims": rows,
+        "context_statements": context_statements,
+        "priority_context": {
+            "dimensions": [
+                {"id": name, "token": name.casefold().replace(" ", "_"), "rank": rank}
+                for rank, name in enumerate(priority_dimensions, start=1)
+            ],
+            "markets": [
+                {
+                    "id": name,
+                    "token": context_token(name),
+                    "rank": rank,
+                    "order": rank,
+                    "weak": priority_dimensions[:3],
+                }
+                for rank, name in enumerate(market_names, start=1)
+            ],
+        },
+        "evidence_by_metric_id": evidence,
+        "cited_documents": [
+            {"id": f"doc-{index}", "title": f"Document {index}"}
+            for index in range(1, 5)
+        ],
+        "limitations": [],
+        "deterministic_flags": [],
+        "prohibitions": ["Do not infer causality."],
+    }
+
+
 def test_red_team_batches_are_bounded_deterministic_and_locally_exhaustive() -> None:
     first = build_red_team_batches(_review_source(), target_characters=1_400)
     second = build_red_team_batches(_review_source(), target_characters=1_400)
@@ -562,6 +695,338 @@ def test_oversized_red_team_atomic_field_fails_without_truncation() -> None:
             target_characters=1_000,
         )
     assert caught.value.code == "mfi_red_team_batch_contract_failed"
+
+
+def test_gaza_sized_review_is_sharded_by_priority_dimension_and_market() -> None:
+    source = _gaza_sized_review_source()
+    executive_ids = {
+        str(row["id"])
+        for row in source["claims"]
+        if row["a"] == "executive_summary"
+    }
+    old_market_text_size = sum(
+        len(str(row["text"]))
+        for row in source["claims"]
+        if row["a"] in {"market", "executive_summary"}
+    )
+    assert old_market_text_size > 45_000
+
+    batches = build_red_team_batches(source)
+    dimensions = [item for item in batches if item.batch_kind == "dimension_coherence"]
+    markets = [item for item in batches if item.batch_kind == "market_coherence"]
+    local = [item for item in batches if item.batch_kind == "local"]
+
+    assert len(dimensions) == 4
+    assert len(markets) == 15
+    assert all(item.character_count <= 45_000 for item in batches)
+    assert [item.shard_key for item in dimensions] == [
+        "dimension:service",
+        "dimension:price",
+        "dimension:infrastructure",
+        "dimension:food_quality",
+    ]
+    assert [item.shard_key for item in markets] == [
+        f"market:{item['token']}" for item in source["priority_context"]["markets"]
+    ]
+    local_claim_ids = [claim_id for item in local for claim_id in item.claim_ids]
+    expected_local_ids = [
+        *[str(item["id"]) for item in source["context_statements"]],
+        *[str(item["id"]) for item in source["claims"]],
+    ]
+    assert local_claim_ids == expected_local_ids
+    assert len(local_claim_ids) == len(set(local_claim_ids)) == 174
+    for batch in [*dimensions, *markets]:
+        assert executive_ids <= set(batch.claim_ids)
+        cited = {
+            metric_id
+            for row in batch.package["claims"]
+            for metric_id in row.get("m", [])
+        }
+        assert set(batch.package["evidence_by_metric_id"]) == cited
+    for batch in dimensions:
+        assert len(batch.package["priority_context"]["dimensions"]) == 4
+        assert batch.package["priority_context"]["markets"] == []
+        scoped_rows = [row for row in batch.package["claims"] if row["a"] == "dimension"]
+        assert {row["aid"] for row in scoped_rows} == {
+            batch.package["coherence_scope"]["artifact_id"]
+        }
+        assert {row["f"] for row in scoped_rows} == {
+            "summary",
+            "key_findings",
+            "subdimension_analysis",
+            "geographic_patterns",
+            "data_limitations",
+            "recommendations",
+        }
+    for batch in markets:
+        market_context = batch.package["priority_context"]["markets"]
+        assert len(market_context) == 15
+        assert sum("weak" in item for item in market_context) == 1
+        assert len(batch.package["priority_context"]["dimensions"]) == 3
+        scoped_rows = [row for row in batch.package["claims"] if row["a"] == "market"]
+        assert {row["aid"] for row in scoped_rows} == {
+            batch.package["coherence_scope"]["artifact_id"]
+        }
+        assert {row["f"] for row in scoped_rows} == {
+            "priority_issues",
+            "recommended_interventions",
+            "limitations",
+        }
+
+
+def test_coherence_batch_ids_are_stable_and_changes_are_artifact_scoped() -> None:
+    source = _gaza_sized_review_source(text_size=80)
+    first = build_red_team_batches(source)
+    first_coherence = {
+        item.shard_key: item
+        for item in first
+        if item.batch_kind != "local"
+    }
+
+    changed_market = deepcopy(source)
+    changed_market_row = next(
+        row
+        for row in changed_market["claims"]
+        if row["a"] == "market" and row["aid"] == "Rafah"
+    )
+    changed_market_row["text"] = "Corrected Rafah issue."
+    second = build_red_team_batches(changed_market)
+    second_coherence = {
+        item.shard_key: item
+        for item in second
+        if item.batch_kind != "local"
+    }
+    assert set(first_coherence) == set(second_coherence)
+    changed_shards = {
+        key
+        for key in first_coherence
+        if first_coherence[key].signature != second_coherence[key].signature
+    }
+    assert changed_shards == {f"market:{context_token('Rafah')}"}
+    assert all(
+        first_coherence[key].batch_id == second_coherence[key].batch_id
+        for key in first_coherence
+    )
+
+    changed_executive = deepcopy(source)
+    executive_row = next(
+        row for row in changed_executive["claims"] if row["a"] == "executive_summary"
+    )
+    executive_row["text"] = "Corrected executive summary."
+    third = build_red_team_batches(changed_executive)
+    third_coherence = {
+        item.shard_key: item
+        for item in third
+        if item.batch_kind != "local"
+    }
+    assert all(
+        first_coherence[key].signature != third_coherence[key].signature
+        for key in first_coherence
+    )
+    assert all(
+        first_coherence[key].batch_id == third_coherence[key].batch_id
+        for key in first_coherence
+    )
+
+
+def test_coherence_ids_do_not_depend_on_preceding_local_batches() -> None:
+    source = _gaza_sized_review_source(text_size=80)
+    first = build_red_team_batches(source, target_characters=20_000)
+    changed = deepcopy(source)
+    changed["context_statements"].insert(
+        0,
+        {
+            "id": "context.statement.0",
+            "text": "Earlier context.",
+            "class": "corroborating",
+            "docs": [],
+        },
+    )
+    second = build_red_team_batches(changed, target_characters=20_000)
+    first_coherence = {
+        item.shard_key: (item.batch_id, item.signature)
+        for item in first
+        if item.batch_kind != "local"
+    }
+    second_coherence = {
+        item.shard_key: (item.batch_id, item.signature)
+        for item in second
+        if item.batch_kind != "local"
+    }
+    assert first_coherence == second_coherence
+
+
+def test_oversized_coherence_shard_exposes_precise_contract_diagnostics() -> None:
+    source = _review_source()
+    source["priority_context"]["markets"] = [
+        {
+            "id": "Dense Market",
+            "token": context_token("Dense Market"),
+            "rank": 1,
+            "order": 1,
+            "weak": ["Price"],
+        }
+    ]
+    source["claims"].extend(
+        [
+            {
+                "a": "market",
+                "aid": "Dense Market",
+                "f": field_name,
+                "p": 1,
+                "id": f"market.dense.{field_name}.1",
+                "text": "m" * 1_100,
+                "s": "market",
+                "o": "neutral",
+                "m": [],
+                "d": [],
+            }
+            for field_name in ("priority_issues", "recommended_interventions")
+        ]
+    )
+    source["claims"][2]["text"] = "e" * 1_100
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        build_red_team_batches(source, target_characters=3_000)
+    error = caught.value
+    assert error.code == "mfi_red_team_batch_contract_failed"
+    assert error.batch_kind == "market_coherence"
+    assert error.shard_key == f"market:{context_token('Dense Market')}"
+    assert error.character_count > 3_000
+    assert error.target_characters == 3_000
+    assert error.to_public_dict()["shard_key"] == error.shard_key
+    assert error.to_public_dict()["character_count"] == error.character_count
+    assert error.to_public_dict()["target_characters"] == 3_000
+    assert error.batch_diagnostics
+    failed = [item for item in error.batch_diagnostics if item["status"] == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["failure_code"] == error.code
+    diagnostics = graph.reconcile_generation_diagnostics_for_blocked_failure(
+        {"generation_diagnostics": {}}, error
+    )
+    assert diagnostics["red_team_status"] == "failed"
+    assert diagnostics["red_team_contract_version"] == "mfi-red-team-batches-v2"
+    assert diagnostics["red_team_review_operation"] == "mfi.red_team_review.v6"
+    assert diagnostics["failed_red_team_batch"] == error.batch_id
+    assert diagnostics["failed_red_team_shard_key"] == error.shard_key
+    assert diagnostics["failed_red_team_character_count"] == error.character_count
+    assert diagnostics["red_team_package_target_characters"] == 3_000
+    assert diagnostics["red_team_batches_failed"] == 1
+    assert diagnostics["red_team_package_within_target"] is False
+    MFIGenerationDiagnostics.model_validate(diagnostics)
+
+
+def test_coherence_character_limit_accepts_45000_and_rejects_45001() -> None:
+    source = _gaza_sized_review_source(text_size=20)
+    market_name = source["priority_context"]["markets"][0]["id"]
+    shard_key = f"market:{context_token(market_name)}"
+    initial = build_red_team_batches(source)
+    initial_batch = next(item for item in initial if item.shard_key == shard_key)
+    padding = 45_000 - initial_batch.character_count
+    assert padding > 0
+    target_row = next(
+        row
+        for row in source["claims"]
+        if row["a"] == "market" and row["aid"] == market_name
+    )
+    target_row["text"] += "x" * padding
+    boundary = build_red_team_batches(source)
+    boundary_batch = next(item for item in boundary if item.shard_key == shard_key)
+    assert boundary_batch.character_count == 45_000
+
+    target_row["text"] += "x"
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        build_red_team_batches(source)
+    assert caught.value.shard_key == shard_key
+    assert caught.value.character_count == 45_001
+
+
+def test_repeated_coherence_findings_merge_by_semantic_identity() -> None:
+    first = graph._validate_red_team_response(
+        {
+            "flags": [
+                {
+                    "code": "executive_mismatch",
+                    "severity": "medium",
+                    "artifact_type": "executive_summary",
+                    "artifact_id": "executive_summary",
+                    "field_name": "key_findings",
+                    "claim_id": "executive.key_findings.1",
+                    "message": "First canonical message.",
+                    "recommendation": "Repair it.",
+                    "metric_ids": ["metric.1"],
+                    "document_ids": [],
+                    "repairable": True,
+                }
+            ]
+        }
+    )[0]
+    second = graph._validate_red_team_response(
+        {
+            "flags": [
+                {
+                    "code": "executive_mismatch",
+                    "severity": "high",
+                    "artifact_type": "executive_summary",
+                    "artifact_id": "executive_summary",
+                    "field_name": "key_findings",
+                    "claim_id": "executive.key_findings.1",
+                    "message": "Later wording from another shard.",
+                    "recommendation": "Repair it.",
+                    "metric_ids": ["metric.2"],
+                    "document_ids": ["doc-1"],
+                    "repairable": True,
+                }
+            ]
+        }
+    )[0]
+    first.update(
+        review_batch_id="dimension-batch",
+        review_batch_ids=["dimension-batch"],
+    )
+    second.update(
+        review_batch_id="market-batch",
+        review_batch_ids=["market-batch"],
+    )
+    result = graph.node_finalize_red_team(
+        {
+            "generation_diagnostics": {
+                "red_team_batches": [
+                    {
+                        "batch_id": "dimension-batch",
+                        "batch_kind": "dimension_coherence",
+                        "sequence": 1,
+                        "character_count": 100,
+                        "claim_count": 1,
+                        "status": "completed",
+                        "flag_count": 1,
+                    },
+                    {
+                        "batch_id": "market-batch",
+                        "batch_kind": "market_coherence",
+                        "sequence": 2,
+                        "character_count": 100,
+                        "claim_count": 1,
+                        "status": "completed",
+                        "flag_count": 1,
+                    },
+                ]
+            },
+            "red_team_batch_flags": {
+                "dimension-batch": [first],
+                "market-batch": [second],
+            },
+            "deterministic_flags": [],
+            "correction_attempts": 0,
+            "correction_history": [],
+        }
+    )
+    assert len(result["red_team_flags"]) == 1
+    merged = result["red_team_flags"][0]
+    assert merged["severity"] == "high"
+    assert merged["message"] == "First canonical message."
+    assert merged["metric_ids"] == ["metric.1", "metric.2"]
+    assert merged["document_ids"] == ["doc-1"]
+    assert merged["review_batch_ids"] == ["dimension-batch", "market-batch"]
 
 
 class _NormalizationTrace:
@@ -699,7 +1164,7 @@ def test_llm_error_public_contract_includes_active_task_or_batch() -> None:
         failure_code="llm_transport_error",
         call_id="llm-1",
         node="red_team",
-        operation="mfi.red_team_review.v5",
+        operation="mfi.red_team_review.v6",
         stage="transport",
         batch_id="batch-1",
     )
@@ -891,8 +1356,20 @@ def test_full_fake_graph_uses_granular_repairs_and_distributed_red_team(
     assert result["correction_attempts"] == 2
     assert diagnostics["correction_tasks_total"] == 3
     assert diagnostics["correction_tasks_completed"] == 3
+    assert diagnostics["correction_attempts"] == 3
     assert diagnostics["red_team_batches_total"] > 1
     assert diagnostics["red_team_batches_completed"] == diagnostics["red_team_batches_total"]
+    assert sum(diagnostics["red_team_batches_by_kind"].values()) == diagnostics[
+        "red_team_batches_total"
+    ]
+    assert diagnostics["red_team_batches_pending"] == 0
+    assert diagnostics["red_team_batches_failed"] == 0
+    assert diagnostics["red_team_max_batch_character_count"] <= 45_000
+    assert all(item["shard_key"] for item in diagnostics["red_team_batches"])
+    assert all(
+        item["contract_version"] == "mfi-red-team-batches-v2"
+        for item in diagnostics["red_team_batches"]
+    )
     assert diagnostics["red_team_status"] == "completed"
     assert diagnostics["fallback_policy"] == "disabled_live"
     assert diagnostics["identity_fallback_artifacts"] == []

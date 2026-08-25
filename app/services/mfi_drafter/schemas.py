@@ -908,6 +908,7 @@ class MFINarrativeQAFlag(BaseModel):
     actual_value: Optional[str] = None
     repairable: bool = True
     review_batch_id: Optional[str] = None
+    review_batch_ids: List[str] = Field(default_factory=list)
 
 
 class MFIRedTeamFlagDraft(BaseModel):
@@ -1029,12 +1030,18 @@ class MFIRedTeamBatchDiagnostic(BaseModel):
 
     batch_id: str = Field(min_length=1)
     batch_kind: Literal["local", "dimension_coherence", "market_coherence"]
+    contract_version: str = Field(default="mfi-red-team-batches-v1", min_length=1)
+    shard_key: str = Field(default="legacy", min_length=1)
     sequence: int = Field(ge=1)
+    artifact_refs: List[str] = Field(default_factory=list)
+    scope_artifact_ref: Optional[str] = None
     character_count: int = Field(ge=0)
+    target_character_count: int = Field(default=45_000, ge=1)
     claim_count: int = Field(ge=0)
     status: Literal["pending", "completed", "failed", "retained"]
     call_id: Optional[str] = None
     flag_count: int = Field(default=0, ge=0)
+    failure_code: Optional[str] = None
 
 
 class MFIRedTeamReviewBatch(BaseModel):
@@ -1045,6 +1052,7 @@ class MFIRedTeamReviewBatch(BaseModel):
     batch_id: str = Field(min_length=1)
     signature: str = Field(min_length=1)
     batch_kind: Literal["local", "dimension_coherence", "market_coherence"]
+    shard_key: str = Field(default="legacy", min_length=1)
     sequence: int = Field(ge=1)
     package: Dict[str, Any]
     claim_ids: List[str] = Field(default_factory=list)
@@ -1226,7 +1234,16 @@ class MFIGenerationDiagnostics(BaseModel):
     red_team_batches_total: int = Field(default=0, ge=0)
     red_team_batches_completed: int = Field(default=0, ge=0)
     red_team_batches_failed: int = Field(default=0, ge=0)
+    red_team_batches_retained: int = Field(default=0, ge=0)
+    red_team_batches_pending: int = Field(default=0, ge=0)
+    red_team_batches_by_kind: Dict[str, int] = Field(default_factory=dict)
+    red_team_max_batch_character_count: int = Field(default=0, ge=0)
     active_red_team_batch: Optional[str] = None
+    failed_red_team_batch: Optional[str] = None
+    failed_red_team_batch_kind: Optional[str] = None
+    failed_red_team_shard_key: Optional[str] = None
+    failed_red_team_artifact: Optional[str] = None
+    failed_red_team_character_count: Optional[int] = Field(default=None, ge=0)
     red_team_batches: List[MFIRedTeamBatchDiagnostic] = Field(default_factory=list)
 
 

@@ -257,6 +257,19 @@ if isinstance(result, dict):
             "Failed Red-Team batches",
             str(diagnostics.get("red_team_batches_failed", 0)),
         )
+        batch_columns = st.columns(3)
+        batch_columns[0].metric(
+            "Retained Red-Team batches",
+            str(diagnostics.get("red_team_batches_retained", 0)),
+        )
+        batch_columns[1].metric(
+            "Pending Red-Team batches",
+            str(diagnostics.get("red_team_batches_pending", 0)),
+        )
+        batch_columns[2].metric(
+            "Largest Red-Team package",
+            f"{diagnostics.get('red_team_max_batch_character_count', 0)} chars",
+        )
         st.json(result.get("generation_diagnostics") or {})
         st.markdown("**LLM call diagnostics**")
         render_llm_diagnostics(result.get("llm_diagnostics") or {})

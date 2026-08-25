@@ -385,7 +385,7 @@ def test_deterministic_validator_makes_no_llm_call(monkeypatch, phase3_bundle):
     assert update["claim_validation"]["status"] == "passed"
 
 
-def test_red_team_v4_package_is_complete_deterministic_and_compact(
+def test_red_team_v5_package_is_complete_deterministic_and_compact(
     phase3_bundle,
 ) -> None:
     state = {
@@ -396,7 +396,7 @@ def test_red_team_v4_package_is_complete_deterministic_and_compact(
     package = graph._build_red_team_review_package(state)
     repeated = graph._build_red_team_review_package(copy.deepcopy(state))
     assert package == repeated
-    assert package["contract_version"] == "mfi-red-team-input-v4"
+    assert package["contract_version"] == "mfi-red-team-input-v5"
 
     claim_ids = [item["id"] for item in package["claims"]]
     assert claim_ids
@@ -468,7 +468,7 @@ def test_deterministic_flag_identity_includes_evidence_context() -> None:
     assert first["flag_id"] != second["flag_id"]
 
 
-def test_red_team_v5_uses_persisted_batches_and_operation_specific_timeout(
+def test_red_team_v6_uses_persisted_batches_and_operation_specific_timeout(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -502,7 +502,7 @@ def test_red_team_v5_uses_persisted_batches_and_operation_specific_timeout(
     assert observed["bind_kwargs"]["response_mime_type"] == "application/json"
     assert observed["bind_kwargs"]["response_schema"]["required"] == ["flags"]
     call = update["llm_diagnostics"]["calls"][-1]
-    assert call["operation"] == "mfi.red_team_review.v5"
+    assert call["operation"] == "mfi.red_team_review.v6"
     assert call["configured_timeout_seconds"] == 180.0
     assert call["configured_max_retries"] == 2
     assert update["generation_diagnostics"]["red_team_status"] == "in_progress"
@@ -510,7 +510,7 @@ def test_red_team_v5_uses_persisted_batches_and_operation_specific_timeout(
     assert update["generation_diagnostics"]["red_team_package_within_target"] is True
 
 
-def test_red_team_v5_normalizes_one_malformed_json_response_in_memory(
+def test_red_team_v6_normalizes_one_malformed_json_response_in_memory(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -540,8 +540,8 @@ def test_red_team_v5_normalizes_one_malformed_json_response_in_memory(
 
     calls = update["llm_diagnostics"]["calls"]
     assert [call["operation"] for call in calls] == [
-        "mfi.red_team_review.v5",
-        "mfi.red_team_review.v5.json_normalization.v1",
+        "mfi.red_team_review.v6",
+        "mfi.red_team_review.v6.json_normalization.v1",
     ]
     assert calls[0]["status"] == "recovered"
     assert calls[0]["json_root_value_count"] == 2
@@ -558,7 +558,7 @@ def test_red_team_v5_normalizes_one_malformed_json_response_in_memory(
     assert update["llm_calls"] == state.get("llm_calls", 0) + 2
 
 
-def test_red_team_v5_fails_after_one_unsuccessful_format_normalization(
+def test_red_team_v6_fails_after_one_unsuccessful_format_normalization(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -587,11 +587,11 @@ def test_red_team_v5_fails_after_one_unsuccessful_format_normalization(
         graph.node_process_red_team_batch({**state, **prepared})
 
     assert caught.value.failure_code == "llm_invalid_json"
-    assert caught.value.operation == "mfi.red_team_review.v5.json_normalization.v1"
+    assert caught.value.operation == "mfi.red_team_review.v6.json_normalization.v1"
     assert caught.value.batch_id
 
 
-def test_red_team_v5_does_not_normalize_semantically_incomplete_json(
+def test_red_team_v6_does_not_normalize_semantically_incomplete_json(
     monkeypatch,
     phase3_bundle,
 ) -> None:
@@ -619,7 +619,7 @@ def test_red_team_v5_does_not_normalize_semantically_incomplete_json(
         graph.node_process_red_team_batch({**state, **prepared})
 
     assert caught.value.failure_code == "llm_response_contract_error"
-    assert caught.value.operation == "mfi.red_team_review.v5"
+    assert caught.value.operation == "mfi.red_team_review.v6"
     assert model_calls == 1
 
 

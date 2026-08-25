@@ -33,7 +33,21 @@ from .schemas import (
 )
 
 MFI_RED_TEAM_BATCH_TARGET_CHARACTERS = 45_000
-MFI_RED_TEAM_BATCH_CONTRACT_VERSION = "mfi-red-team-batches-v1"
+MFI_RED_TEAM_BATCH_CONTRACT_VERSION = "mfi-red-team-batches-v2"
+
+_DIMENSION_COHERENCE_FIELDS = {
+    "summary",
+    "key_findings",
+    "subdimension_analysis",
+    "geographic_patterns",
+    "data_limitations",
+    "recommendations",
+}
+_MARKET_COHERENCE_FIELDS = {
+    "priority_issues",
+    "recommended_interventions",
+    "limitations",
+}
 
 _ARTIFACT_ORDER = {
     "context": 0,
@@ -609,6 +623,9 @@ def _batch_package(
     *,
     rows: Sequence[Mapping[str, Any]],
     kind: str,
+    shard_key: str,
+    scope_artifact_type: str | None = None,
+    scope_artifact_id: str | None = None,
 ) -> Dict[str, Any]:
     document_ids = sorted(
         {
@@ -629,17 +646,50 @@ def _batch_package(
     artifact_markets = {
         str(row.get("aid")) for row in rows if row.get("a") == "market"
     }
+    if scope_artifact_type == "dimension" and scope_artifact_id:
+        artifact_dimensions.add(scope_artifact_id)
+    if scope_artifact_type == "market" and scope_artifact_id:
+        artifact_markets.add(scope_artifact_id)
     priority_context = source.get("priority_context", {}) or {}
-    dimensions = [
-        item
-        for item in priority_context.get("dimensions", []) or []
-        if kind != "local" or str(item.get("id")) in artifact_dimensions
-    ]
-    markets = [
-        item
-        for item in priority_context.get("markets", []) or []
-        if kind != "local" or str(item.get("id")) in artifact_markets
-    ]
+    priority_dimensions = list(priority_context.get("dimensions", []) or [])
+    priority_markets = list(priority_context.get("markets", []) or [])
+    if kind == "dimension_coherence":
+        dimensions = priority_dimensions
+        markets: List[Dict[str, Any]] = []
+    elif kind == "market_coherence":
+        current_market = next(
+            (
+                item
+                for item in priority_markets
+                if str(item.get("id") or "") in artifact_markets
+            ),
+            {},
+        )
+        weak_dimensions = {
+            str(value) for value in current_market.get("weak", []) or [] if value
+        }
+        dimensions = [
+            item
+            for item in priority_dimensions
+            if str(item.get("id") or "") in weak_dimensions
+        ]
+        markets = []
+        for item in priority_markets:
+            compact = dict(item)
+            if str(item.get("id") or "") not in artifact_markets:
+                compact.pop("weak", None)
+            markets.append(compact)
+    else:
+        dimensions = [
+            item
+            for item in priority_dimensions
+            if str(item.get("id")) in artifact_dimensions
+        ]
+        markets = [
+            item
+            for item in priority_markets
+            if str(item.get("id")) in artifact_markets
+        ]
     limitations = [
         item
         for item in source.get("limitations", []) or []
@@ -675,7 +725,13 @@ def _batch_package(
     ]
     return {
         "contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
+        "source_contract_version": source.get("contract_version"),
         "batch_kind": kind,
+        "shard_key": shard_key,
+        "coherence_scope": {
+            "artifact_type": scope_artifact_type,
+            "artifact_id": scope_artifact_id,
+        },
         "claims": list(rows),
         "priority_context": {"dimensions": dimensions, "markets": markets},
         "evidence_by_metric_id": _evidence_for_rows(
@@ -693,7 +749,44 @@ def build_red_team_batches(
     *,
     target_characters: int = MFI_RED_TEAM_BATCH_TARGET_CHARACTERS,
 ) -> List[MFIRedTeamReviewBatch]:
-    """Partition Red-Team review deterministically without truncating a field."""
+    """Partition Red-Team review into stable bounded artifact-scoped shards."""
+    if target_characters < 1:
+        raise ValueError("target_characters must be positive")
+
+    def membership(batch_rows: Sequence[Mapping[str, Any]]) -> str:
+        ordered: List[str] = []
+        for row in batch_rows:
+            member = f"{row.get('a')}:{row.get('aid')}:{row.get('f')}"
+            if member not in ordered:
+                ordered.append(member)
+        return "|".join(ordered)
+
+    def local_shard_key(batch_rows: Sequence[Mapping[str, Any]]) -> str:
+        return f"local:{_short_hash(membership(batch_rows))}"
+
+    def batch_id_for(
+        kind: str,
+        shard_key: str,
+        batch_rows: Sequence[Mapping[str, Any]],
+    ) -> str:
+        identity = f"{kind}|{shard_key}|{membership(batch_rows)}"
+        return f"red-team-{kind.replace('_', '-')}-{_short_hash(identity)}"
+
+    def context_order(item: Mapping[str, Any], rank_field: str) -> tuple[Any, str, str]:
+        raw_rank = item.get(rank_field)
+        try:
+            rank = int(raw_rank)
+        except (TypeError, ValueError):
+            rank = 10**9
+        identifier = str(item.get("id") or "")
+        return rank, identifier.casefold(), identifier
+
+    def scope_artifact_ref(batch: MFIRedTeamReviewBatch) -> str | None:
+        scope = batch.package.get("coherence_scope", {}) or {}
+        artifact_type = str(scope.get("artifact_type") or "")
+        artifact_id = str(scope.get("artifact_id") or "")
+        return f"{artifact_type}:{artifact_id}" if artifact_type and artifact_id else None
+
     rows = [dict(row) for row in source.get("claims", []) or []]
     context_rows = [
         {
@@ -727,8 +820,35 @@ def build_red_team_batches(
     local_groups: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
     for atom in grouped:
-        atom_package = _batch_package(source, rows=atom, kind="local")
-        if len(_serialized(atom_package)) > target_characters:
+        atom_shard_key = local_shard_key(atom)
+        atom_package = _batch_package(
+            source,
+            rows=atom,
+            kind="local",
+            shard_key=atom_shard_key,
+        )
+        atom_character_count = len(_serialized(atom_package))
+        if atom_character_count > target_characters:
+            atom_batch_id = batch_id_for("local", atom_shard_key, atom)
+            diagnostic = {
+                "batch_id": atom_batch_id,
+                "batch_kind": "local",
+                "contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
+                "shard_key": atom_shard_key,
+                "sequence": 1,
+                "artifact_refs": [
+                    f"{atom[0].get('a')}:{atom[0].get('aid')}"
+                ],
+                "scope_artifact_ref": f"{atom[0].get('a')}:{atom[0].get('aid')}",
+                "character_count": atom_character_count,
+                "target_character_count": target_characters,
+                "claim_count": len(
+                    [row for row in atom if row.get("id")]
+                ),
+                "status": "failed",
+                "flag_count": 0,
+                "failure_code": "mfi_red_team_batch_contract_failed",
+            }
             raise MFIGenerationBlockedError(
                 "mfi_red_team_batch_contract_failed",
                 "A Red-Team artifact field exceeds the configured batch size.",
@@ -737,9 +857,21 @@ def build_red_team_batches(
                 artifact_type=str(atom[0].get("a") or "") or None,
                 artifact_id=str(atom[0].get("aid") or "") or None,
                 field_name=str(atom[0].get("f") or "") or None,
+                batch_id=atom_batch_id,
+                batch_kind="local",
+                shard_key=atom_shard_key,
+                character_count=atom_character_count,
+                target_characters=target_characters,
+                batch_diagnostics=[diagnostic],
             )
         candidate = [*current, *atom]
-        if current and len(_serialized(_batch_package(source, rows=candidate, kind="local"))) > target_characters:
+        candidate_package = _batch_package(
+            source,
+            rows=candidate,
+            kind="local",
+            shard_key=local_shard_key(candidate),
+        )
+        if current and len(_serialized(candidate_package)) > target_characters:
             local_groups.append(current)
             current = list(atom)
         else:
@@ -747,73 +879,153 @@ def build_red_team_batches(
     if current:
         local_groups.append(current)
 
-    packages: List[tuple[str, List[Dict[str, Any]]]] = [
-        ("local", group) for group in local_groups
+    packages: List[Dict[str, Any]] = [
+        {
+            "kind": "local",
+            "shard_key": local_shard_key(group),
+            "rows": group,
+            "scope_artifact_type": None,
+            "scope_artifact_id": None,
+        }
+        for group in local_groups
     ]
-    priority_dimensions = {
-        str(item.get("id"))
-        for item in (source.get("priority_context", {}) or {}).get("dimensions", []) or []
-    }
-    selected_markets = {
-        str(item.get("id"))
-        for item in (source.get("priority_context", {}) or {}).get("markets", []) or []
-    }
+    priority_context = source.get("priority_context", {}) or {}
+    priority_dimensions = sorted(
+        list(priority_context.get("dimensions", []) or []),
+        key=lambda item: context_order(item, "rank"),
+    )
+    selected_markets = sorted(
+        list(priority_context.get("markets", []) or []),
+        key=lambda item: context_order(item, "order"),
+    )
     executive_rows = [row for row in rows if row.get("a") == "executive_summary"]
-    dimension_rows = [
-        row
-        for row in rows
-        if row.get("a") == "dimension"
-        and str(row.get("aid")) in priority_dimensions
-        and row.get("f") in {"summary", "key_findings", "recommendations"}
-    ]
-    market_rows = [
-        row
-        for row in rows
-        if row.get("a") == "market"
-        and str(row.get("aid")) in selected_markets
-        and row.get("f") in {"priority_issues", "recommended_interventions"}
-    ]
-    if dimension_rows or executive_rows:
-        packages.append(("dimension_coherence", [*dimension_rows, *executive_rows]))
-    if market_rows or executive_rows:
-        packages.append(("market_coherence", [*market_rows, *executive_rows]))
+    for item in priority_dimensions:
+        dimension_id = str(item.get("id") or "")
+        if not dimension_id:
+            continue
+        dimension_rows = [
+            row
+            for row in rows
+            if row.get("a") == "dimension"
+            and str(row.get("aid")) == dimension_id
+            and row.get("f") in _DIMENSION_COHERENCE_FIELDS
+        ]
+        packages.append(
+            {
+                "kind": "dimension_coherence",
+                "shard_key": f"dimension:{item.get('token') or dimension_id}",
+                "rows": [*dimension_rows, *executive_rows],
+                "scope_artifact_type": "dimension",
+                "scope_artifact_id": dimension_id,
+            }
+        )
+    for item in selected_markets:
+        market_id = str(item.get("id") or "")
+        if not market_id:
+            continue
+        market_rows = [
+            row
+            for row in rows
+            if row.get("a") == "market"
+            and str(row.get("aid")) == market_id
+            and row.get("f") in _MARKET_COHERENCE_FIELDS
+        ]
+        packages.append(
+            {
+                "kind": "market_coherence",
+                "shard_key": f"market:{item.get('token') or _short_hash(market_id)}",
+                "rows": [*market_rows, *executive_rows],
+                "scope_artifact_type": "market",
+                "scope_artifact_id": market_id,
+            }
+        )
 
     batches: List[MFIRedTeamReviewBatch] = []
-    for sequence, (kind, batch_rows) in enumerate(packages, start=1):
-        package = _batch_package(source, rows=batch_rows, kind=kind)
-        serialized = _serialized(package)
-        if len(serialized) > target_characters:
-            raise MFIGenerationBlockedError(
-                "mfi_red_team_batch_contract_failed",
-                f"The {kind} Red-Team package exceeds the configured batch size.",
-                stage="red_team",
-                status_code=500,
-            )
-        signature = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-        membership = "|".join(
-            f"{row.get('a')}:{row.get('aid')}:{row.get('f')}"
-            for row in batch_rows
+    for sequence, spec in enumerate(packages, start=1):
+        kind = str(spec["kind"])
+        shard_key = str(spec["shard_key"])
+        batch_rows = list(spec["rows"])
+        package = _batch_package(
+            source,
+            rows=batch_rows,
+            kind=kind,
+            shard_key=shard_key,
+            scope_artifact_type=spec["scope_artifact_type"],
+            scope_artifact_id=spec["scope_artifact_id"],
         )
-        batch_id = (
-            f"red-team-{kind}-{sequence:02d}-"
-            f"{_short_hash(f'{kind}|{sequence}|{membership}')}"
+        serialized = _serialized(package)
+        signature = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        batch_id = batch_id_for(kind, shard_key, batch_rows)
+        artifact_refs = sorted(
+            {
+                *(
+                    {
+                        f"{spec['scope_artifact_type']}:{spec['scope_artifact_id']}"
+                    }
+                    if spec["scope_artifact_type"] and spec["scope_artifact_id"]
+                    else set()
+                ),
+                *{
+                    f"{row.get('a')}:{row.get('aid')}"
+                    for row in batch_rows
+                    if row.get("a") and row.get("aid")
+                },
+            }
         )
         batches.append(
             MFIRedTeamReviewBatch(
                 batch_id=batch_id,
                 signature=signature,
                 batch_kind=kind,
+                shard_key=shard_key,
                 sequence=sequence,
                 package=package,
                 claim_ids=[str(row.get("id")) for row in batch_rows if row.get("id")],
-                artifact_refs=sorted(
-                    {
-                        f"{row.get('a')}:{row.get('aid')}"
-                        for row in batch_rows
-                        if row.get("a") and row.get("aid")
-                    }
-                ),
+                artifact_refs=artifact_refs,
                 character_count=len(serialized),
             )
+        )
+
+    oversized = next(
+        (batch for batch in batches if batch.character_count > target_characters),
+        None,
+    )
+    if oversized is not None:
+        diagnostics = [
+            {
+                "batch_id": batch.batch_id,
+                "batch_kind": batch.batch_kind,
+                "contract_version": MFI_RED_TEAM_BATCH_CONTRACT_VERSION,
+                "shard_key": batch.shard_key,
+                "sequence": batch.sequence,
+                "artifact_refs": batch.artifact_refs,
+                "scope_artifact_ref": scope_artifact_ref(batch),
+                "character_count": batch.character_count,
+                "target_character_count": target_characters,
+                "claim_count": len(batch.claim_ids),
+                "status": "failed" if batch.batch_id == oversized.batch_id else "pending",
+                "flag_count": 0,
+                "failure_code": (
+                    "mfi_red_team_batch_contract_failed"
+                    if batch.batch_id == oversized.batch_id
+                    else None
+                ),
+            }
+            for batch in batches
+        ]
+        scope = oversized.package.get("coherence_scope", {}) or {}
+        raise MFIGenerationBlockedError(
+            "mfi_red_team_batch_contract_failed",
+            f"The {oversized.batch_kind} Red-Team package exceeds the configured batch size.",
+            stage="red_team",
+            status_code=500,
+            artifact_type=str(scope.get("artifact_type") or "") or None,
+            artifact_id=str(scope.get("artifact_id") or "") or None,
+            batch_id=oversized.batch_id,
+            batch_kind=oversized.batch_kind,
+            shard_key=oversized.shard_key,
+            character_count=oversized.character_count,
+            target_characters=target_characters,
+            batch_diagnostics=diagnostics,
         )
     return batches
