@@ -898,7 +898,7 @@ def test_correction_attempt_limit_blocks_unresolved_material_qa():
     assert caught.value.code == "mfi_narrative_qa_unresolved"
 
 
-def test_graph_reruns_both_validators_after_targeted_repair():
+def test_graph_runs_simplified_review_and_single_correction_path():
     edges = {
         (edge.source, edge.target)
         for edge in graph.build_graph().get_graph().edges
@@ -907,13 +907,22 @@ def test_graph_reruns_both_validators_after_targeted_repair():
         "executive_summary_drafter",
         "deterministic_claim_validator",
     ) in edges
-    assert ("deterministic_claim_validator", "red_team") in edges
-    assert ("red_team", "red_team_batch") in edges
-    assert ("red_team_batch", "red_team_finalize") in edges
-    assert ("red_team_finalize", "targeted_correction") in edges
-    assert ("targeted_correction", "correction_task") in edges
-    assert ("correction_task", "deterministic_claim_validator") in edges
-    assert ("red_team_finalize", "finalize_qa") in edges
+    assert ("deterministic_claim_validator", "semantic_review") in edges
+    assert ("semantic_review", "consolidated_correction") in edges
+    assert ("semantic_review", "finalize_qa") in edges
+    assert ("consolidated_correction", "post_correction_validator") in edges
+    assert (
+        "post_correction_validator",
+        "corrected_claim_verification",
+    ) in edges
+    assert ("corrected_claim_verification", "finalize_qa") in edges
+    node_ids = set(graph.build_graph().get_graph().nodes)
+    assert not {
+        "red_team_batch",
+        "red_team_finalize",
+        "targeted_correction",
+        "correction_task",
+    } & node_ids
     assert ("finalize_qa", "finalize_delivery") in edges
 
 

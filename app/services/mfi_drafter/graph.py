@@ -98,6 +98,7 @@ from .methodology import (
 from .narrative import (
     build_claim_catalog,
     build_qa_review,
+    apply_final_qa_annotations,
     compact_catalog,
     dimension_catalog_ids,
     executive_catalog_ids,
@@ -108,7 +109,36 @@ from .narrative import (
     parse_dimension_narrative,
     parse_executive_narrative,
     parse_market_narrative,
+    validate_evidence_bound_narratives,
     validate_structured_narratives,
+)
+from .simple_orchestration import (
+    CONSOLIDATED_CORRECTION_OPERATION,
+    CORRECTED_CLAIM_VERIFICATION_OPERATION,
+    DIMENSION_DRAFT_OPERATION,
+    EXECUTIVE_DRAFT_OPERATION,
+    MARKET_DRAFT_OPERATION,
+    NARRATIVE_ORCHESTRATION_VERSION,
+    SEMANTIC_REVIEW_CONTRACT_VERSION,
+    SEMANTIC_REVIEW_MAX_CHARACTERS,
+    SEMANTIC_REVIEW_OPERATIONS,
+    apply_consolidated_patches,
+    build_consolidated_correction_targets,
+    build_corrected_claim_verification_package,
+    build_dimension_draft_batches,
+    build_market_draft_batches,
+    build_semantic_review_packages,
+    consolidated_correction_prompt_payload,
+    dimension_batch_catalog,
+    dimension_batch_prompt_profiles,
+    flags_outside_targets,
+    market_batch_catalog,
+    material_local_flags,
+    unresolved_high_flags,
+    validate_consolidated_correction_response,
+    validate_dimension_draft_batch,
+    validate_market_draft_batch,
+    validate_semantic_review_response,
 )
 from .visualization import (
     MAP_LABEL_MAX,
@@ -237,6 +267,21 @@ def create_initial_state(
         generation_diagnostics={
             "dimensions": {"llm": [], "fallback": []},
             "markets": {"llm": [], "fallback": []},
+            "narrative_orchestration_version": NARRATIVE_ORCHESTRATION_VERSION,
+            "draft_batches_total": 0,
+            "draft_batches_completed": 0,
+            "draft_batches_failed": 0,
+            "draft_batches": [],
+            "semantic_reviews_total": 0,
+            "semantic_reviews_completed": 0,
+            "semantic_reviews_failed": 0,
+            "semantic_reviews": [],
+            "consolidated_correction_status": "not_needed",
+            "consolidated_correction_call_id": None,
+            "consolidated_correction_field_count": 0,
+            "consolidated_correction_llm_calls": 0,
+            "corrected_claim_verification_status": "not_needed",
+            "corrected_claim_verification_call_id": None,
             "context_extraction_mode": "not_started",
             "context_classification_status": "not_started",
             "executive_summary_mode": "not_started",
@@ -335,6 +380,23 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics = deepcopy(state.get("generation_diagnostics") or {})
     diagnostics.setdefault("dimensions", {"llm": [], "fallback": []})
     diagnostics.setdefault("markets", {"llm": [], "fallback": []})
+    diagnostics.setdefault(
+        "narrative_orchestration_version", NARRATIVE_ORCHESTRATION_VERSION
+    )
+    diagnostics.setdefault("draft_batches_total", 0)
+    diagnostics.setdefault("draft_batches_completed", 0)
+    diagnostics.setdefault("draft_batches_failed", 0)
+    diagnostics.setdefault("draft_batches", [])
+    diagnostics.setdefault("semantic_reviews_total", 0)
+    diagnostics.setdefault("semantic_reviews_completed", 0)
+    diagnostics.setdefault("semantic_reviews_failed", 0)
+    diagnostics.setdefault("semantic_reviews", [])
+    diagnostics.setdefault("consolidated_correction_status", "not_needed")
+    diagnostics.setdefault("consolidated_correction_call_id", None)
+    diagnostics.setdefault("consolidated_correction_field_count", 0)
+    diagnostics.setdefault("consolidated_correction_llm_calls", 0)
+    diagnostics.setdefault("corrected_claim_verification_status", "not_needed")
+    diagnostics.setdefault("corrected_claim_verification_call_id", None)
     diagnostics.setdefault("context_extraction_mode", "not_started")
     diagnostics.setdefault("context_classification_status", "not_started")
     diagnostics.setdefault("executive_summary_mode", "not_started")
@@ -414,7 +476,16 @@ def _correction_llm_call_count(llm_diagnostics: Mapping[str, Any] | None) -> int
     return sum(
         1
         for item in calls or []
-        if isinstance(item, Mapping) and item.get("node") == "correction_task"
+        if isinstance(item, Mapping)
+        and item.get("node") == "consolidated_correction"
+    )
+
+
+def _diagnostic_call_count(llm_diagnostics: Mapping[str, Any] | None) -> int:
+    if not isinstance(llm_diagnostics, Mapping):
+        return 0
+    return len(
+        [item for item in llm_diagnostics.get("calls", []) or [] if isinstance(item, Mapping)]
     )
 
 
@@ -424,6 +495,23 @@ def reconcile_generation_diagnostics_for_llm_failure(
 ) -> Dict[str, Any]:
     """Return the live generation diagnostics implied by a failed LLM node."""
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
+    if error.node in {"dimension_drafter", "market_recommendations_drafter"}:
+        diagnostics["draft_batches_failed"] = int(
+            diagnostics.get("draft_batches_failed", 0) or 0
+        ) + 1
+    if error.node in {"semantic_review", "corrected_claim_verification"}:
+        diagnostics["red_team_status"] = "failed"
+        diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
+        diagnostics["semantic_reviews_failed"] = int(
+            diagnostics.get("semantic_reviews_failed", 0) or 0
+        ) + 1
+        if error.node == "corrected_claim_verification":
+            diagnostics["corrected_claim_verification_status"] = "failed"
+    if error.node == "consolidated_correction":
+        diagnostics["consolidated_correction_status"] = "failed"
+        diagnostics["correction_tasks_failed"] = int(
+            diagnostics.get("correction_tasks_failed", 0) or 0
+        ) + 1
     if error.node == "red_team":
         prior_failed = int(diagnostics.get("red_team_batches_failed", 0) or 0)
         diagnostics["red_team_status"] = "failed"
@@ -492,6 +580,16 @@ def reconcile_generation_diagnostics_for_blocked_failure(
 ) -> Dict[str, Any]:
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     diagnostics.setdefault("fallback_policy", "disabled_live")
+    if error.stage in {"semantic_review", "corrected_claim_verification"}:
+        diagnostics["red_team_status"] = "failed"
+        diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
+        diagnostics["semantic_reviews_failed"] = int(
+            diagnostics.get("semantic_reviews_failed", 0) or 0
+        ) + 1
+        if error.stage == "corrected_claim_verification":
+            diagnostics["corrected_claim_verification_status"] = "failed"
+    if error.stage == "consolidated_correction":
+        diagnostics["consolidated_correction_status"] = "failed"
     if error.stage == "red_team":
         prior_failed = int(diagnostics.get("red_team_batches_failed", 0) or 0)
         diagnostics["red_team_status"] = "failed"
@@ -1319,6 +1417,7 @@ def node_context_extractor(state: MFIReportState) -> dict:
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
+    initial_trace_call_count = _diagnostic_call_count(state.get("llm_diagnostics"))
     if not docs:
         trace.record_skip(
             node="context_extractor",
@@ -1429,17 +1528,55 @@ Output JSON:
                 raise ValueError(f"statements[{index}].document_ids must be a list")
         return result
 
-    traced, llm_calls = _invoke_json_with_one_normalization(
-        trace=trace,
-        model=get_model(),
-        messages=[HumanMessage(content=prompt)],
-        node="context_extractor",
-        operation="mfi.context_classification.v1",
-        artifact_type="context",
-        artifact_id="context_evidence",
-        correction_attempt=0,
-        validator=_validate_context_response,
-    )
+    try:
+        traced, llm_calls = _invoke_json_with_one_normalization(
+            trace=trace,
+            model=get_model(),
+            messages=[HumanMessage(content=prompt)],
+            node="context_extractor",
+            operation="mfi.context_classification.v1",
+            artifact_type="context",
+            artifact_id="context_evidence",
+            correction_attempt=0,
+            validator=_validate_context_response,
+        )
+    except LLMCallError as exc:
+        diagnostics = _generation_diagnostics(state)
+        diagnostics["context_extraction_mode"] = "failed"
+        diagnostics["context_classification_status"] = "failed"
+        context_status = resolve_context_status(
+            retriever_statuses=diagnostics.get("retrievers", {}),
+            documents=docs,
+            statements=[],
+            extraction_mode="failed",
+            classification_failed=True,
+        )
+        logger.warning(
+            "Optional MFI context classification failed; continuing without context",
+            extra={
+                "mfi_event": "optional_context_classification_failed",
+                "mfi_run_id": state.get("run_id"),
+                "mfi_call_id": exc.call_id,
+                "mfi_failure_code": exc.failure_code,
+            },
+        )
+        trace_snapshot = trace.snapshot()
+        failed_call_count = max(
+            0,
+            _diagnostic_call_count(trace_snapshot) - initial_trace_call_count,
+        )
+        return {
+            "context_evidence": [],
+            "context_status": context_status.model_dump(),
+            "generation_diagnostics": diagnostics,
+            "llm_calls": state.get("llm_calls", 0) + failed_call_count,
+            "llm_diagnostics": trace_snapshot,
+            "warnings": [
+                "Context classification was unavailable; interpretation relies "
+                "only on the MFI assessment."
+            ],
+            "current_node": "context_extractor",
+        }
     result = traced.value
     ignored_model_identifiers = count_model_identifiers(result)
     context_evidence, parse_flags = parse_context_evidence(
@@ -1860,50 +1997,50 @@ def node_mfi_graph_designer(state: MFIReportState) -> dict:
 # ============================================================================
 
 def node_dimension_drafter(state: MFIReportState) -> dict:
-    """Draft or repair metric-cited narratives for all nine dimensions."""
-    logger.info("[DimensionDrafter] Generating structured dimension narratives")
+    """Draft priority dimensions separately and non-priorities in one batch."""
+    logger.info("[DimensionDrafter] Generating batched dimension narratives")
     profile = state.get("assessment_profile") or {}
-    dimensions = [
-        item for item in profile.get("dimensions", []) if isinstance(item, dict)
-    ]
-    if not dimensions:
+    batches = build_dimension_draft_batches(profile)
+    if not batches:
         return {"current_node": "dimension_drafter"}
-
     llm = get_model()
-    narratives = dict(state.get("dimension_narratives") or {})
+    narratives: Dict[str, Dict[str, Any]] = {}
     catalog = state.get("claim_catalog") or {}
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
+    batch_rows = list(diagnostics.get("draft_batches", []) or [])
+    diagnostics["draft_batches_total"] = int(
+        diagnostics.get("draft_batches_total", 0) or 0
+    ) + len(batches)
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
-    for dimension_profile in dimensions:
-        dimension = str(dimension_profile["dimension"])
-        allowed_ids = dimension_catalog_ids(dimension_profile)
-        prompt_catalog = compact_catalog(catalog, allowed_ids)
-        logger.info("Processing dimension: %s", dimension)
-        prompt = f"""Draft the {dimension} section of an MFI assessment report.
+    for batch in batches:
+        prompt_catalog = dimension_batch_catalog(catalog, batch)
+        prompt = f"""Draft the requested dimension sections of an MFI assessment.
 
 Use English only. Return valid JSON only. Every numeric statement must use an
 exact `formatted_value` from CLAIM_CATALOG and cite its `metric_id`. Do not
 calculate, round, invert, or combine values. Every claim object must contain:
 `text`, `metric_ids`, `document_ids`, `scope`, and `polarity`.
 
-METHODOLOGY DESCRIPTION:
-{DIMENSION_DESCRIPTIONS.get(dimension, '')}
+REQUESTED_DIMENSIONS_IN_REQUIRED_ORDER:
+{json.dumps(batch['artifact_ids'])}
+
+METHODOLOGY_DESCRIPTIONS:
+{json.dumps({name: DIMENSION_DESCRIPTIONS.get(name, '') for name in batch['artifact_ids']})}
 
 CONSTRAINTS:
 {json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
 
-DIMENSION_PROFILE:
-{json.dumps(dimension_profile)}
+DIMENSION_PROFILES:
+{json.dumps(dimension_batch_prompt_profiles(batch))}
 
 CLAIM_CATALOG:
 {json.dumps(prompt_catalog)}
 
-This dimension is priority={bool(dimension_profile.get('is_priority'))}.
 Every dimension must cover its mean, profile rank, variation, findings, and
 recommendations. A priority dimension must also include weakest official
 subsections (Food Quality: applicable question drivers), 2-4 explanatory
@@ -1924,20 +2061,27 @@ PROHIBITIONS:
 
 Return:
 {{
-  "summary": CLAIM,
-  "key_findings": [CLAIM],
-  "subdimension_analysis": [
+  "dimensions": [
     {{
-      "name": "...",
-      "subsection_metric_id": "ledger id or null",
-      "score_0_10": 0.0,
-      "interpretation": CLAIM,
-      "driver_metric_ids": ["ledger ids"]
+      "dimension": "exact requested dimension name",
+      "narrative": {{
+        "summary": CLAIM,
+        "key_findings": [CLAIM],
+        "subdimension_analysis": [
+          {{
+            "name": "...",
+            "subsection_metric_id": "ledger id or null",
+            "score_0_10": 0.0,
+            "interpretation": CLAIM,
+            "driver_metric_ids": ["ledger ids"]
+          }}
+        ],
+        "geographic_patterns": [CLAIM],
+        "data_limitations": [CLAIM],
+        "recommendations": [CLAIM]
+      }}
     }}
-  ],
-  "geographic_patterns": [CLAIM],
-  "data_limitations": [CLAIM],
-  "recommendations": [CLAIM]
+  ]
 }}
 where CLAIM is:
 {{
@@ -1954,24 +2098,38 @@ where CLAIM is:
             model=llm,
             messages=[HumanMessage(content=prompt)],
             node="dimension_drafter",
-            operation="mfi.dimension_drafting.v2",
-            artifact_type="dimension",
-            artifact_id=dimension,
+            operation=DIMENSION_DRAFT_OPERATION,
+            artifact_type="dimension_batch",
+            artifact_id=str(batch["batch_id"]),
             correction_attempt=0,
-            validator=lambda result, dimension_profile=dimension_profile: parse_dimension_narrative(
+            validator=lambda result, batch=batch: validate_dimension_draft_batch(
                 result,
-                dimension_profile=dimension_profile,
+                batch=batch,
                 assessment_profile=profile,
-                strict=True,
             ),
+            batch_id=str(batch["batch_id"]),
         )
         result = traced.payload
-        drafted = traced.value
+        narratives.update(traced.value)
         _record_ignored_model_identifiers(diagnostics, result)
         llm_calls += used_calls
-        _record_artifact_mode(diagnostics, "dimensions", dimension, "llm")
-        narratives[dimension] = drafted
+        for dimension in batch["artifact_ids"]:
+            _record_artifact_mode(diagnostics, "dimensions", dimension, "llm")
+        batch_rows.append(
+            {
+                "batch_id": batch["batch_id"],
+                "batch_kind": batch["batch_kind"],
+                "artifact_ids": list(batch["artifact_ids"]),
+                "status": "completed",
+                "call_id": traced.call_id,
+                "operation": DIMENSION_DRAFT_OPERATION,
+            }
+        )
+        diagnostics["draft_batches_completed"] = int(
+            diagnostics.get("draft_batches_completed", 0) or 0
+        ) + 1
 
+    diagnostics["draft_batches"] = batch_rows
     updates = {
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
@@ -1983,34 +2141,31 @@ where CLAIM is:
 
 
 def node_market_recommendations_drafter(state: MFIReportState) -> dict:
-    """Draft targeted narratives from only each market's scoped evidence."""
-    logger.info("[MarketRecDrafter] Generating structured market narratives")
+    """Draft selected markets in deterministic batches of at most five."""
+    logger.info("[MarketRecDrafter] Generating batched market narratives")
     profile = state.get("assessment_profile") or {}
-    priority_names = set(profile.get("priority_market_names", []) or [])
-    priority_profiles = [
-        item
-        for item in profile.get("markets", [])
-        if isinstance(item, dict) and item.get("market_name") in priority_names
-    ]
-    if not priority_profiles:
+    batches = build_market_draft_batches(profile)
+    if not batches:
         return {"market_narratives": {}, "current_node": "market_recommendations_drafter"}
     llm = get_model()
-    narratives = dict(state.get("market_narratives") or {})
+    narratives: Dict[str, Dict[str, Any]] = {}
     catalog = state.get("claim_catalog") or {}
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
+    batch_rows = list(diagnostics.get("draft_batches", []) or [])
+    diagnostics["draft_batches_total"] = int(
+        diagnostics.get("draft_batches_total", 0) or 0
+    ) + len(batches)
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
-    for market_profile in priority_profiles:
-        market_name = str(market_profile["market_name"])
-        allowed_ids = market_catalog_ids(market_profile, catalog)
-        prompt_catalog = compact_catalog(catalog, allowed_ids)
-        prompt = f"""Draft a targeted MFI narrative for {market_name}.
+    for batch in batches:
+        prompt_catalog = market_batch_catalog(catalog, batch)
+        prompt = f"""Draft targeted MFI narratives for the requested markets.
 
-Use English only and valid JSON only. The prompt contains only this market's
+Use English only and valid JSON only. The prompt contains only the markets'
 weak dimensions and matching market-scoped evidence. Every number must exactly
 match a `formatted_value` in CLAIM_CATALOG and cite the associated `metric_id`.
 Do not calculate or infer values. Every claim must declare metric_ids,
@@ -2022,8 +2177,11 @@ generic assessment limitation.
 PROHIBITIONS:
 {json.dumps(list(NARRATIVE_PROHIBITIONS))}
 
-MARKET_PROFILE:
-{json.dumps(market_profile)}
+REQUESTED_MARKETS_IN_REQUIRED_ORDER:
+{json.dumps(batch['artifact_ids'])}
+
+MARKET_PROFILES:
+{json.dumps(batch['profiles'])}
 
 CLAIM_CATALOG:
 {json.dumps(prompt_catalog)}
@@ -2038,9 +2196,16 @@ R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
 
 Return:
 {{
-  "priority_issues": [CLAIM],
-  "recommended_interventions": [CLAIM],
-  "limitations": [CLAIM]
+  "markets": [
+    {{
+      "market_name": "exact requested market name",
+      "narrative": {{
+        "priority_issues": [CLAIM],
+        "recommended_interventions": [CLAIM],
+        "limitations": [CLAIM]
+      }}
+    }}
+  ]
 }}
 where CLAIM is:
 {{
@@ -2057,23 +2222,37 @@ where CLAIM is:
             model=llm,
             messages=[HumanMessage(content=prompt)],
             node="market_recommendations_drafter",
-            operation="mfi.market_drafting.v2",
-            artifact_type="market",
-            artifact_id=market_name,
+            operation=MARKET_DRAFT_OPERATION,
+            artifact_type="market_batch",
+            artifact_id=str(batch["batch_id"]),
             correction_attempt=0,
-            validator=lambda result, market_profile=market_profile: parse_market_narrative(
+            validator=lambda result, batch=batch: validate_market_draft_batch(
                 result,
-                market_profile=market_profile,
-                strict=True,
+                batch=batch,
             ),
+            batch_id=str(batch["batch_id"]),
         )
         result = traced.payload
-        drafted = traced.value
+        narratives.update(traced.value)
         _record_ignored_model_identifiers(diagnostics, result)
         llm_calls += used_calls
-        _record_artifact_mode(diagnostics, "markets", market_name, "llm")
-        narratives[market_name] = drafted
+        for market_name in batch["artifact_ids"]:
+            _record_artifact_mode(diagnostics, "markets", market_name, "llm")
+        batch_rows.append(
+            {
+                "batch_id": batch["batch_id"],
+                "batch_kind": batch["batch_kind"],
+                "artifact_ids": list(batch["artifact_ids"]),
+                "status": "completed",
+                "call_id": traced.call_id,
+                "operation": MARKET_DRAFT_OPERATION,
+            }
+        )
+        diagnostics["draft_batches_completed"] = int(
+            diagnostics.get("draft_batches_completed", 0) or 0
+        ) + 1
 
+    diagnostics["draft_batches"] = batch_rows
     updates = {
         "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
@@ -2167,7 +2346,7 @@ where CLAIM contains `text`, `claim_kind`, `metric_ids`, `document_ids`,
         model=llm,
         messages=[HumanMessage(content=prompt)],
         node="executive_summary_drafter",
-        operation="mfi.executive_drafting.v2",
+        operation=EXECUTIVE_DRAFT_OPERATION,
         artifact_type="executive_summary",
         artifact_id="executive_summary",
         correction_attempt=0,
@@ -2211,7 +2390,7 @@ def node_deterministic_claim_validator(state: MFIReportState) -> dict:
             executive,
             context,
             flag_payload,
-        ) = validate_structured_narratives(
+        ) = validate_evidence_bound_narratives(
             context_evidence=state.get("context_evidence", []),
             dimension_narratives=state.get("dimension_narratives", {}),
             market_narratives=state.get("market_narratives", {}),
@@ -2235,6 +2414,410 @@ def node_deterministic_claim_validator(state: MFIReportState) -> dict:
         "deterministic_flags": flags,
         "generation_diagnostics": diagnostics,
         "current_node": "deterministic_claim_validator",
+    }
+
+
+def _semantic_review_prompt(review: Mapping[str, Any]) -> str:
+    return f"""Review one bounded section of a structured MFI report.
+
+Use English and return valid JSON only. Review only the claim records in
+REVIEW_PACKAGE.claims. Deterministic facts and evidence are read-only. Every
+claim in this package is owned by this review and appears in no other initial
+review. Do not repeat application routing metadata.
+
+Classify findings narrowly:
+- high: a concrete factual contradiction, fabricated or unsupported value or
+  source, materially reversed interpretation, or unsupported conclusion that
+  changes the assessment meaning;
+- medium: overstatement, ambiguous scope, weak recommendation linkage,
+  repetition, or material interpretive weakness;
+- low: style, clarity, or minor wording improvement.
+
+For a claim finding return its exact canonical claim_id. Use claim_id=null only
+for a genuinely global process issue that cannot be assigned to a claim. Do not
+repeat a deterministic finding already supplied in the package.
+
+REVIEW_PACKAGE:
+{json.dumps(review['package'])}
+
+Return exactly:
+{{
+  "flags": [
+    {{
+      "claim_id": "canonical-id-or-null",
+      "code": "stable_snake_case_code",
+      "severity": "high|medium|low",
+      "message": "concise explanation",
+      "recommendation": "specific correction guidance"
+    }}
+  ]
+}}
+"""
+
+
+def node_semantic_review(state: MFIReportState) -> dict:
+    """Run exactly three application-owned semantic review sections."""
+    logger.info("[SemanticReview] Reviewing overview, dimensions, and markets")
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "red_team_status": "in_progress",
+            "red_team_contract_version": SEMANTIC_REVIEW_CONTRACT_VERSION,
+            "red_team_review_operation": "mfi.semantic_review.*.v1",
+            "red_team_structured_output": True,
+            "red_team_package_target_characters": SEMANTIC_REVIEW_MAX_CHARACTERS,
+            "semantic_reviews_total": 3,
+            "semantic_reviews_completed": 0,
+            "semantic_reviews_failed": 0,
+            "semantic_reviews": [],
+        }
+    )
+    try:
+        reviews = build_semantic_review_packages(
+            dimension_narratives=state.get("dimension_narratives", {}),
+            market_narratives=state.get("market_narratives", {}),
+            executive_narrative=state.get("executive_summary_narrative", {}),
+            context_evidence=state.get("context_evidence", []),
+            assessment_profile=state.get("assessment_profile") or {},
+            claim_catalog=state.get("claim_catalog", {}),
+            documents=state.get("contextual_documents", []),
+            deterministic_flags=state.get("deterministic_flags", []),
+        )
+    except Exception as exc:
+        diagnostics["red_team_status"] = "failed"
+        raise MFIGenerationBlockedError(
+            "mfi_semantic_review_contract_failed",
+            "The semantic review packages could not be constructed.",
+            stage="semantic_review",
+            status_code=500,
+        ) from exc
+
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
+    flags: List[Dict[str, Any]] = []
+    calls = 0
+    review_rows: List[Dict[str, Any]] = []
+    for review in reviews:
+        character_count = int(review["character_count"])
+        if character_count > SEMANTIC_REVIEW_MAX_CHARACTERS:
+            diagnostics["red_team_status"] = "failed"
+            diagnostics["semantic_reviews_failed"] = 1
+            raise MFIGenerationBlockedError(
+                "mfi_semantic_review_contract_failed",
+                "A semantic review package exceeded the safety limit.",
+                stage="semantic_review",
+                status_code=500,
+                batch_id=str(review["review_id"]),
+                batch_kind=str(review["section"]),
+                character_count=character_count,
+                target_characters=SEMANTIC_REVIEW_MAX_CHARACTERS,
+            )
+        operation = SEMANTIC_REVIEW_OPERATIONS[str(review["section"])]
+        traced, used_calls = _invoke_json_with_one_normalization(
+            trace=trace,
+            model=get_model(),
+            messages=[HumanMessage(content=_semantic_review_prompt(review))],
+            node="semantic_review",
+            operation=operation,
+            artifact_type="review_section",
+            artifact_id=str(review["section"]),
+            correction_attempt=0,
+            validator=lambda payload, review=review: validate_semantic_review_response(
+                payload, review=review
+            ),
+            batch_id=str(review["review_id"]),
+        )
+        calls += used_calls
+        flags.extend(traced.value)
+        review_rows.append(
+            {
+                "review_id": review["review_id"],
+                "section": review["section"],
+                "operation": operation,
+                "status": "completed",
+                "call_id": traced.call_id,
+                "character_count": character_count,
+                "claim_count": len(review.get("claim_ids", [])),
+                "finding_count": len(traced.value),
+            }
+        )
+        diagnostics["semantic_reviews_completed"] = int(
+            diagnostics.get("semantic_reviews_completed", 0) or 0
+        ) + 1
+        diagnostics["semantic_reviews"] = list(review_rows)
+    diagnostics["red_team_status"] = "completed"
+    diagnostics["red_team_package_character_count"] = sum(
+        int(item["character_count"]) for item in reviews
+    )
+    diagnostics["red_team_package_within_target"] = all(
+        int(item["character_count"]) <= SEMANTIC_REVIEW_MAX_CHARACTERS
+        for item in reviews
+    )
+    qa_review = build_qa_review(
+        state.get("deterministic_flags", []),
+        flags,
+        correction_attempts=state.get("correction_attempts", 0),
+        correction_history=state.get("correction_history", []),
+    )
+    return {
+        "red_team_flags": flags,
+        "qa_review": qa_review,
+        "llm_calls": state.get("llm_calls", 0) + calls,
+        "llm_diagnostics": trace.snapshot(),
+        "generation_diagnostics": diagnostics,
+        "current_node": "semantic_review",
+    }
+
+
+def _all_current_qa_flags(state: MFIReportState) -> List[Dict[str, Any]]:
+    return [
+        *list(state.get("deterministic_flags", []) or []),
+        *list(state.get("red_team_flags", []) or []),
+    ]
+
+
+def route_after_semantic_review(
+    state: MFIReportState,
+) -> Literal["correct", "finish"]:
+    flags = _all_current_qa_flags(state)
+    nonrepairable_high = [
+        flag
+        for flag in unresolved_high_flags(flags)
+        if flag.get("artifact_type") == "global"
+        or not bool(flag.get("repairable", True))
+    ]
+    if nonrepairable_high:
+        _raise_unresolved_qa(state, nonrepairable_high)
+    return "correct" if material_local_flags(flags) else "finish"
+
+
+def _consolidated_correction_prompt(payload: Mapping[str, Any]) -> str:
+    return f"""Correct all supplied MFI narrative fields in one response.
+
+Use English and return valid JSON only. Each target is independent. Return one
+patch for every target_id and no additional target. Replace only the requested
+field, preserve unaffected content, resolve every supplied high and medium
+finding, use only authorized evidence, and respect the supplied field contract.
+Do not return claim IDs or application validation metadata; the application
+reassigns them after merge.
+
+CORRECTION_PACKAGE:
+{json.dumps(payload)}
+
+Return exactly:
+{{"patches": [{{"target_id": "exact supplied target_id", "replacement": null}}]}}
+The replacement value for each row must match that target's patch_contract.
+"""
+
+
+def node_consolidated_correction(state: MFIReportState) -> dict:
+    """Apply at most one LLM call containing every local material field."""
+    flags = _all_current_qa_flags(state)
+    targets = build_consolidated_correction_targets(
+        flags,
+        assessment_profile=state.get("assessment_profile") or {},
+    )
+    if not targets:
+        return {
+            "correction_targets": [],
+            "current_node": "consolidated_correction",
+        }
+    payload = consolidated_correction_prompt_payload(
+        targets=targets,
+        flags=flags,
+        dimension_narratives=state.get("dimension_narratives", {}),
+        market_narratives=state.get("market_narratives", {}),
+        executive_narrative=state.get("executive_summary_narrative", {}),
+        context_evidence=state.get("context_evidence", []),
+        assessment_profile=state.get("assessment_profile") or {},
+        claim_catalog=state.get("claim_catalog", {}),
+        documents=state.get("contextual_documents", []),
+    )
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "consolidated_correction_status": "pending",
+            "consolidated_correction_field_count": len(targets),
+            "correction_tasks_total": len(targets),
+            "active_correction_task": "consolidated",
+        }
+    )
+    history = _start_correction_attempt(
+        history=list(state.get("correction_history", []) or []),
+        flags=flags,
+        targets=targets,
+        attempt_number=1,
+    )
+    ignored_metadata_fields: List[str] = []
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
+    traced, call_count = _invoke_json_with_one_normalization(
+        trace=trace,
+        model=get_model(),
+        messages=[HumanMessage(content=_consolidated_correction_prompt(payload))],
+        node="consolidated_correction",
+        operation=CONSOLIDATED_CORRECTION_OPERATION,
+        artifact_type="narrative_fields",
+        artifact_id="consolidated",
+        correction_attempt=1,
+        validator=lambda response: validate_consolidated_correction_response(
+            response,
+            targets=targets,
+            ignored_metadata_fields=ignored_metadata_fields,
+        ),
+        task_id="consolidated",
+    )
+    try:
+        merged = apply_consolidated_patches(
+            targets=targets,
+            replacements=traced.value,
+            dimension_narratives=state.get("dimension_narratives", {}),
+            market_narratives=state.get("market_narratives", {}),
+            executive_narrative=state.get("executive_summary_narrative", {}),
+            context_evidence=state.get("context_evidence", []),
+            assessment_profile=state.get("assessment_profile") or {},
+        )
+    except MFIGenerationBlockedError:
+        raise
+    except Exception as exc:
+        raise MFIGenerationBlockedError(
+            "llm_call_failed",
+            "The consolidated correction could not be merged.",
+            stage="consolidated_correction",
+            status_code=502,
+            task_id="consolidated",
+            call_id=traced.call_id,
+            attempt=1,
+        ) from exc
+    history = _record_correction_execution(
+        history,
+        attempt_number=1,
+        targets=targets,
+        outcome="llm_completed",
+    )
+    diagnostics.update(
+        {
+            "consolidated_correction_status": "completed",
+            "consolidated_correction_call_id": traced.call_id,
+            "consolidated_correction_llm_calls": 1,
+            "correction_attempts": 1,
+            "correction_tasks_completed": len(targets),
+            "active_correction_task": None,
+            "ignored_correction_metadata_field_count": int(
+                diagnostics.get("ignored_correction_metadata_field_count", 0) or 0
+            )
+            + len(ignored_metadata_fields),
+            "corrected_claim_verification_status": "pending",
+        }
+    )
+    return {
+        **merged,
+        "correction_targets": targets,
+        "correction_history": history,
+        "correction_attempts": 1,
+        "llm_calls": state.get("llm_calls", 0) + call_count,
+        "llm_diagnostics": trace.snapshot(),
+        "generation_diagnostics": diagnostics,
+        "current_node": "consolidated_correction",
+    }
+
+
+def node_post_correction_validator(state: MFIReportState) -> dict:
+    updates = node_deterministic_claim_validator(state)
+    updates["current_node"] = "post_correction_validator"
+    return updates
+
+
+def _corrected_claim_verification_prompt(review: Mapping[str, Any]) -> str:
+    return f"""Verify only the corrected MFI claims below.
+
+Use English and valid JSON only. Apply the same high, medium, and low severity
+definitions as the initial semantic reviews. Return a finding only when an
+issue remains in the corrected claim. Use the exact supplied claim_id. Ignore
+and do not repeat application routing metadata.
+
+VERIFICATION_PACKAGE:
+{json.dumps(review['package'])}
+
+Return exactly:
+{{"flags": [{{"claim_id": "canonical-id-or-null", "code": "stable_code",
+"severity": "high|medium|low", "message": "...", "recommendation": "..."}}]}}
+"""
+
+
+def node_corrected_claim_verification(state: MFIReportState) -> dict:
+    targets = list(state.get("correction_targets", []) or [])
+    if not targets:
+        return {"current_node": "corrected_claim_verification"}
+    review = build_corrected_claim_verification_package(
+        targets=targets,
+        dimension_narratives=state.get("dimension_narratives", {}),
+        market_narratives=state.get("market_narratives", {}),
+        executive_narrative=state.get("executive_summary_narrative", {}),
+        context_evidence=state.get("context_evidence", []),
+        assessment_profile=state.get("assessment_profile") or {},
+        claim_catalog=state.get("claim_catalog", {}),
+        documents=state.get("contextual_documents", []),
+    )
+    if int(review["character_count"]) > SEMANTIC_REVIEW_MAX_CHARACTERS:
+        raise MFIGenerationBlockedError(
+            "mfi_semantic_review_contract_failed",
+            "The corrected-claim verification package exceeded the safety limit.",
+            stage="corrected_claim_verification",
+            status_code=500,
+            character_count=int(review["character_count"]),
+            target_characters=SEMANTIC_REVIEW_MAX_CHARACTERS,
+        )
+    trace = get_trace_session(
+        service="mfi-drafter",
+        run_id=str(state.get("run_id") or "mfi-direct"),
+        initial=state.get("llm_diagnostics"),
+    )
+    traced, call_count = _invoke_json_with_one_normalization(
+        trace=trace,
+        model=get_model(),
+        messages=[HumanMessage(content=_corrected_claim_verification_prompt(review))],
+        node="corrected_claim_verification",
+        operation=CORRECTED_CLAIM_VERIFICATION_OPERATION,
+        artifact_type="corrected_claims",
+        artifact_id="corrected_claims",
+        correction_attempt=1,
+        validator=lambda payload: validate_semantic_review_response(
+            payload, review=review
+        ),
+        batch_id=str(review["review_id"]),
+    )
+    retained = flags_outside_targets(state.get("red_team_flags", []), targets)
+    red_team_flags = [*retained, *traced.value]
+    combined = [*state.get("deterministic_flags", []), *red_team_flags]
+    high = unresolved_high_flags(combined)
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "corrected_claim_verification_status": "completed",
+            "corrected_claim_verification_call_id": traced.call_id,
+        }
+    )
+    history = _reconcile_correction_history(
+        list(state.get("correction_history", []) or []),
+        combined,
+        close_pending_execution=True,
+    )
+    if high:
+        _raise_unresolved_qa(state, high)
+    return {
+        "red_team_flags": red_team_flags,
+        "correction_history": history,
+        "llm_calls": state.get("llm_calls", 0) + call_count,
+        "llm_diagnostics": trace.snapshot(),
+        "generation_diagnostics": diagnostics,
+        "current_node": "corrected_claim_verification",
     }
 
 
@@ -3235,10 +3818,11 @@ def _raise_unresolved_qa(state: MFIReportState, flags: Sequence[Mapping[str, Any
     raise MFIGenerationBlockedError(
         "mfi_narrative_qa_unresolved",
         (
-            "Narrative QA remains unresolved after the permitted correction cycles "
+            "Narrative QA contains unresolved high-severity findings after the "
+            "single permitted correction "
             f"(high={counts.get('high', 0)}, medium={counts.get('medium', 0)})."
         ),
-        stage="targeted_correction",
+        stage="finalize_qa",
         status_code=502,
         attempt=int(state.get("correction_attempts", 0) or 0),
     )
@@ -3600,13 +4184,13 @@ def route_correction_queue(state: MFIReportState) -> Literal["more", "validate"]
 
 
 def node_finalize_qa(state: MFIReportState) -> dict:
-    """Finalize only a fully resolved live narrative; low findings stay advisory."""
+    """Finalize when no high-severity finding remains."""
     deterministic_flags = list(state.get("deterministic_flags", []) or [])
     red_team_flags = list(state.get("red_team_flags", []) or [])
     combined = [*deterministic_flags, *red_team_flags]
-    material = _material_flags(combined)
-    if material:
-        _raise_unresolved_qa(state, material)
+    high = unresolved_high_flags(combined)
+    if high:
+        _raise_unresolved_qa(state, high)
     diagnostics = _generation_diagnostics(state)
     try:
         (
@@ -3643,6 +4227,18 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         red_team_flags,
         correction_attempts=state.get("correction_attempts", 0),
         correction_history=correction_history,
+    )
+    (
+        canonical_dimensions,
+        canonical_markets,
+        canonical_executive,
+        canonical_context,
+    ) = apply_final_qa_annotations(
+        dimension_narratives=canonical_dimensions,
+        market_narratives=canonical_markets,
+        executive_narrative=canonical_executive,
+        context_evidence=canonical_context,
+        flags=review.get("flags", []),
     )
 
     severity_counts = Counter(
@@ -3693,12 +4289,17 @@ def node_finalize_delivery(state: MFIReportState) -> dict:
         )
     except MFIClaimIdentityError as exc:
         raise claim_identity_blocked(str(exc), stage="finalize_delivery") from exc
-    if _material_flags(
+    if unresolved_high_flags(
         [*state.get("deterministic_flags", []), *state.get("red_team_flags", [])]
     ):
         _raise_unresolved_qa(
             state,
-            [*state.get("deterministic_flags", []), *state.get("red_team_flags", [])],
+            unresolved_high_flags(
+                [
+                    *state.get("deterministic_flags", []),
+                    *state.get("red_team_flags", []),
+                ]
+            ),
         )
     try:
         blocks = build_mfi_report_blocks(dict(state))
@@ -3765,22 +4366,24 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
             node_deterministic_claim_validator,
         ),
     )
-    graph.add_node("red_team", wrap_node("red_team", node_red_team))
     graph.add_node(
-        "red_team_batch",
-        wrap_node("red_team_batch", node_process_red_team_batch),
+        "semantic_review",
+        wrap_node("semantic_review", node_semantic_review),
     )
     graph.add_node(
-        "red_team_finalize",
-        wrap_node("red_team_finalize", node_finalize_red_team),
+        "consolidated_correction",
+        wrap_node("consolidated_correction", node_consolidated_correction),
     )
     graph.add_node(
-        "targeted_correction",
-        wrap_node("targeted_correction", node_prepare_correction),
+        "post_correction_validator",
+        wrap_node("post_correction_validator", node_post_correction_validator),
     )
     graph.add_node(
-        "correction_task",
-        wrap_node("correction_task", node_process_correction_task),
+        "corrected_claim_verification",
+        wrap_node(
+            "corrected_claim_verification",
+            node_corrected_claim_verification,
+        ),
     )
     graph.add_node("finalize_qa", wrap_node("finalize_qa", node_finalize_qa))
     graph.add_node(
@@ -3800,37 +4403,18 @@ def build_graph(on_step: Optional[OnStepCallback] = None):
     graph.add_edge("dimension_drafter", "market_recommendations_drafter")
     graph.add_edge("market_recommendations_drafter", "executive_summary_drafter")
     graph.add_edge("executive_summary_drafter", "deterministic_claim_validator")
+    graph.add_edge("deterministic_claim_validator", "semantic_review")
     graph.add_conditional_edges(
-        "deterministic_claim_validator",
-        route_after_deterministic_validation,
-        {"correct": "targeted_correction", "red_team": "red_team"},
-    )
-    
-    # QA Loop
-    graph.add_conditional_edges(
-        "red_team",
-        route_red_team_queue,
-        {"more": "red_team_batch", "finalize": "red_team_finalize"},
-    )
-    graph.add_conditional_edges(
-        "red_team_batch",
-        route_red_team_queue,
-        {"more": "red_team_batch", "finalize": "red_team_finalize"},
-    )
-    graph.add_conditional_edges(
-        "red_team_finalize",
-        should_correct,
+        "semantic_review",
+        route_after_semantic_review,
         {
-            "correct": "targeted_correction",
+            "correct": "consolidated_correction",
             "finish": "finalize_qa",
         },
     )
-    graph.add_edge("targeted_correction", "correction_task")
-    graph.add_conditional_edges(
-        "correction_task",
-        route_correction_queue,
-        {"more": "correction_task", "validate": "deterministic_claim_validator"},
-    )
+    graph.add_edge("consolidated_correction", "post_correction_validator")
+    graph.add_edge("post_correction_validator", "corrected_claim_verification")
+    graph.add_edge("corrected_claim_verification", "finalize_qa")
     graph.add_edge("finalize_qa", "finalize_delivery")
     graph.add_edge("finalize_delivery", END)
     
@@ -3935,6 +4519,28 @@ def run_mfi_report_generation(
             "mfi_llm_calls": result.get("llm_calls", 0),
             "mfi_correction_attempts": result.get("correction_attempts", 0),
             "mfi_fallback_policy": diagnostics.get("fallback_policy"),
+            "mfi_narrative_orchestration_version": diagnostics.get(
+                "narrative_orchestration_version"
+            ),
+            "mfi_draft_batches_total": diagnostics.get("draft_batches_total", 0),
+            "mfi_draft_batches_completed": diagnostics.get(
+                "draft_batches_completed", 0
+            ),
+            "mfi_semantic_reviews_total": diagnostics.get(
+                "semantic_reviews_total", 0
+            ),
+            "mfi_semantic_reviews_completed": diagnostics.get(
+                "semantic_reviews_completed", 0
+            ),
+            "mfi_consolidated_correction_status": diagnostics.get(
+                "consolidated_correction_status"
+            ),
+            "mfi_consolidated_correction_field_count": diagnostics.get(
+                "consolidated_correction_field_count", 0
+            ),
+            "mfi_corrected_claim_verification_status": diagnostics.get(
+                "corrected_claim_verification_status"
+            ),
             "mfi_correction_tasks_total": diagnostics.get(
                 "correction_tasks_total", 0
             ),

@@ -1581,6 +1581,277 @@ def validate_structured_narratives(
     )
 
 
+def validate_evidence_bound_narratives(
+    *,
+    context_evidence: Sequence[Mapping[str, Any]],
+    dimension_narratives: Mapping[str, Mapping[str, Any]],
+    market_narratives: Mapping[str, Mapping[str, Any]],
+    executive_narrative: Mapping[str, Any],
+    claim_catalog: Mapping[str, Mapping[str, Any]],
+    assessment_profile: Mapping[str, Any],
+    documents: Sequence[Mapping[str, Any]],
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    """Validate only application contracts, citations, and numeric claims.
+
+    Interpretive judgements (scope, polarity, causality, terminology, ranking
+    language, recommendation quality, and repetition) belong to the semantic
+    review.  This validator deliberately avoids turning prose heuristics into
+    deterministic delivery blockers.
+    """
+    context_copy = deepcopy(list(context_evidence))
+    dimension_copy, market_copy, executive_copy = apply_narrative_density_policy(
+        dimension_narratives=dimension_narratives,
+        market_narratives=market_narratives,
+        executive_narrative=executive_narrative,
+        assessment_profile=assessment_profile,
+    )
+    (
+        dimension_copy,
+        market_copy,
+        executive_copy,
+        context_copy,
+    ) = canonicalize_narrative_identities(
+        dimension_narratives=dimension_copy,
+        market_narratives=market_copy,
+        executive_narrative=executive_copy,
+        context_evidence=context_copy,
+    )
+    known_documents = {
+        str(item.get("doc_id")): item
+        for item in documents
+        if isinstance(item, Mapping) and item.get("doc_id")
+    }
+    flags: list[dict[str, Any]] = []
+    claims = list(_iter_claims(dimension_copy, market_copy, executive_copy))
+    seen_claim_ids: set[str] = set()
+    for location, claim in claims:
+        claim_id = str(claim.get("claim_id") or "")
+        claim_flags: list[dict[str, Any]] = []
+        if not claim_id or claim_id in seen_claim_ids:
+            claim_flags.append(
+                _flag(
+                    code="duplicate_or_missing_claim_id",
+                    severity="high",
+                    artifact_type=location["artifact_type"],
+                    artifact_id=location.get("artifact_id"),
+                    field_name=location.get("field_name"),
+                    claim_id=claim_id or None,
+                    message="Narrative claims require a unique canonical claim ID.",
+                    repairable=False,
+                )
+            )
+        seen_claim_ids.add(claim_id)
+        cited_ids = [str(item) for item in claim.get("metric_ids", []) if item]
+        cited_entries: list[Mapping[str, Any]] = []
+        for metric_id in cited_ids:
+            entry = claim_catalog.get(metric_id)
+            if not isinstance(entry, Mapping):
+                claim_flags.append(
+                    _flag(
+                        code="invalid_metric_id",
+                        severity="high",
+                        artifact_type=location["artifact_type"],
+                        artifact_id=location.get("artifact_id"),
+                        field_name=location.get("field_name"),
+                        claim_id=claim_id,
+                        message=f"Claim cites unknown metric ID: {metric_id}.",
+                        metric_ids=[metric_id],
+                    )
+                )
+            else:
+                cited_entries.append(entry)
+        valid_documents: list[Mapping[str, Any]] = []
+        for document_id in claim.get("document_ids", []) or []:
+            document = known_documents.get(str(document_id))
+            if document is None:
+                claim_flags.append(
+                    _flag(
+                        code="invalid_document_id",
+                        severity="high",
+                        artifact_type=location["artifact_type"],
+                        artifact_id=location.get("artifact_id"),
+                        field_name=location.get("field_name"),
+                        claim_id=claim_id,
+                        message=f"Claim cites unknown document ID: {document_id}.",
+                        document_ids=[str(document_id)],
+                    )
+                )
+            else:
+                valid_documents.append(document)
+        if location["artifact_type"] == "dimension":
+            wrong = [
+                str(entry.get("metric_id"))
+                for entry in cited_entries
+                if entry.get("dimension")
+                and entry.get("dimension") != location.get("artifact_id")
+            ]
+            if wrong:
+                claim_flags.append(
+                    _flag(
+                        code="citation_context_mismatch",
+                        severity="high",
+                        artifact_type="dimension",
+                        artifact_id=location.get("artifact_id"),
+                        field_name=location.get("field_name"),
+                        claim_id=claim_id,
+                        message="Dimension claim cites evidence from another dimension.",
+                        metric_ids=wrong,
+                    )
+                )
+        if location["artifact_type"] == "market":
+            wrong = [
+                str(entry.get("metric_id"))
+                for entry in cited_entries
+                if entry.get("market_name")
+                and entry.get("market_name") != location.get("artifact_id")
+            ]
+            if wrong:
+                claim_flags.append(
+                    _flag(
+                        code="citation_context_mismatch",
+                        severity="high",
+                        artifact_type="market",
+                        artifact_id=location.get("artifact_id"),
+                        field_name=location.get("field_name"),
+                        claim_id=claim_id,
+                        message="Market claim cites evidence from another market.",
+                        metric_ids=wrong,
+                    )
+                )
+        numbers = _numeric_tokens(str(claim.get("text") or ""))
+        if numbers and not cited_ids and not claim.get("document_ids"):
+            claim_flags.append(
+                _flag(
+                    code="uncited_numeric_value",
+                    severity="high",
+                    artifact_type=location["artifact_type"],
+                    artifact_id=location.get("artifact_id"),
+                    field_name=location.get("field_name"),
+                    claim_id=claim_id,
+                    message="Quantitative claim has no metric or document citation.",
+                    actual_value=", ".join(token for token, _value, _percent in numbers),
+                )
+            )
+        for token, numeric, is_percent in numbers:
+            if _numeric_token_is_authorized(
+                numeric,
+                is_percent,
+                cited_entries,
+                valid_documents,
+            ):
+                continue
+            claim_flags.append(
+                _flag(
+                    code="numeric_value_mismatch",
+                    severity="high",
+                    artifact_type=location["artifact_type"],
+                    artifact_id=location.get("artifact_id"),
+                    field_name=location.get("field_name"),
+                    claim_id=claim_id,
+                    message=(
+                        f"Numeric value {token} is not authorized by the cited "
+                        "evidence."
+                    ),
+                    metric_ids=cited_ids,
+                    actual_value=token,
+                )
+            )
+        if any(percent for _token, _numeric, percent in numbers) and not any(
+            str(entry.get("unit")) == "proportion" for entry in cited_entries
+        ) and not valid_documents:
+            claim_flags.append(
+                _flag(
+                    code="unit_mismatch",
+                    severity="high",
+                    artifact_type=location["artifact_type"],
+                    artifact_id=location.get("artifact_id"),
+                    field_name=location.get("field_name"),
+                    claim_id=claim_id,
+                    message="Percentage claim does not cite proportion evidence.",
+                    metric_ids=cited_ids,
+                )
+            )
+        claim_flags = _deduplicate_flags(claim_flags)
+        claim["validation_flags"] = [str(item["code"]) for item in claim_flags]
+        claim["validation_flag_ids"] = [
+            str(item["flag_id"]) for item in claim_flags
+        ]
+        claim["validation_status"] = "unverified" if claim_flags else "verified"
+        flags.extend(claim_flags)
+
+    for statement in context_copy:
+        if not isinstance(statement, Mapping):
+            continue
+        invalid = [
+            str(document_id)
+            for document_id in statement.get("document_ids", []) or []
+            if str(document_id) not in known_documents
+        ]
+        if invalid:
+            flags.append(
+                _flag(
+                    code="invalid_context_document_id",
+                    severity="high",
+                    artifact_type="context",
+                    artifact_id=str(statement.get("statement_id") or "") or None,
+                    field_name="text",
+                    claim_id=str(statement.get("statement_id") or "") or None,
+                    message="Context statement cites an unknown document.",
+                    document_ids=invalid,
+                )
+            )
+
+    flags = _deduplicate_flags(flags)
+    material_claim_ids = {
+        str(flag.get("claim_id"))
+        for flag in flags
+        if flag.get("claim_id") and flag.get("severity") in _MATERIAL_SEVERITIES
+    }
+    for _location, claim in _iter_claims(dimension_copy, market_copy, executive_copy):
+        if str(claim.get("claim_id")) in material_claim_ids:
+            claim["validation_status"] = "unverified"
+    material = [flag for flag in flags if flag["severity"] in _MATERIAL_SEVERITIES]
+    low = [flag for flag in flags if flag["severity"] == "low"]
+    validation = MFIClaimValidationResult(
+        status=(
+            "failed"
+            if material
+            else "passed_with_warnings"
+            if low
+            else "passed"
+        ),
+        validated_claim_count=len(claims),
+        verified_claim_count=sum(
+            claim.get("validation_status") == "verified"
+            for _location, claim in _iter_claims(
+                dimension_copy, market_copy, executive_copy
+            )
+        ),
+        unverified_claim_count=sum(
+            claim.get("validation_status") == "unverified"
+            for _location, claim in _iter_claims(
+                dimension_copy, market_copy, executive_copy
+            )
+        ),
+        flags=[MFINarrativeQAFlag.model_validate(flag) for flag in flags],
+    ).model_dump()
+    return (
+        validation,
+        dimension_copy,
+        market_copy,
+        executive_copy,
+        context_copy,
+        {"flags": flags},
+    )
+
+
 def apply_narrative_density_policy(
     *,
     dimension_narratives: Mapping[str, Mapping[str, Any]],
@@ -1846,6 +2117,63 @@ def build_qa_review(
         ],
         flags=[MFINarrativeQAFlag.model_validate(flag) for flag in flags],
     ).model_dump()
+
+
+def apply_final_qa_annotations(
+    *,
+    dimension_narratives: Mapping[str, Any],
+    market_narratives: Mapping[str, Any],
+    executive_narrative: Mapping[str, Any],
+    context_evidence: Sequence[Mapping[str, Any]],
+    flags: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Attach final QA outcomes without changing drafted narrative content.
+
+    The simplified live pipeline permits unresolved medium findings at delivery.
+    Those findings therefore have to be reflected on the canonical claim (and not
+    merely in the final QA table), so the R4 report composer can display one
+    adjacent warning and API consumers can see the claim is unverified.  Low
+    findings remain advisory and do not change verification status.
+    """
+
+    dimensions = deepcopy(dict(dimension_narratives))
+    markets = deepcopy(dict(market_narratives))
+    executive = deepcopy(dict(executive_narrative))
+    context = deepcopy(list(context_evidence))
+    material_by_claim: dict[str, list[Mapping[str, Any]]] = {}
+    for flag in flags:
+        claim_id = _optional_text(flag.get("claim_id"))
+        if claim_id and str(flag.get("severity")) in _MATERIAL_SEVERITIES:
+            material_by_claim.setdefault(claim_id, []).append(flag)
+
+    def annotate(claim: dict[str, Any], *, identity_key: str = "claim_id") -> None:
+        matched = material_by_claim.get(str(claim.get(identity_key) or ""), [])
+        if not matched:
+            return
+        claim["validation_status"] = "unverified"
+        claim["validation_flags"] = list(
+            dict.fromkeys(
+                [str(item) for item in claim.get("validation_flags", []) or []]
+                + [str(item.get("code")) for item in matched if item.get("code")]
+            )
+        )
+        claim["validation_flag_ids"] = list(
+            dict.fromkeys(
+                [str(item) for item in claim.get("validation_flag_ids", []) or []]
+                + [
+                    str(item.get("flag_id"))
+                    for item in matched
+                    if item.get("flag_id")
+                ]
+            )
+        )
+
+    for _location, claim in _iter_claims(dimensions, markets, executive):
+        annotate(claim)
+    for statement in context:
+        if isinstance(statement, dict):
+            annotate(statement, identity_key="statement_id")
+    return dimensions, markets, executive, context
 
 
 def apply_unresolved_claim_policy(

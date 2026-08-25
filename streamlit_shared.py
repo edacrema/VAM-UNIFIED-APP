@@ -834,13 +834,25 @@ def render_llm_diagnostics(diagnostics: Any, *, live: bool = False) -> None:
     failures = [item for item in calls if item.get("status") == "failed"]
     if failures:
         failure = failures[-1]
-        st.error(
+        message = (
             "LLM call failed: "
             f"{failure.get('failure_code') or 'llm_call_failed'}; "
             f"node={failure.get('node') or 'unknown'}; "
             f"operation={failure.get('operation') or 'unknown'}; "
             f"call_id={failure.get('call_id') or 'unknown'}."
         )
+        optional_mfi_context_failure = (
+            str(diagnostics.get("service") or "") == "mfi-drafter"
+            and failure.get("node") == "context_extractor"
+        )
+        if optional_mfi_context_failure:
+            st.warning(
+                "Optional context classification was unavailable; generation "
+                "continues using only the MFI assessment. Technical trace: "
+                + message
+            )
+        else:
+            st.error(message)
 
     if not live and calls:
         rows = []
@@ -906,27 +918,29 @@ def render_run_status(
             isinstance(generation_diagnostics, dict)
             and generation_diagnostics.get("fallback_policy") == "disabled_live"
         ):
-            workflow_columns = st.columns(2)
+            workflow_columns = st.columns(3)
             workflow_columns[0].metric(
-                "MFI correction tasks",
+                "MFI draft batches",
                 (
-                    f"{generation_diagnostics.get('correction_tasks_completed', 0)}/"
-                    f"{generation_diagnostics.get('correction_tasks_total', 0)}"
+                    f"{generation_diagnostics.get('draft_batches_completed', 0)}/"
+                    f"{generation_diagnostics.get('draft_batches_total', 0)}"
                 ),
             )
             workflow_columns[1].metric(
-                "MFI Red-Team batches",
+                "MFI semantic reviews",
                 (
-                    f"{generation_diagnostics.get('red_team_batches_completed', 0)}/"
-                    f"{generation_diagnostics.get('red_team_batches_total', 0)}"
+                    f"{generation_diagnostics.get('semantic_reviews_completed', 0)}/"
+                    f"{generation_diagnostics.get('semantic_reviews_total', 0)}"
                 ),
             )
-            active_task = generation_diagnostics.get("active_correction_task")
-            active_batch = generation_diagnostics.get("active_red_team_batch")
-            if active_task:
-                st.info(f"Active MFI correction task: {active_task}")
-            if active_batch:
-                st.info(f"Active MFI Red-Team batch: {active_batch}")
+            workflow_columns[2].metric(
+                "MFI correction",
+                str(
+                    generation_diagnostics.get(
+                        "consolidated_correction_status", "not_needed"
+                    )
+                ),
+            )
 
         live_outputs = metadata.get("live_outputs")
         if isinstance(live_outputs, dict) and live_outputs:

@@ -236,39 +236,43 @@ if isinstance(result, dict):
         st.markdown("**Generation diagnostics**")
         task_columns = st.columns(4)
         task_columns[0].metric(
-            "Correction tasks",
+            "Draft batches",
             (
-                f"{diagnostics.get('correction_tasks_completed', 0)}/"
-                f"{diagnostics.get('correction_tasks_total', 0)}"
+                f"{diagnostics.get('draft_batches_completed', 0)}/"
+                f"{diagnostics.get('draft_batches_total', 0)}"
             ),
         )
         task_columns[1].metric(
-            "Failed correction tasks",
-            str(diagnostics.get("correction_tasks_failed", 0)),
-        )
-        task_columns[2].metric(
-            "Red-Team batches",
+            "Semantic reviews",
             (
-                f"{diagnostics.get('red_team_batches_completed', 0)}/"
-                f"{diagnostics.get('red_team_batches_total', 0)}"
+                f"{diagnostics.get('semantic_reviews_completed', 0)}/"
+                f"{diagnostics.get('semantic_reviews_total', 0)}"
             ),
         )
+        task_columns[2].metric(
+            "Consolidated correction",
+            str(diagnostics.get("consolidated_correction_status", "not_needed")),
+        )
         task_columns[3].metric(
-            "Failed Red-Team batches",
-            str(diagnostics.get("red_team_batches_failed", 0)),
+            "Corrected-claim verification",
+            str(
+                diagnostics.get(
+                    "corrected_claim_verification_status", "not_needed"
+                )
+            ),
         )
         batch_columns = st.columns(3)
         batch_columns[0].metric(
-            "Retained Red-Team batches",
-            str(diagnostics.get("red_team_batches_retained", 0)),
+            "Corrected fields",
+            str(diagnostics.get("consolidated_correction_field_count", 0)),
         )
         batch_columns[1].metric(
-            "Pending Red-Team batches",
-            str(diagnostics.get("red_team_batches_pending", 0)),
+            "Failed draft batches",
+            str(diagnostics.get("draft_batches_failed", 0)),
         )
         batch_columns[2].metric(
-            "Largest Red-Team package",
-            f"{diagnostics.get('red_team_max_batch_character_count', 0)} chars",
+            "Failed semantic reviews",
+            str(diagnostics.get("semantic_reviews_failed", 0)),
         )
         st.json(result.get("generation_diagnostics") or {})
         st.markdown("**LLM call diagnostics**")

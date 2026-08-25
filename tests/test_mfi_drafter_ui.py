@@ -238,14 +238,17 @@ def test_phase3_mean_priorities_limitations_and_qa_are_visible(monkeypatch):
                     }
                 ],
             },
-            "generation_diagnostics": {
-                "red_team_batches_total": 22,
-                "red_team_batches_completed": 20,
-                "red_team_batches_failed": 0,
-                "red_team_batches_retained": 4,
-                "red_team_batches_pending": 2,
-                "red_team_max_batch_character_count": 12_345,
-            },
+                "generation_diagnostics": {
+                    "draft_batches_total": 8,
+                    "draft_batches_completed": 8,
+                    "draft_batches_failed": 0,
+                    "semantic_reviews_total": 3,
+                    "semantic_reviews_completed": 3,
+                    "semantic_reviews_failed": 0,
+                    "consolidated_correction_status": "completed",
+                    "consolidated_correction_field_count": 2,
+                    "corrected_claim_verification_status": "completed",
+                },
         },
     )
     app = _app(monkeypatch, backend)
@@ -270,16 +273,15 @@ def test_phase3_mean_priorities_limitations_and_qa_are_visible(monkeypatch):
         "unresolved material issues" in error.value for error in app.error
     )
     assert any(
-        metric.label == "Retained Red-Team batches" and metric.value == "4"
+        metric.label == "Draft batches" and metric.value == "8/8"
         for metric in app.metric
     )
     assert any(
-        metric.label == "Pending Red-Team batches" and metric.value == "2"
+        metric.label == "Semantic reviews" and metric.value == "3/3"
         for metric in app.metric
     )
     assert any(
-        metric.label == "Largest Red-Team package"
-        and metric.value == "12345 chars"
+        metric.label == "Corrected fields" and metric.value == "2"
         for metric in app.metric
     )
 

@@ -287,10 +287,16 @@ def test_context_extractor_distinguishes_schema_failure_and_no_accepted(monkeypa
         "llm_calls": 0,
     }
     monkeypatch.setattr(graph, "get_model", lambda: _Model("{}"))
-    with pytest.raises(LLMCallError) as caught:
-        graph.node_context_extractor(state)
-    assert caught.value.failure_code == "llm_response_contract_error"
-    assert caught.value.node == "context_extractor"
+    failed = graph.node_context_extractor(state)
+    assert failed["context_evidence"] == []
+    assert failed["context_status"]["status"] == "classification_failed"
+    assert failed["context_status"]["limitation_code"] == (
+        "context_classification_unavailable"
+    )
+    assert failed["generation_diagnostics"]["context_classification_status"] == (
+        "failed"
+    )
+    assert failed["llm_diagnostics"]["failed_calls"] == 1
 
     monkeypatch.setattr(
         graph,

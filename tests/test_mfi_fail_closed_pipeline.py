@@ -1119,9 +1119,9 @@ def test_live_graph_has_no_offline_narrative_fixture_dependency() -> None:
         assert "fallback_executive_narrative(" not in source
 
 
-def test_material_final_qa_and_delivery_are_fail_closed() -> None:
+def test_only_high_final_qa_and_delivery_are_fail_closed() -> None:
     state = {
-        "deterministic_flags": [_flag("material")],
+        "deterministic_flags": [_flag("material", severity="high")],
         "red_team_flags": [],
         "correction_attempts": 3,
     }
@@ -1193,32 +1193,47 @@ class _GranularWorkflowModel:
 
     def invoke(self, messages):
         prompt = str(messages[0].content)
-        if "Repair exactly one field" in prompt:
-            task = json.loads(
-                prompt.split("TASK:\n", 1)[1].split("\n\nQA_FINDINGS:", 1)[0]
+        if "Correct all supplied MFI narrative fields" in prompt:
+            package = json.loads(
+                prompt.split("CORRECTION_PACKAGE:\n", 1)[1].split(
+                    "\n\nReturn exactly:", 1
+                )[0]
             )
-            field = task["field_name"]
-            scope = "market" if task["artifact_type"] == "market" else "assessment"
-            claim = self._claim(f"Corrected {task['artifact_id']} {field}.", scope=scope)
-            claim.pop("claim_id", None)
-            claim["claim_kind"] = (
-                "geographic_pattern"
-                if field == "geographic_patterns"
-                else "recommendation"
-                if field in {"recommendations", "recommended_interventions"}
-                else "finding"
+            patches = []
+            for target in package["targets"]:
+                field = target["field_name"]
+                scope = "market" if target["artifact_type"] == "market" else "assessment"
+                claim = self._claim(
+                    f"Corrected {target['artifact_id']} {field}.", scope=scope
+                )
+                claim.pop("claim_id", None)
+                claim["claim_kind"] = (
+                    "geographic_pattern"
+                    if field == "geographic_patterns"
+                    else "recommendation"
+                    if field in {"recommendations", "recommended_interventions"}
+                    else "finding"
+                )
+                patches.append(
+                    {"target_id": target["target_id"], "replacement": [claim]}
+                )
+            return SimpleNamespace(content=json.dumps({"patches": patches}))
+        if "Verify only the corrected MFI claims" in prompt:
+            return SimpleNamespace(content='{"flags": []}')
+        if "Review one bounded section" in prompt:
+            package = json.loads(
+                prompt.split("REVIEW_PACKAGE:\n", 1)[1].split(
+                    "\n\nReturn exactly:", 1
+                )[0]
             )
-            return SimpleNamespace(content=json.dumps({"replacement": [claim]}))
-        if "Red-Team this bounded" in prompt:
-            package = json.loads(prompt.split("REVIEW_BATCH:\n", 1)[1])
             flag = None
             if not self.market_flag_emitted:
                 row = next(
                     (
                         item
                         for item in package["claims"]
-                        if item.get("a") == "market"
-                        and item.get("f") == "priority_issues"
+                        if item.get("artifact_type") == "market"
+                        and item.get("field_name") == "priority_issues"
                     ),
                     None,
                 )
@@ -1227,26 +1242,31 @@ class _GranularWorkflowModel:
                     flag = {
                         "code": "market_wording_review",
                         "severity": "medium",
-                        "artifact_type": "market",
-                        "artifact_id": row["aid"],
-                        "field_name": "priority_issues",
-                        "claim_id": row["id"],
+                        "claim_id": row["claim_id"],
                         "message": "Make the market issue more specific.",
                         "recommendation": "Rewrite the cited field.",
-                        "metric_ids": row.get("m", []),
-                        "document_ids": row.get("d", []),
-                        "repairable": True,
                     }
             return SimpleNamespace(content=json.dumps({"flags": [flag] if flag else []}))
         if "targeted MFI narrative" in prompt:
+            requested = json.loads(
+                prompt.split("REQUESTED_MARKETS_IN_REQUIRED_ORDER:\n", 1)[1].split(
+                    "\n\nMARKET_PROFILES:", 1
+                )[0]
+            )
+            narrative = {
+                "priority_issues": [self._claim("LLM market issue.", scope="market")],
+                "recommended_interventions": [
+                    self._claim("LLM market recommendation.", scope="market")
+                ],
+                "limitations": [],
+            }
             return SimpleNamespace(
                 content=json.dumps(
                     {
-                        "priority_issues": [self._claim("LLM market issue.", scope="market")],
-                        "recommended_interventions": [
-                            self._claim("LLM market recommendation.", scope="market")
-                        ],
-                        "limitations": [],
+                        "markets": [
+                            {"market_name": name, "narrative": narrative}
+                            for name in requested
+                        ]
                     }
                 )
             )
@@ -1261,23 +1281,34 @@ class _GranularWorkflowModel:
                     }
                 )
             )
+        requested = json.loads(
+            prompt.split("REQUESTED_DIMENSIONS_IN_REQUIRED_ORDER:\n", 1)[1].split(
+                "\n\nMETHODOLOGY_DESCRIPTIONS:", 1
+            )[0]
+        )
+        narrative = {
+            "summary": self._claim("LLM dimension summary."),
+            "key_findings": [self._claim("LLM dimension finding.")],
+            "subdimension_analysis": [],
+            "geographic_patterns": [
+                self._claim("LLM geographic pattern.", scope="market")
+            ],
+            "data_limitations": [],
+            "recommendations": [self._claim("LLM dimension recommendation.")],
+        }
         return SimpleNamespace(
             content=json.dumps(
                 {
-                    "summary": self._claim("LLM dimension summary."),
-                    "key_findings": [self._claim("LLM dimension finding.")],
-                    "subdimension_analysis": [],
-                    "geographic_patterns": [
-                        self._claim("LLM geographic pattern.", scope="market")
-                    ],
-                    "data_limitations": [],
-                    "recommendations": [self._claim("LLM dimension recommendation.")],
+                    "dimensions": [
+                        {"dimension": name, "narrative": narrative}
+                        for name in requested
+                    ]
                 }
             )
         )
 
 
-def test_full_fake_graph_uses_granular_repairs_and_distributed_red_team(
+def test_full_fake_graph_uses_one_correction_and_three_semantic_reviews(
     monkeypatch,
 ) -> None:
     loaded = build_loaded(SyntheticSpec(market_count=15, region_count=3))
@@ -1339,7 +1370,9 @@ def test_full_fake_graph_uses_granular_repairs_and_distributed_red_team(
         }
         return validation, dimensions, markets, executive, context, {"flags": flags}
 
-    monkeypatch.setattr(graph, "validate_structured_narratives", controlled_validation)
+    monkeypatch.setattr(
+        graph, "validate_evidence_bound_narratives", controlled_validation
+    )
     result = graph.run_mfi_report_generation(
         country=loaded["country"],
         data_collection_start=loaded["data_collection_start"],
@@ -1353,23 +1386,16 @@ def test_full_fake_graph_uses_granular_repairs_and_distributed_red_team(
         ),
     )
     diagnostics = result["generation_diagnostics"]
-    assert result["correction_attempts"] == 2
+    assert result["correction_attempts"] == 1
     assert diagnostics["correction_tasks_total"] == 3
     assert diagnostics["correction_tasks_completed"] == 3
-    assert diagnostics["correction_attempts"] == 3
-    assert diagnostics["red_team_batches_total"] > 1
-    assert diagnostics["red_team_batches_completed"] == diagnostics["red_team_batches_total"]
-    assert sum(diagnostics["red_team_batches_by_kind"].values()) == diagnostics[
-        "red_team_batches_total"
-    ]
-    assert diagnostics["red_team_batches_pending"] == 0
-    assert diagnostics["red_team_batches_failed"] == 0
-    assert diagnostics["red_team_max_batch_character_count"] <= 45_000
-    assert all(item["shard_key"] for item in diagnostics["red_team_batches"])
-    assert all(
-        item["contract_version"] == "mfi-red-team-batches-v2"
-        for item in diagnostics["red_team_batches"]
-    )
+    assert diagnostics["correction_attempts"] == 1
+    assert diagnostics["consolidated_correction_llm_calls"] == 1
+    assert diagnostics["semantic_reviews_total"] == 3
+    assert diagnostics["semantic_reviews_completed"] == 3
+    assert diagnostics["semantic_reviews_failed"] == 0
+    assert diagnostics["corrected_claim_verification_status"] == "completed"
+    assert result["llm_calls"] <= 15
     assert diagnostics["red_team_status"] == "completed"
     assert diagnostics["fallback_policy"] == "disabled_live"
     assert diagnostics["identity_fallback_artifacts"] == []

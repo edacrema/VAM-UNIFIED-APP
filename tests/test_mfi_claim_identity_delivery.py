@@ -375,7 +375,7 @@ def test_resolver_prefers_persisted_validated_blocks(monkeypatch) -> None:
 class _RepeatedIdModel:
     def invoke(self, messages):
         prompt = str(messages[0].content)
-        if "Red-Team this bounded" in prompt:
+        if "Review one bounded section" in prompt or "Verify only the corrected" in prompt:
             return type("Response", (), {"content": '{"flags": []}'})()
         metric_match = re.search(r'"metric_id":\s*"([^"]+)"', prompt)
         metric_ids = [metric_match.group(1)] if metric_match else []
@@ -392,7 +392,7 @@ class _RepeatedIdModel:
             }
 
         if "targeted MFI narrative" in prompt:
-            payload = {
+            narrative = {
                 "priority_issues": [claim("Review this market evidence.", "market")],
                 "recommended_interventions": [
                     claim("Triangulate this market evidence.", "market")
@@ -404,6 +404,17 @@ class _RepeatedIdModel:
                     )
                 ],
             }
+            requested = re.search(
+                r"REQUESTED_MARKETS_IN_REQUIRED_ORDER:\s*(\[[^\n]+\])",
+                prompt,
+            )
+            names = json.loads(requested.group(1)) if requested else ["Market"]
+            payload = {
+                "markets": [
+                    {"market_name": name, "narrative": narrative}
+                    for name in names
+                ]
+            }
         elif "structured executive summary" in prompt:
             payload = {
                 "motivation": claim("This report summarizes assessed markets."),
@@ -412,13 +423,24 @@ class _RepeatedIdModel:
                 "limitations": [],
             }
         else:
-            payload = {
+            narrative = {
                 "summary": claim("This dimension is summarized by cited evidence."),
                 "key_findings": [claim("The cited evidence warrants review.")],
                 "subdimension_analysis": [],
                 "geographic_patterns": [],
                 "data_limitations": [],
                 "recommendations": [claim("Review the cited dimension evidence.")],
+            }
+            requested = re.search(
+                r"REQUESTED_DIMENSIONS_IN_REQUIRED_ORDER:\s*(\[[^\n]+\])",
+                prompt,
+            )
+            names = json.loads(requested.group(1)) if requested else ["Dimension"]
+            payload = {
+                "dimensions": [
+                    {"dimension": name, "narrative": narrative}
+                    for name in names
+                ]
             }
         return type("Response", (), {"content": json.dumps(payload)})()
 
@@ -455,7 +477,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
         )
 
     monkeypatch.setattr(
-        graph, "validate_structured_narratives", identity_only_validation
+        graph, "validate_evidence_bound_narratives", identity_only_validation
     )
     monkeypatch.setattr(
         graph,
@@ -502,7 +524,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
     assert result["generation_diagnostics"]["red_team_status"] == "completed"
     assert any(
-        call["operation"] == "mfi.red_team_review.v6"
+        str(call["operation"]).startswith("mfi.semantic_review.")
         for call in result["llm_diagnostics"]["calls"]
     )
     assert result["correction_attempts"] == 0

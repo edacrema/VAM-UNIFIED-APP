@@ -1177,10 +1177,30 @@ class MFIGenerationDiagnostics(BaseModel):
     markets: MFINarrativeArtifactDiagnostics = Field(
         default_factory=MFINarrativeArtifactDiagnostics
     )
+    narrative_orchestration_version: str = "mfi-narrative-simple-v1"
+    draft_batches_total: int = Field(default=0, ge=0)
+    draft_batches_completed: int = Field(default=0, ge=0)
+    draft_batches_failed: int = Field(default=0, ge=0)
+    draft_batches: List[Dict[str, Any]] = Field(default_factory=list)
+    semantic_reviews_total: int = Field(default=0, ge=0)
+    semantic_reviews_completed: int = Field(default=0, ge=0)
+    semantic_reviews_failed: int = Field(default=0, ge=0)
+    semantic_reviews: List[Dict[str, Any]] = Field(default_factory=list)
+    consolidated_correction_status: Literal[
+        "not_needed", "pending", "completed", "failed"
+    ] = "not_needed"
+    consolidated_correction_call_id: Optional[str] = None
+    consolidated_correction_field_count: int = Field(default=0, ge=0)
+    consolidated_correction_llm_calls: int = Field(default=0, ge=0)
+    corrected_claim_verification_status: Literal[
+        "not_needed", "pending", "completed", "failed"
+    ] = "not_needed"
+    corrected_claim_verification_call_id: Optional[str] = None
     context_extraction_mode: Literal[
         "not_started",
         "llm",
         "fallback",
+        "failed",
         "not_applicable",
     ] = "not_started"
     executive_summary_mode: Literal[
@@ -1193,6 +1213,9 @@ class MFIGenerationDiagnostics(BaseModel):
         "in_progress",
         "completed",
         "failed",
+    ] = "not_started"
+    context_classification_status: Literal[
+        "not_started", "not_attempted", "completed", "failed"
     ] = "not_started"
     red_team_contract_version: Optional[str] = None
     red_team_review_operation: Optional[str] = None
