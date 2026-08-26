@@ -20,6 +20,7 @@ from app.services.mfi_drafter.simple_orchestration import (
     MAX_MARKETS_PER_DRAFT_BATCH,
     MarketDraftPromptContractError,
     SEMANTIC_REVIEW_MAX_CHARACTERS,
+    SEMANTIC_REVIEW_CONTRACT_VERSION,
     build_budgeted_market_draft_batches,
     build_dimension_draft_batches,
     build_market_draft_batches,
@@ -394,6 +395,11 @@ def test_three_review_packages_have_exclusive_claim_ownership() -> None:
         },
         documents=[],
         deterministic_flags=[],
+        report_context={
+            "country": "Testland",
+            "data_collection_start": "2026-01-01",
+            "data_collection_end": "2026-01-31",
+        },
     )
     assert [item["section"] for item in packages] == [
         "overview",
@@ -407,6 +413,16 @@ def test_three_review_packages_have_exclusive_claim_ownership() -> None:
         for item in packages
     )
     assert packages[0]["claim_ids"] == [executive_claim_id("motivation")]
+    assert all(
+        item["package"]["contract_version"] == SEMANTIC_REVIEW_CONTRACT_VERSION
+        for item in packages
+    )
+    assert all(
+        item["package"]["report_context"]["country"] == "Testland"
+        for item in packages
+    )
+    assert all("prohibitions" not in item["package"] for item in packages)
+    assert all("severity_policy" not in item["package"] for item in packages)
 
 
 def test_semantic_review_routes_by_claim_id_and_ignores_repeated_metadata() -> None:
@@ -428,10 +444,10 @@ def test_semantic_review_routes_by_claim_id_and_ignores_repeated_metadata() -> N
             "flags": [
                 {
                     "claim_id": claim_id,
-                    "code": "ambiguous_scope",
+                    "issue_type": "data_mismatch",
                     "severity": "medium",
-                    "message": "Clarify the assessed-market scope.",
-                    "recommendation": "Qualify the wording.",
+                    "message": "The cited figure differs from the report data.",
+                    "recommendation": "Use the cited figure.",
                     "artifact_type": "market",
                     "artifact_id": "wrong",
                     "field_name": "wrong",
@@ -446,6 +462,7 @@ def test_semantic_review_routes_by_claim_id_and_ignores_repeated_metadata() -> N
     assert flags[0]["artifact_type"] == "dimension"
     assert flags[0]["artifact_id"] == DISPLAY_DIMENSIONS[0]
     assert flags[0]["field_name"] == "summary"
+    assert flags[0]["code"] == "semantic_data_mismatch"
 
 
 def test_semantic_review_rejects_claim_from_another_section() -> None:
@@ -467,7 +484,7 @@ def test_semantic_review_rejects_claim_from_another_section() -> None:
                 "flags": [
                     {
                         "claim_id": reviews[2]["claim_ids"][0],
-                        "code": "wrong_section",
+                        "issue_type": "data_mismatch",
                         "severity": "high",
                         "message": "Wrong owner.",
                     }
@@ -475,6 +492,115 @@ def test_semantic_review_rejects_claim_from_another_section() -> None:
             },
             review=reviews[1],
         )
+
+
+def test_semantic_review_ignores_out_of_scope_phraseology_findings() -> None:
+    profile = _profile(market_count=15)
+    dimensions, markets, executive = _narratives(profile)
+    review = build_semantic_review_packages(
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=[],
+        assessment_profile=profile,
+        claim_catalog={},
+        documents=[],
+        deterministic_flags=[],
+    )[2]
+    claim_ids = review["claim_ids"]
+    payload = {
+        "flags": [
+            {
+                "claim_id": claim_ids[index % len(claim_ids)],
+                "code": "prohibited_phraseology",
+                "severity": "medium",
+                "message": "Prefer different wording.",
+                "recommendation": "Rewrite for style.",
+            }
+            for index in range(40)
+        ]
+    }
+    assert validate_semantic_review_response(payload, review=review) == []
+
+
+def test_semantic_review_receives_actual_data_and_source_excerpts() -> None:
+    profile = _profile(market_count=1)
+    dimensions, markets, executive = _narratives(profile)
+    dimensions[DISPLAY_DIMENSIONS[0]]["summary"]["document_ids"] = ["doc-a"]
+    context = [
+        {
+            "statement_id": "context-001",
+            "text": "The source describes a possible market disruption.",
+            "classification": "potentially_explanatory",
+            "document_ids": ["doc-a"],
+        }
+    ]
+    excerpt = "A" * 900
+    documents = [
+        {
+            "doc_id": "doc-a",
+            "source": "ReliefWeb",
+            "title": "Relevant source",
+            "date": "2026-01-10",
+            "content": excerpt,
+        },
+        {
+            "doc_id": "doc-unused",
+            "source": "ReliefWeb",
+            "title": "Unused source",
+            "content": "This must not be projected.",
+        },
+    ]
+    catalog = {
+        "metric.one": {
+            "metric_id": "metric.one",
+            "label": "Metric one",
+            "numeric_value": 0.42,
+            "formatted_value": "42.0%",
+            "allowed_renderings": ["42.0%", "42%"],
+            "statistic": "market_value",
+            "unit": "proportion",
+            "orientation": "unfavorable_high",
+            "scope": "market",
+            "coverage_label": "1/1 markets (100.0%)",
+            "aggregation_method": "market_value",
+            "population_basis": "trader_level_within_market",
+            "pooled_denominator_available": False,
+            "representation_basis": "single_assessed_market",
+        }
+    }
+    packages = build_semantic_review_packages(
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=context,
+        assessment_profile=profile,
+        claim_catalog=catalog,
+        documents=documents,
+        deterministic_flags=[],
+        report_context={"country": "Testland"},
+    )
+
+    for package in packages:
+        assert package["package"]["accepted_context"] == [
+            {
+                "statement_id": "context-001",
+                "text": "The source describes a possible market disruption.",
+                "classification": "potentially_explanatory",
+                "document_ids": ["doc-a"],
+            }
+        ]
+        projected_documents = package["package"]["cited_documents"]
+        assert [item["document_id"] for item in projected_documents] == ["doc-a"]
+        assert projected_documents[0]["content_excerpt"] == excerpt[:800]
+        assert "doc-unused" not in str(projected_documents)
+
+    evidence = packages[1]["package"]["evidence_by_metric_id"]["metric.one"]
+    assert evidence["numeric_value"] == 0.42
+    assert evidence["formatted_value"] == "42.0%"
+    assert evidence["aggregation_method"] == "market_value"
+    assert evidence["population_basis"] == "trader_level_within_market"
+    assert evidence["pooled_denominator_available"] is False
 
 
 def test_consolidated_response_requires_every_target_exactly_once() -> None:

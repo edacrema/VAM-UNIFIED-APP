@@ -658,6 +658,14 @@ def reconcile_generation_diagnostics_for_blocked_failure(
             error.target_characters
             or CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS
         )
+        target_count = int(error.target_count or 0)
+        diagnostics["consolidated_correction_field_count"] = target_count
+        diagnostics["correction_tasks_total"] = target_count
+        diagnostics["correction_tasks_completed"] = 0
+        diagnostics["correction_tasks_failed"] = 0
+        diagnostics["active_correction_task"] = None
+        diagnostics["consolidated_correction_llm_calls"] = 0
+        diagnostics["consolidated_correction_call_id"] = None
     if error.stage in {"semantic_review", "corrected_claim_verification"}:
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
@@ -2553,24 +2561,32 @@ def node_deterministic_claim_validator(state: MFIReportState) -> dict:
 
 
 def _semantic_review_prompt(review: Mapping[str, Any]) -> str:
-    return f"""Review one bounded section of a structured MFI report.
+    return f"""Check one section of an MFI report against its evidence.
 
-Use English and return valid JSON only. Review only the claim records in
-REVIEW_PACKAGE.claims. Deterministic facts and evidence are read-only. Every
-claim in this package is owned by this review and appears in no other initial
-review. Do not repeat application routing metadata.
+Use English and return valid JSON only. The package contains the general report
+context, contextual information accepted for this run, the actual report data,
+source excerpts, and the generated text to check.
 
-Classify findings narrowly:
-- high: a concrete factual contradiction, fabricated or unsupported value or
-  source, materially reversed interpretation, or unsupported conclusion that
-  changes the assessment meaning;
-- medium: overstatement, ambiguous scope, weak recommendation linkage,
-  repetition, or material interpretive weakness;
-- low: style, clarity, or minor wording improvement.
+Report only these two kinds of possible problem:
+1. data_mismatch: a figure or factual statement in a claim does not match the
+   supplied report data, or a figure is unsupported by its cited data;
+2. context_interpretation_problem: a claim misstates the supplied contextual
+   information, exceeds its geographic or evidential scope, treats a possible
+   explanation as established causation, or cites context that does not support
+   the interpretation.
+
+Assess source support from content_excerpt, not from a document title alone. If
+source content is unavailable, do not infer that it contradicts a claim.
+
+Do not review writing style, preferred terminology, repetition, narrative tone,
+recommendation quality, or compliance with generic wording rules. Do not invent
+additional analytical policies. A high finding changes the substantive meaning
+of the report; a medium finding identifies a plausible but limited mismatch or
+interpretive overstatement. Return no low or advisory findings.
 
 For a claim finding return its exact canonical claim_id. Use claim_id=null only
-for a genuinely global process issue that cannot be assigned to a claim. Do not
-repeat a deterministic finding already supplied in the package.
+when a data or contextual-evidence problem genuinely cannot be assigned to one
+claim. Do not repeat application routing metadata.
 
 REVIEW_PACKAGE:
 {json.dumps(review['package'])}
@@ -2580,8 +2596,8 @@ Return exactly:
   "flags": [
     {{
       "claim_id": "canonical-id-or-null",
-      "code": "stable_snake_case_code",
-      "severity": "high|medium|low",
+      "issue_type": "data_mismatch|context_interpretation_problem",
+      "severity": "high|medium",
       "message": "concise explanation",
       "recommendation": "specific correction guidance"
     }}
@@ -2598,7 +2614,7 @@ def node_semantic_review(state: MFIReportState) -> dict:
         {
             "red_team_status": "in_progress",
             "red_team_contract_version": SEMANTIC_REVIEW_CONTRACT_VERSION,
-            "red_team_review_operation": "mfi.semantic_review.*.v1",
+            "red_team_review_operation": "mfi.semantic_review.*.v2",
             "red_team_structured_output": True,
             "red_team_package_target_characters": SEMANTIC_REVIEW_MAX_CHARACTERS,
             "semantic_reviews_total": 3,
@@ -2617,6 +2633,11 @@ def node_semantic_review(state: MFIReportState) -> dict:
             claim_catalog=state.get("claim_catalog", {}),
             documents=state.get("contextual_documents", []),
             deterministic_flags=state.get("deterministic_flags", []),
+            report_context={
+                "country": state.get("country"),
+                "data_collection_start": state.get("data_collection_start"),
+                "data_collection_end": state.get("data_collection_end"),
+            },
         )
     except Exception as exc:
         diagnostics["red_team_status"] = "failed"
@@ -2807,6 +2828,7 @@ def node_consolidated_correction(state: MFIReportState) -> dict:
             artifact_id="consolidated",
             character_count=prompt_character_count,
             target_characters=CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS,
+            target_count=len(targets),
         )
     history = _start_correction_attempt(
         history=list(state.get("correction_history", []) or []),
@@ -2902,19 +2924,23 @@ def node_post_correction_validator(state: MFIReportState) -> dict:
 
 
 def _corrected_claim_verification_prompt(review: Mapping[str, Any]) -> str:
-    return f"""Verify only the corrected MFI claims below.
+    return f"""Check only the corrected MFI claims against their evidence.
 
-Use English and valid JSON only. Apply the same high, medium, and low severity
-definitions as the initial semantic reviews. Return a finding only when an
-issue remains in the corrected claim. Use the exact supplied claim_id. Ignore
-and do not repeat application routing metadata.
+Use English and valid JSON only. Report only a figure/factual mismatch with the
+supplied report data, or a misuse of the supplied contextual information such as
+unsupported scope or causality. Do not review style, terminology, repetition,
+tone, recommendation quality, or generic wording preferences. Return a finding
+only when one of those two evidence problems remains. Use the exact supplied
+claim_id and do not repeat application routing metadata.
+Assess source support from content_excerpt, not from a document title alone.
 
 VERIFICATION_PACKAGE:
 {json.dumps(review['package'])}
 
 Return exactly:
-{{"flags": [{{"claim_id": "canonical-id-or-null", "code": "stable_code",
-"severity": "high|medium|low", "message": "...", "recommendation": "..."}}]}}
+{{"flags": [{{"claim_id": "canonical-id-or-null",
+"issue_type": "data_mismatch|context_interpretation_problem",
+"severity": "high|medium", "message": "...", "recommendation": "..."}}]}}
 """
 
 
@@ -2931,6 +2957,11 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
         assessment_profile=state.get("assessment_profile") or {},
         claim_catalog=state.get("claim_catalog", {}),
         documents=state.get("contextual_documents", []),
+        report_context={
+            "country": state.get("country"),
+            "data_collection_start": state.get("data_collection_start"),
+            "data_collection_end": state.get("data_collection_end"),
+        },
     )
     if int(review["character_count"]) > SEMANTIC_REVIEW_MAX_CHARACTERS:
         raise MFIGenerationBlockedError(

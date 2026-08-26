@@ -24,6 +24,7 @@ class MFIGenerationBlockedError(RuntimeError):
         shard_key: Optional[str] = None,
         character_count: Optional[int] = None,
         target_characters: Optional[int] = None,
+        target_count: Optional[int] = None,
         call_id: Optional[str] = None,
         attempt: Optional[int] = None,
         batch_diagnostics: Optional[list[Dict[str, Any]]] = None,
@@ -42,6 +43,7 @@ class MFIGenerationBlockedError(RuntimeError):
         self.shard_key = shard_key
         self.character_count = character_count
         self.target_characters = target_characters
+        self.target_count = target_count
         self.call_id = call_id
         self.attempt = attempt
         self.batch_diagnostics = list(batch_diagnostics or [])
@@ -66,6 +68,7 @@ class MFIGenerationBlockedError(RuntimeError):
                 "shard_key": self.shard_key,
                 "character_count": self.character_count,
                 "target_characters": self.target_characters,
+                "target_count": self.target_count,
                 "call_id": self.call_id,
                 "attempt": self.attempt,
             }.items()

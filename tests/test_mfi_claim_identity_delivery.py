@@ -375,7 +375,7 @@ def test_resolver_prefers_persisted_validated_blocks(monkeypatch) -> None:
 class _RepeatedIdModel:
     def invoke(self, messages):
         prompt = str(messages[0].content)
-        if "Review one bounded section" in prompt or "Verify only the corrected" in prompt:
+        if "Check one section of an MFI report" in prompt or "Check only the corrected" in prompt:
             return type("Response", (), {"content": '{"flags": []}'})()
         metric_match = re.search(r'"metric_id":\s*"([^"]+)"', prompt)
         metric_ids = [metric_match.group(1)] if metric_match else []

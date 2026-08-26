@@ -1218,9 +1218,9 @@ class _GranularWorkflowModel:
                     {"target_id": target["target_id"], "replacement": [claim]}
                 )
             return SimpleNamespace(content=json.dumps({"patches": patches}))
-        if "Verify only the corrected MFI claims" in prompt:
+        if "Check only the corrected MFI claims" in prompt:
             return SimpleNamespace(content='{"flags": []}')
-        if "Review one bounded section" in prompt:
+        if "Check one section of an MFI report" in prompt:
             package = json.loads(
                 prompt.split("REVIEW_PACKAGE:\n", 1)[1].split(
                     "\n\nReturn exactly:", 1
@@ -1240,7 +1240,7 @@ class _GranularWorkflowModel:
                 if row is not None:
                     self.market_flag_emitted = True
                     flag = {
-                        "code": "market_wording_review",
+                        "issue_type": "context_interpretation_problem",
                         "severity": "medium",
                         "claim_id": row["claim_id"],
                         "message": "Make the market issue more specific.",
@@ -1398,6 +1398,16 @@ def test_full_fake_graph_uses_one_correction_and_three_semantic_reviews(
     assert diagnostics["semantic_reviews_completed"] == 3
     assert diagnostics["semantic_reviews_failed"] == 0
     assert diagnostics["corrected_claim_verification_status"] == "completed"
+    operations = {
+        str(item.get("operation"))
+        for item in result["llm_diagnostics"]["calls"]
+    }
+    assert {
+        "mfi.semantic_review.overview.v2",
+        "mfi.semantic_review.dimensions.v2",
+        "mfi.semantic_review.markets.v2",
+        "mfi.corrected_claim_verification.v2",
+    } <= operations
     assert result["llm_calls"] <= 15
     assert diagnostics["red_team_status"] == "completed"
     assert diagnostics["fallback_policy"] == "disabled_live"
@@ -1449,7 +1459,7 @@ def test_oversized_consolidated_correction_fails_before_model_call(
     monkeypatch.setattr(
         graph,
         "consolidated_correction_prompt_payload",
-        lambda **_kwargs: {"oversized": "x" * 200_000},
+        lambda **_kwargs: {"oversized": "x" * 300_000},
     )
     monkeypatch.setattr(
         graph,
@@ -1478,3 +1488,11 @@ def test_oversized_consolidated_correction_fails_before_model_call(
     )
     assert caught.value.stage == "consolidated_correction"
     assert caught.value.character_count > caught.value.target_characters
+    assert caught.value.target_characters == 300_000
+    assert caught.value.target_count == 1
+    diagnostics = graph.reconcile_generation_diagnostics_for_blocked_failure(
+        state, caught.value
+    )
+    assert diagnostics["consolidated_correction_field_count"] == 1
+    assert diagnostics["correction_tasks_total"] == 1
+    assert diagnostics["consolidated_correction_llm_calls"] == 0

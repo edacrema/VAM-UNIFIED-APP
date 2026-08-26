@@ -40,11 +40,11 @@ from .schemas import MFINarrativeQAFlag
 
 
 NARRATIVE_ORCHESTRATION_VERSION = "mfi-narrative-simple-v1"
-SEMANTIC_REVIEW_CONTRACT_VERSION = "mfi-semantic-review-v1"
+SEMANTIC_REVIEW_CONTRACT_VERSION = "mfi-semantic-review-v2"
 SEMANTIC_REVIEW_MAX_CHARACTERS = 200_000
 MAX_MARKETS_PER_DRAFT_BATCH = 5
 MARKET_DRAFT_MAX_PROMPT_CHARACTERS = 160_000
-CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS = 200_000
+CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS = 300_000
 MARKET_PROMPT_PROJECTION_VERSION = "mfi-market-prompt-v1"
 
 DIMENSION_DRAFT_OPERATION = "mfi.dimension_batch_drafting.v1"
@@ -52,12 +52,19 @@ MARKET_DRAFT_OPERATION = "mfi.market_batch_drafting.v2"
 EXECUTIVE_DRAFT_OPERATION = "mfi.executive_drafting.v3"
 CONSOLIDATED_CORRECTION_OPERATION = "mfi.consolidated_correction.v2"
 CORRECTED_CLAIM_VERIFICATION_OPERATION = (
-    "mfi.corrected_claim_verification.v1"
+    "mfi.corrected_claim_verification.v2"
 )
 SEMANTIC_REVIEW_OPERATIONS = {
-    "overview": "mfi.semantic_review.overview.v1",
-    "dimensions": "mfi.semantic_review.dimensions.v1",
-    "markets": "mfi.semantic_review.markets.v1",
+    "overview": "mfi.semantic_review.overview.v2",
+    "dimensions": "mfi.semantic_review.dimensions.v2",
+    "markets": "mfi.semantic_review.markets.v2",
+}
+
+# Semantic review is intentionally narrow.  These are the two application domains the
+# reviewer is allowed to report; prose style and policy preferences are outside its job.
+SEMANTIC_REVIEW_ISSUE_TYPES = {
+    "data_mismatch",
+    "context_interpretation_problem",
 }
 
 _DIMENSION_FIELDS = (
@@ -1025,7 +1032,10 @@ def _review_evidence(
             key: catalog[metric_id].get(key)
             for key in (
                 "label",
+                "numeric_value",
                 "formatted_value",
+                "allowed_renderings",
+                "statistic",
                 "unit",
                 "orientation",
                 "scope",
@@ -1033,6 +1043,10 @@ def _review_evidence(
                 "dimension",
                 "market_name",
                 "region",
+                "aggregation_method",
+                "population_basis",
+                "pooled_denominator_available",
+                "representation_basis",
                 "representation_kind",
                 "representation_complete",
                 "representation_required",
@@ -1048,6 +1062,8 @@ def _review_evidence(
 def _review_documents(
     documents: Sequence[Mapping[str, Any]],
     claims: Sequence[Mapping[str, Any]],
+    *,
+    additional_document_ids: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
     cited = {
         str(document_id)
@@ -1055,16 +1071,88 @@ def _review_documents(
         for document_id in claim.get("document_ids", []) or []
         if document_id
     }
-    return [
-        {
-            "document_id": str(item.get("doc_id")),
-            "source": item.get("source"),
-            "title": item.get("title"),
-            "date": item.get("date"),
-        }
+    cited.update(str(item) for item in additional_document_ids if item)
+    projected = []
+    for item in documents:
+        if not isinstance(item, Mapping):
+            continue
+        document_id = str(item.get("doc_id") or "")
+        if not document_id or document_id not in cited:
+            continue
+        projected.append(
+            {
+                "document_id": document_id,
+                "source": item.get("source"),
+                "title": item.get("title"),
+                "date": item.get("date"),
+                "content_excerpt": str(item.get("content") or "")[:800],
+            }
+        )
+    return sorted(projected, key=lambda item: item["document_id"])
+
+
+def _accepted_context_for_review(
+    context_evidence: Sequence[Mapping[str, Any]],
+    documents: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Project only accepted, source-backed run context into semantic review."""
+    available_document_ids = {
+        str(item.get("doc_id"))
         for item in documents
-        if isinstance(item, Mapping) and str(item.get("doc_id")) in cited
-    ]
+        if isinstance(item, Mapping) and item.get("doc_id")
+    }
+    accepted: List[Dict[str, Any]] = []
+    for statement in context_evidence:
+        if not isinstance(statement, Mapping):
+            continue
+        classification = str(statement.get("classification") or "")
+        if classification not in {"corroborating", "potentially_explanatory"}:
+            continue
+        document_ids = [
+            str(item)
+            for item in statement.get("document_ids", []) or []
+            if str(item) in available_document_ids
+        ]
+        if not document_ids:
+            continue
+        accepted.append(
+            {
+                "statement_id": str(statement.get("statement_id") or ""),
+                "text": str(statement.get("text") or ""),
+                "classification": classification,
+                "document_ids": document_ids,
+            }
+        )
+    return accepted
+
+
+def _report_review_context(
+    assessment_profile: Mapping[str, Any],
+    report_context: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    supplied = dict(report_context or {})
+    return {
+        key: value
+        for key, value in {
+            "country": supplied.get("country"),
+            "data_collection_start": supplied.get("data_collection_start"),
+            "data_collection_end": supplied.get("data_collection_end"),
+            "methodology_version": assessment_profile.get("methodology_version"),
+            "score_authority": assessment_profile.get("score_authority"),
+            "assessed_market_count": assessment_profile.get("assessed_market_count"),
+            "mean_mfi_across_assessed_markets": assessment_profile.get(
+                "mean_mfi_across_assessed_markets"
+            ),
+            "priority_dimension_names": assessment_profile.get(
+                "priority_dimension_names", []
+            ),
+            "priority_market_names": assessment_profile.get(
+                "priority_market_names", []
+            ),
+            "limitations": assessment_profile.get("limitations", []),
+        }.items()
+        if value is not None
+    }
 
 
 def _dimension_review_facts(
@@ -1072,7 +1160,33 @@ def _dimension_review_facts(
 ) -> List[Dict[str, Any]]:
     facts: List[Dict[str, Any]] = []
     for profile in ordered_dimension_profiles(assessment_profile):
-        facts.append(dimension_prompt_profile(profile))
+        localized = profile.get("localized_patterns") or {}
+        facts.append(
+            {
+                key: deepcopy(value)
+                for key, value in {
+                    "dimension": profile.get("dimension"),
+                    "statistics": profile.get("statistics"),
+                    "coverage": profile.get("coverage"),
+                    "profile_rank": profile.get("profile_rank"),
+                    "selection_order": profile.get("selection_order"),
+                    "is_priority": profile.get("is_priority"),
+                    "priority_reasons": profile.get("priority_reasons", []),
+                    "localized_patterns": {
+                        key: deepcopy(localized.get(key))
+                        for key in (
+                            "regions_where_bottom_one",
+                            "regions_where_bottom_two",
+                            "markets_where_lowest",
+                            "score_range",
+                            "iqr",
+                        )
+                        if localized.get(key) is not None
+                    },
+                }.items()
+                if value is not None
+            }
+        )
     return facts
 
 
@@ -1081,16 +1195,30 @@ def _market_review_facts(
 ) -> List[Dict[str, Any]]:
     return [
         {
-            key: deepcopy(profile.get(key))
-            for key in (
-                "market_name",
-                "region",
-                "overall_mfi",
-                "score_rank",
-                "selection_order",
-                "weak_dimensions",
-            )
-            if profile.get(key) is not None
+            key: deepcopy(value)
+            for key, value in {
+                "market_name": profile.get("market_name"),
+                "region": profile.get("region"),
+                "overall_mfi": profile.get("overall_mfi"),
+                "score_rank": profile.get("score_rank"),
+                "selection_order": profile.get("selection_order"),
+                "weak_dimensions": [
+                    {
+                        key: deepcopy(item.get(key))
+                        for key in (
+                            "dimension",
+                            "score",
+                            "rank",
+                            "selection_order",
+                            "is_weak",
+                        )
+                        if item.get(key) is not None
+                    }
+                    for item in profile.get("weak_dimensions", []) or []
+                    if isinstance(item, Mapping)
+                ],
+            }.items()
+            if value is not None
         }
         for profile in ordered_priority_market_profiles(assessment_profile)
     ]
@@ -1106,6 +1234,7 @@ def build_semantic_review_packages(
     claim_catalog: Mapping[str, Mapping[str, Any]],
     documents: Sequence[Mapping[str, Any]],
     deterministic_flags: Sequence[Mapping[str, Any]],
+    report_context: Mapping[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     rows = canonical_claim_rows(
         dimension_narratives=dimension_narratives,
@@ -1123,6 +1252,13 @@ def build_semantic_review_packages(
         "dimensions": [row for row in rows if row["artifact_type"] == "dimension"],
         "markets": [row for row in rows if row["artifact_type"] == "market"],
     }
+    accepted_context = _accepted_context_for_review(context_evidence, documents)
+    context_document_ids = [
+        document_id
+        for statement in accepted_context
+        for document_id in statement["document_ids"]
+    ]
+    general_context = _report_review_context(assessment_profile, report_context)
     packages: List[Dict[str, Any]] = []
     for sequence, section in enumerate(("overview", "dimensions", "markets"), start=1):
         claims = by_section[section]
@@ -1146,41 +1282,19 @@ def build_semantic_review_packages(
             facts = _dimension_review_facts(assessment_profile)
         else:
             facts = _market_review_facts(assessment_profile)
-        claim_ids = {row["claim_id"] for row in claims}
-        relevant_deterministic_flags = [
-            {
-                key: flag.get(key)
-                for key in ("code", "severity", "claim_id", "message")
-                if flag.get(key) is not None
-            }
-            for flag in deterministic_flags
-            if isinstance(flag, Mapping)
-            and (
-                not flag.get("claim_id")
-                or str(flag.get("claim_id")) in claim_ids
-            )
-        ]
         package = {
             "contract_version": SEMANTIC_REVIEW_CONTRACT_VERSION,
             "section": section,
+            "report_context": general_context,
             "claims": claims,
             "deterministic_facts": facts,
             "evidence_by_metric_id": _review_evidence(claim_catalog, claims),
-            "cited_documents": _review_documents(documents, claims),
-            "deterministic_flags": relevant_deterministic_flags,
-            "prohibitions": list(NARRATIVE_PROHIBITIONS),
-            "severity_policy": {
-                "high": (
-                    "Concrete factual contradiction, fabricated or unsupported value "
-                    "or source, materially reversed interpretation, or unsupported "
-                    "conclusion that changes the assessment meaning."
-                ),
-                "medium": (
-                    "Overstatement, ambiguous scope, weak recommendation linkage, "
-                    "repetition, or material interpretive weakness."
-                ),
-                "low": "Style, clarity, or minor wording improvement.",
-            },
+            "accepted_context": accepted_context,
+            "cited_documents": _review_documents(
+                documents,
+                claims,
+                additional_document_ids=context_document_ids,
+            ),
         }
         character_count = len(_serialized(package))
         packages.append(
@@ -1201,7 +1315,7 @@ def validate_semantic_review_response(
     *,
     review: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Whitelist the semantic response and resolve routing from canonical claims."""
+    """Validate the deliberately narrow evidence-consistency review contract."""
     if not isinstance(payload, Mapping) or not isinstance(payload.get("flags"), list):
         raise ValueError("Semantic review response requires a flags array")
     claim_rows = {
@@ -1210,15 +1324,20 @@ def validate_semantic_review_response(
         if isinstance(row, Mapping) and row.get("claim_id")
     }
     result: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for index, raw in enumerate(payload["flags"]):
         if not isinstance(raw, Mapping):
             raise ValueError(f"flags[{index}] must be an object")
-        code = str(raw.get("code") or "").strip()
+        issue_type = str(raw.get("issue_type") or "").strip()
         severity = str(raw.get("severity") or "").strip().lower()
         message = str(raw.get("message") or "").strip()
         claim_id = str(raw.get("claim_id") or "").strip() or None
-        if not code or severity not in {"high", "medium", "low"} or not message:
+        # A model may still volunteer style or policy advice despite the narrow prompt.
+        # Such rows are outside this review's authority and are ignored rather than
+        # promoted into correction work or allowed to block delivery.
+        if issue_type not in SEMANTIC_REVIEW_ISSUE_TYPES:
+            continue
+        if severity not in {"high", "medium"} or not message:
             raise ValueError(f"flags[{index}] is missing required semantic fields")
         if claim_id is not None and claim_id not in claim_rows:
             raise ValueError("Semantic review references a claim outside its section")
@@ -1226,7 +1345,9 @@ def validate_semantic_review_response(
         artifact_type = str(row["artifact_type"]) if row else "global"
         artifact_id = str(row["artifact_id"]) if row else None
         field_name = str(row["field_name"]) if row else None
-        key = (code, claim_id or "global")
+        code = f"semantic_{issue_type}"
+        normalized_message = " ".join(message.casefold().split())
+        key = (code, claim_id or "global", normalized_message)
         if key in seen:
             continue
         seen.add(key)
@@ -1235,6 +1356,7 @@ def validate_semantic_review_response(
                 str(review.get("section")),
                 code,
                 claim_id or "global",
+                normalized_message,
             ]
         )
         result.append(
@@ -1473,6 +1595,9 @@ def consolidated_correction_prompt_payload(
                 "source": document_by_id[document_id].get("source"),
                 "date": document_by_id[document_id].get("date"),
                 "title": document_by_id[document_id].get("title"),
+                "content_excerpt": str(
+                    document_by_id[document_id].get("content") or ""
+                )[:800],
             }
             for document_id in unique_document_ids
             if document_id in document_by_id
@@ -1548,6 +1673,7 @@ def build_corrected_claim_verification_package(
     assessment_profile: Mapping[str, Any],
     claim_catalog: Mapping[str, Mapping[str, Any]],
     documents: Sequence[Mapping[str, Any]],
+    report_context: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     keys = target_keys(targets)
     claims = [
@@ -1566,13 +1692,26 @@ def build_corrected_claim_verification_package(
         )
         in keys
     ]
+    accepted_context = _accepted_context_for_review(context_evidence, documents)
+    context_document_ids = [
+        document_id
+        for statement in accepted_context
+        for document_id in statement["document_ids"]
+    ]
     package = {
         "contract_version": SEMANTIC_REVIEW_CONTRACT_VERSION,
         "section": "corrected_claims",
+        "report_context": _report_review_context(
+            assessment_profile, report_context
+        ),
         "claims": claims,
         "evidence_by_metric_id": _review_evidence(claim_catalog, claims),
-        "cited_documents": _review_documents(documents, claims),
-        "prohibitions": list(NARRATIVE_PROHIBITIONS),
+        "accepted_context": accepted_context,
+        "cited_documents": _review_documents(
+            documents,
+            claims,
+            additional_document_ids=context_document_ids,
+        ),
     }
     return {
         "review_id": "corrected-claim-verification",
