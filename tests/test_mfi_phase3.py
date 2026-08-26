@@ -497,13 +497,13 @@ def test_red_team_v6_uses_persisted_batches_and_operation_specific_timeout(
     prepared = graph.node_red_team(state)
     assert prepared["red_team_queue"]
     update = graph.node_process_red_team_batch({**state, **prepared})
-    assert observed["model_kwargs"]["timeout_seconds"] == 180.0
+    assert observed["model_kwargs"]["timeout_seconds"] == 600.0
     assert "REVIEW_BATCH" in observed["prompt"]
     assert observed["bind_kwargs"]["response_mime_type"] == "application/json"
     assert observed["bind_kwargs"]["response_schema"]["required"] == ["flags"]
     call = update["llm_diagnostics"]["calls"][-1]
     assert call["operation"] == "mfi.red_team_review.v6"
-    assert call["configured_timeout_seconds"] == 180.0
+    assert call["configured_timeout_seconds"] == 600.0
     assert call["configured_max_retries"] == 2
     assert update["generation_diagnostics"]["red_team_status"] == "in_progress"
     assert update["generation_diagnostics"]["red_team_structured_output"] is True

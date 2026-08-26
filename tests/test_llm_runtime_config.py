@@ -30,7 +30,7 @@ def test_llm_runtime_defaults_and_overrides(monkeypatch) -> None:
     defaults = llm.llm_runtime_config()
     assert defaults.default_timeout_seconds == 90.0
     assert defaults.mfi_market_draft_timeout_seconds == 180.0
-    assert defaults.mfi_red_team_timeout_seconds == 180.0
+    assert defaults.mfi_red_team_timeout_seconds == 600.0
     assert defaults.max_retries == 2
 
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
@@ -108,7 +108,7 @@ def test_runtime_status_exposes_sanitized_market_deadline(monkeypatch) -> None:
         "configuration_status": "configured",
         "default_timeout_seconds": 90.0,
         "mfi_market_draft_timeout_seconds": 225.0,
-        "mfi_red_team_timeout_seconds": 180.0,
+        "mfi_red_team_timeout_seconds": 600.0,
         "max_retries": 2,
         "error_code": None,
         "error_field": None,
