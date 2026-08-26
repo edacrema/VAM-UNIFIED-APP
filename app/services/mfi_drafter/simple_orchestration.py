@@ -9,13 +9,21 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from collections import defaultdict
+from functools import cmp_to_key
+from typing import Any, Dict, List, Mapping, Sequence
 
-from .claim_identity import canonical_claim_index, normalized_slug
-from .methodology import DISPLAY_DIMENSIONS, NARRATIVE_PROHIBITIONS
+from .claim_identity import normalized_slug
+from .methodology import (
+    DISPLAY_DIMENSIONS,
+    METRIC_DEFINITIONS_BY_ID,
+    NARRATIVE_PROHIBITIONS,
+    NARRATIVE_PROMPT_CONSTRAINTS,
+    SCORE_VALIDATION_ABS_TOLERANCE,
+)
 from .narrative import (
+    NARRATIVE_DENSITY_POLICY,
     compact_catalog,
-    dimension_catalog_ids,
     executive_catalog_ids,
     market_catalog_ids,
     parse_dimension_narrative,
@@ -35,11 +43,14 @@ NARRATIVE_ORCHESTRATION_VERSION = "mfi-narrative-simple-v1"
 SEMANTIC_REVIEW_CONTRACT_VERSION = "mfi-semantic-review-v1"
 SEMANTIC_REVIEW_MAX_CHARACTERS = 200_000
 MAX_MARKETS_PER_DRAFT_BATCH = 5
+MARKET_DRAFT_MAX_PROMPT_CHARACTERS = 160_000
+CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS = 200_000
+MARKET_PROMPT_PROJECTION_VERSION = "mfi-market-prompt-v1"
 
 DIMENSION_DRAFT_OPERATION = "mfi.dimension_batch_drafting.v1"
-MARKET_DRAFT_OPERATION = "mfi.market_batch_drafting.v1"
+MARKET_DRAFT_OPERATION = "mfi.market_batch_drafting.v2"
 EXECUTIVE_DRAFT_OPERATION = "mfi.executive_drafting.v3"
-CONSOLIDATED_CORRECTION_OPERATION = "mfi.consolidated_correction.v1"
+CONSOLIDATED_CORRECTION_OPERATION = "mfi.consolidated_correction.v2"
 CORRECTED_CLAIM_VERIFICATION_OPERATION = (
     "mfi.corrected_claim_verification.v1"
 )
@@ -194,6 +205,431 @@ def build_market_draft_batches(
     return batches
 
 
+class MarketDraftPromptContractError(ValueError):
+    """Raised before Vertex when one market cannot fit the prompt contract."""
+
+    def __init__(
+        self,
+        *,
+        market_name: str,
+        character_count: int,
+        target_characters: int,
+    ) -> None:
+        self.market_name = market_name
+        self.character_count = int(character_count)
+        self.target_characters = int(target_characters)
+        super().__init__(
+            f"Market {market_name!r} requires {character_count} prompt characters; "
+            f"the limit is {target_characters}."
+        )
+
+
+def _market_local_evidence(
+    assessment_profile: Mapping[str, Any],
+    *,
+    market_name: str,
+    dimension: str,
+) -> Dict[str, Dict[str, str]]:
+    """Index one market/dimension ledger by methodology metric and statistic."""
+    result: Dict[str, Dict[str, str]] = defaultdict(dict)
+    ledger = assessment_profile.get("metric_ledger") or {}
+    if not isinstance(ledger, Mapping):
+        return {}
+    for ledger_id, raw_entry in ledger.items():
+        if not isinstance(raw_entry, Mapping):
+            continue
+        if (
+            str(raw_entry.get("market_name") or "") != market_name
+            or str(raw_entry.get("dimension") or "") != dimension
+        ):
+            continue
+        source_ids = [
+            str(item) for item in raw_entry.get("source_metric_ids", []) or [] if item
+        ]
+        if not source_ids or source_ids[0] not in METRIC_DEFINITIONS_BY_ID:
+            continue
+        statistic = str(raw_entry.get("statistic") or "")
+        if statistic:
+            result[source_ids[0]][statistic] = str(ledger_id)
+    return dict(result)
+
+
+def _primary_local_ledger_id(
+    statistics: Mapping[str, str],
+    *,
+    role: str,
+) -> str | None:
+    if role in {"category_driver", "question_driver", "item_driver"}:
+        return statistics.get("derived_market_unfavorable_rate") or statistics.get(
+            "market_explanatory_normalized_value"
+        )
+    return statistics.get("market_explanatory_normalized_value") or statistics.get(
+        "market_explanatory_raw_value"
+    )
+
+
+def _market_projection_entry(
+    *,
+    source_metric_id: str,
+    ledger_id: str,
+) -> Dict[str, Any]:
+    definition = METRIC_DEFINITIONS_BY_ID[source_metric_id]
+    return {
+        "source_metric_id": source_metric_id,
+        "ledger_metric_id": ledger_id,
+        "role": definition.role,
+        "product_group": definition.product_group,
+        "question_group": definition.question_group,
+        "item_name": definition.item_name,
+    }
+
+
+def _compare_metric_value(
+    left: float,
+    right: float,
+    *,
+    descending: bool = False,
+) -> int:
+    """Compare analytical values while preserving methodology-level ties."""
+    delta = float(left) - float(right)
+    if abs(delta) <= SCORE_VALIDATION_ABS_TOLERANCE:
+        return 0
+    result = -1 if delta < 0 else 1
+    return -result if descending else result
+
+
+def _compare_subsection_candidate(
+    left: tuple[float, int, str, str],
+    right: tuple[float, int, str, str],
+) -> int:
+    value_order = _compare_metric_value(left[0], right[0])
+    if value_order:
+        return value_order
+    return (left[2] > right[2]) - (left[2] < right[2])
+
+
+def _compare_driver_candidate(
+    left: tuple[float, int, str, str],
+    right: tuple[float, int, str, str],
+) -> int:
+    value_order = _compare_metric_value(left[0], right[0], descending=True)
+    if value_order:
+        return value_order
+    if left[1] != right[1]:
+        return -1 if left[1] > right[1] else 1
+    return (left[2] > right[2]) - (left[2] < right[2])
+
+
+def _compare_item_candidate(
+    left: tuple[float, str, str],
+    right: tuple[float, str, str],
+) -> int:
+    value_order = _compare_metric_value(left[0], right[0], descending=True)
+    if value_order:
+        return value_order
+    return (left[1] > right[1]) - (left[1] < right[1])
+
+
+def build_market_prompt_projection(
+    assessment_profile: Mapping[str, Any],
+    market_profile: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Project bounded, market-scoped evidence without changing Phase 2 data."""
+    market_name = str(market_profile.get("market_name") or "")
+    ledger = assessment_profile.get("metric_ledger") or {}
+    if not market_name or not isinstance(ledger, Mapping):
+        raise ValueError("Market prompt projection requires a market and metric ledger")
+
+    relevant_items_by_dimension = {
+        str(dimension.get("dimension")): {
+            str(metric.get("metric_id"))
+            for metric in dimension.get("drivers", []) or []
+            if isinstance(metric, Mapping)
+            and metric.get("metric_id")
+            and bool(metric.get("item_relevant"))
+        }
+        for dimension in assessment_profile.get("dimensions", []) or []
+        if isinstance(dimension, Mapping) and dimension.get("dimension")
+    }
+    selected_ids: List[str] = [
+        str(item) for item in market_profile.get("ledger_metric_ids", []) or [] if item
+    ]
+    weak_projections: List[Dict[str, Any]] = []
+    selection_counts = {"subsections": 0, "drivers": 0, "relevant_items": 0}
+
+    for weak in market_profile.get("weak_dimensions", []) or []:
+        if not isinstance(weak, Mapping) or not weak.get("dimension"):
+            continue
+        dimension = str(weak["dimension"])
+        weak_ledger_ids = [
+            str(item) for item in weak.get("ledger_metric_ids", []) or [] if item
+        ]
+        selected_ids.extend(weak_ledger_ids)
+        by_source = _market_local_evidence(
+            assessment_profile,
+            market_name=market_name,
+            dimension=dimension,
+        )
+        subsection_candidates: List[tuple[float, int, str, str]] = []
+        driver_candidates: List[tuple[float, int, str, str]] = []
+        item_candidates: List[tuple[float, str, str]] = []
+        for source_metric_id, statistics in by_source.items():
+            definition = METRIC_DEFINITIONS_BY_ID[source_metric_id]
+            ledger_id = _primary_local_ledger_id(
+                statistics,
+                role=definition.role,
+            )
+            entry = ledger.get(ledger_id) if ledger_id else None
+            if not ledger_id or not isinstance(entry, Mapping):
+                continue
+            value = entry.get("value")
+            if not isinstance(value, (int, float)):
+                continue
+            if dimension == "Food Quality":
+                is_subsection = definition.role == "dimension_validation_component"
+            else:
+                is_subsection = definition.role == "official_subsection"
+            if is_subsection:
+                quality_order = (
+                    0
+                    if source_metric_id == "quality.measure"
+                    else 1
+                    if source_metric_id == "quality.maximum"
+                    else 2
+                )
+                subsection_candidates.append(
+                    (float(value), quality_order, source_metric_id, ledger_id)
+                )
+            elif definition.role in {"category_driver", "question_driver"}:
+                driver_candidates.append(
+                    (
+                        float(value),
+                        int(definition.severity_weight or 0),
+                        source_metric_id,
+                        ledger_id,
+                    )
+                )
+            elif (
+                definition.role == "item_driver"
+                and source_metric_id in relevant_items_by_dimension.get(dimension, set())
+            ):
+                item_candidates.append(
+                    (float(value), source_metric_id, ledger_id)
+                )
+
+        if dimension == "Food Quality":
+            subsection_candidates.sort(key=lambda item: (item[1], item[2]))
+        else:
+            subsection_candidates.sort(key=cmp_to_key(_compare_subsection_candidate))
+        driver_candidates.sort(key=cmp_to_key(_compare_driver_candidate))
+        item_candidates.sort(key=cmp_to_key(_compare_item_candidate))
+        subsections = [
+            _market_projection_entry(source_metric_id=item[2], ledger_id=item[3])
+            for item in subsection_candidates[:2]
+        ]
+        drivers = [
+            _market_projection_entry(source_metric_id=item[2], ledger_id=item[3])
+            for item in driver_candidates[:4]
+        ]
+        relevant_items = [
+            _market_projection_entry(source_metric_id=item[1], ledger_id=item[2])
+            for item in item_candidates[:3]
+        ]
+        for entry in [*subsections, *drivers, *relevant_items]:
+            selected_ids.append(str(entry["ledger_metric_id"]))
+        selection_counts["subsections"] += len(subsections)
+        selection_counts["drivers"] += len(drivers)
+        selection_counts["relevant_items"] += len(relevant_items)
+        weak_projections.append(
+            {
+                "dimension": dimension,
+                "score": weak.get("score"),
+                "rank": weak.get("rank"),
+                "selection_order": weak.get("selection_order"),
+                "ledger_metric_ids": weak_ledger_ids,
+                "official_subsections": subsections,
+                "explanatory_drivers": drivers,
+                "relevant_items": relevant_items,
+            }
+        )
+
+    return {
+        "projection_version": MARKET_PROMPT_PROJECTION_VERSION,
+        "market_name": market_name,
+        "region": market_profile.get("region"),
+        "overall_mfi": market_profile.get("overall_mfi"),
+        "score_rank": market_profile.get("score_rank"),
+        "selection_order": market_profile.get("selection_order"),
+        "ledger_metric_ids": [
+            str(item) for item in market_profile.get("ledger_metric_ids", []) or [] if item
+        ],
+        "weak_dimensions": weak_projections,
+        "selected_ledger_metric_ids": list(dict.fromkeys(selected_ids)),
+        "selection_counts": selection_counts,
+    }
+
+
+def compose_market_draft_prompt(batch: Mapping[str, Any]) -> str:
+    """Return the exact prompt measured by the budget planner and sent to Vertex."""
+    return f"""Draft targeted MFI narratives for the requested markets.
+
+Use English only and valid JSON only. The prompt contains only the markets'
+weak dimensions and selected matching market-scoped evidence. Every number must
+exactly match a `formatted_value` in CLAIM_CATALOG and cite the associated
+`metric_id`. Do not calculate or infer values. Every claim must declare
+metric_ids, document_ids, scope, and polarity. Recommendations must cite
+evidence used by a priority issue. A limitation is optional and may be included
+only when it is specific to this market and cites market-scoped evidence. Do not
+repeat a generic assessment limitation. Coverage and representation are added
+deterministically in evidence notes; do not introduce coverage numbers in prose.
+
+PROHIBITIONS:
+{json.dumps(list(NARRATIVE_PROHIBITIONS))}
+
+REQUESTED_MARKETS_IN_REQUIRED_ORDER:
+{json.dumps(batch['artifact_ids'])}
+
+MARKET_PROFILES:
+{json.dumps(batch['profiles'])}
+
+CLAIM_CATALOG:
+{json.dumps(batch['claim_catalog'])}
+
+CONSTRAINTS:
+{json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
+
+R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
+- {NARRATIVE_DENSITY_POLICY.market_priority_issues} priority issues;
+- {NARRATIVE_DENSITY_POLICY.market_recommendations} linked recommendations;
+- {NARRATIVE_DENSITY_POLICY.market_limitations} market-specific limitation.
+
+Return:
+{{
+  "markets": [
+    {{
+      "market_name": "exact requested market name",
+      "narrative": {{
+        "priority_issues": [CLAIM],
+        "recommended_interventions": [CLAIM],
+        "limitations": [CLAIM]
+      }}
+    }}
+  ]
+}}
+where CLAIM is:
+{{
+  "text": "...",
+  "claim_kind": "finding|recommendation|limitation",
+  "metric_ids": ["ledger ids"],
+  "document_ids": [],
+  "scope": "market",
+  "polarity": "favorable|unfavorable|neutral|descriptive"
+}}
+"""
+
+
+def _market_prompt_batch(
+    projections: Sequence[Mapping[str, Any]],
+    *,
+    catalog: Mapping[str, Mapping[str, Any]],
+    sequence: int,
+) -> Dict[str, Any]:
+    names = [str(item["market_name"]) for item in projections]
+    selected_ids = list(
+        dict.fromkeys(
+            str(metric_id)
+            for projection in projections
+            for metric_id in projection.get("selected_ledger_metric_ids", []) or []
+            if metric_id
+        )
+    )
+    prompt_catalog = compact_catalog(catalog, selected_ids)
+    counts = {
+        key: sum(
+            int((projection.get("selection_counts") or {}).get(key, 0) or 0)
+            for projection in projections
+        )
+        for key in ("subsections", "drivers", "relevant_items")
+    }
+    batch: Dict[str, Any] = {
+        "batch_id": f"market-draft-{_short_hash('|'.join(names))}",
+        "batch_kind": "selected_markets",
+        "sequence": sequence,
+        "artifact_ids": names,
+        "profiles": [deepcopy(dict(item)) for item in projections],
+        "claim_catalog": prompt_catalog,
+        "catalog_entry_count": len(prompt_catalog),
+        "selection_counts": counts,
+        "projection_version": MARKET_PROMPT_PROJECTION_VERSION,
+    }
+    prompt = compose_market_draft_prompt(batch)
+    batch["prompt"] = prompt
+    batch["prompt_character_count"] = len(prompt)
+    return batch
+
+
+def build_budgeted_market_draft_batches(
+    assessment_profile: Mapping[str, Any],
+    catalog: Mapping[str, Mapping[str, Any]],
+    *,
+    maximum_batch_size: int = MAX_MARKETS_PER_DRAFT_BATCH,
+    maximum_prompt_characters: int = MARKET_DRAFT_MAX_PROMPT_CHARACTERS,
+) -> List[Dict[str, Any]]:
+    """Pack ordered markets under both the artifact and exact prompt budgets."""
+    if maximum_batch_size < 1:
+        raise ValueError("maximum_batch_size must be positive")
+    if maximum_prompt_characters < 1:
+        raise ValueError("maximum_prompt_characters must be positive")
+    projections = [
+        build_market_prompt_projection(assessment_profile, profile)
+        for profile in ordered_priority_market_profiles(assessment_profile)
+    ]
+    batches: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
+    for projection in projections:
+        candidate = _market_prompt_batch(
+            [*pending, projection],
+            catalog=catalog,
+            sequence=len(batches) + 1,
+        )
+        if (
+            len(pending) < maximum_batch_size
+            and int(candidate["prompt_character_count"]) <= maximum_prompt_characters
+        ):
+            pending.append(projection)
+            continue
+        if pending:
+            batches.append(
+                _market_prompt_batch(
+                    pending,
+                    catalog=catalog,
+                    sequence=len(batches) + 1,
+                )
+            )
+            pending = []
+        single = _market_prompt_batch(
+            [projection],
+            catalog=catalog,
+            sequence=len(batches) + 1,
+        )
+        if int(single["prompt_character_count"]) > maximum_prompt_characters:
+            raise MarketDraftPromptContractError(
+                market_name=str(projection["market_name"]),
+                character_count=int(single["prompt_character_count"]),
+                target_characters=maximum_prompt_characters,
+            )
+        pending = [projection]
+    if pending:
+        batches.append(
+            _market_prompt_batch(
+                pending,
+                catalog=catalog,
+                sequence=len(batches) + 1,
+            )
+        )
+    return batches
+
+
 def validate_dimension_draft_batch(
     payload: Any,
     *,
@@ -289,20 +725,45 @@ def dimension_batch_catalog(
     batch: Mapping[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
     profiles = dimension_batch_prompt_profiles(batch)
+    return compact_catalog(catalog, _catalog_ids_in_value(profiles, catalog))
+
+
+def _catalog_ids_in_value(
+    value: Any,
+    catalog: Mapping[str, Mapping[str, Any]],
+) -> List[str]:
     ids: List[str] = []
 
-    def collect(value: Any) -> None:
-        if isinstance(value, Mapping):
-            for nested in value.values():
-                collect(nested)
-        elif isinstance(value, list):
-            for nested in value:
-                collect(nested)
-        elif isinstance(value, str) and value in catalog:
-            ids.append(value)
+    def collect(nested: Any) -> None:
+        if isinstance(nested, Mapping):
+            for item in nested.values():
+                collect(item)
+        elif isinstance(nested, list):
+            for item in nested:
+                collect(item)
+        elif isinstance(nested, str) and nested in catalog:
+            ids.append(nested)
 
-    collect(profiles)
-    return compact_catalog(catalog, list(dict.fromkeys(ids)))
+    collect(value)
+    return list(dict.fromkeys(ids))
+
+
+def _claim_reference_ids(value: Any, key: str) -> List[str]:
+    ids: List[str] = []
+
+    def collect(nested: Any) -> None:
+        if isinstance(nested, Mapping):
+            references = nested.get(key)
+            if isinstance(references, list):
+                ids.extend(str(item) for item in references if item)
+            for item in nested.values():
+                collect(item)
+        elif isinstance(nested, list):
+            for item in nested:
+                collect(item)
+
+    collect(value)
+    return list(dict.fromkeys(ids))
 
 
 def _compact_ranked_metric(metric: Mapping[str, Any]) -> Dict[str, Any]:
@@ -882,6 +1343,10 @@ def consolidated_correction_prompt_payload(
         if isinstance(item, Mapping) and item.get("doc_id")
     }
     entries: List[Dict[str, Any]] = []
+    authorized_metric_ids: List[str] = []
+    authorized_document_ids: List[str] = []
+    artifact_contexts: Dict[str, Any] = {}
+    artifact_authorizations: Dict[str, Dict[str, List[str]]] = {}
     for target in targets:
         artifact_type = str(target["artifact_type"])
         artifact_id = str(target["artifact_id"])
@@ -893,8 +1358,8 @@ def consolidated_correction_prompt_payload(
                 for item in assessment_profile.get("dimensions", []) or []
                 if str(item.get("dimension")) == artifact_id
             )
-            catalog = compact_catalog(
-                claim_catalog, dimension_catalog_ids(profile)
+            target_metric_ids = _catalog_ids_in_value(
+                dimension_prompt_profile(profile), claim_catalog
             )
         elif artifact_type == "market":
             artifact = market_narratives[artifact_id]
@@ -903,21 +1368,22 @@ def consolidated_correction_prompt_payload(
                 for item in assessment_profile.get("markets", []) or []
                 if str(item.get("market_name")) == artifact_id
             )
-            catalog = compact_catalog(
-                claim_catalog, market_catalog_ids(profile, claim_catalog)
+            target_metric_ids = list(
+                build_market_prompt_projection(
+                    assessment_profile, profile
+                ).get("selected_ledger_metric_ids", [])
+                or []
             )
         elif artifact_type == "executive_summary":
             artifact = executive_narrative
-            catalog = compact_catalog(
-                claim_catalog, executive_catalog_ids(assessment_profile)
-            )
+            target_metric_ids = executive_catalog_ids(assessment_profile)
         else:
             artifact = next(
                 item
                 for item in context_evidence
                 if str(item.get("statement_id")) == artifact_id
             )
-            catalog = {}
+            target_metric_ids = []
         target_flags = [
             flags_by_id[flag_id]
             for flag_id in target.get("flag_ids", []) or []
@@ -928,6 +1394,38 @@ def consolidated_correction_prompt_payload(
             for flag in target_flags
             for document_id in flag.get("document_ids", []) or []
         }
+        target_metric_ids = list(
+            dict.fromkeys(
+                [
+                    *(str(item) for item in target_metric_ids if item),
+                    *_claim_reference_ids(artifact, "metric_ids"),
+                    *(
+                        str(metric_id)
+                        for flag in target_flags
+                        for metric_id in flag.get("metric_ids", []) or []
+                        if metric_id
+                    ),
+                ]
+            )
+        )
+        cited_document_ids.update(_claim_reference_ids(artifact, "document_ids"))
+        authorized_metric_ids.extend(target_metric_ids)
+        authorized_document_ids.extend(sorted(cited_document_ids))
+        context_id = f"{artifact_type}:{artifact_id}"
+        artifact_contexts.setdefault(
+            context_id,
+            project_correction_transport(artifact),
+        )
+        authorization = artifact_authorizations.setdefault(
+            context_id,
+            {"metric_ids": [], "document_ids": []},
+        )
+        authorization["metric_ids"] = list(
+            dict.fromkeys([*authorization["metric_ids"], *target_metric_ids])
+        )
+        authorization["document_ids"] = sorted(
+            set([*authorization["document_ids"], *cited_document_ids])
+        )
         entries.append(
             {
                 "target_id": str(target["task_id"]),
@@ -951,30 +1449,34 @@ def consolidated_correction_prompt_payload(
                 "current_field": project_correction_transport(
                     artifact.get(field_name)
                 ),
-                "read_only_context": project_correction_transport(
-                    {key: value for key, value in artifact.items() if key != field_name}
-                ),
+                "artifact_context_id": context_id,
                 "patch_contract": correction_field_patch_contract(
                     task=target,
                     artifact=artifact,
                     assessment_profile=assessment_profile,
                 ),
-                "authorized_claim_catalog": catalog,
-                "authorized_documents": [
-                    {
-                        "document_id": document_id,
-                        "source": document_by_id[document_id].get("source"),
-                        "date": document_by_id[document_id].get("date"),
-                        "title": document_by_id[document_id].get("title"),
-                    }
-                    for document_id in sorted(cited_document_ids)
-                    if document_id in document_by_id
-                ],
             }
         )
+    unique_metric_ids = list(dict.fromkeys(authorized_metric_ids))
+    unique_document_ids = sorted(set(authorized_document_ids))
     return {
-        "contract_version": "mfi-consolidated-correction-v1",
+        "contract_version": "mfi-consolidated-correction-v2",
         "targets": entries,
+        "artifact_contexts": artifact_contexts,
+        "artifact_authorizations": artifact_authorizations,
+        "authorized_claim_catalog": compact_catalog(
+            claim_catalog, unique_metric_ids
+        ),
+        "authorized_documents": [
+            {
+                "document_id": document_id,
+                "source": document_by_id[document_id].get("source"),
+                "date": document_by_id[document_id].get("date"),
+                "title": document_by_id[document_id].get("title"),
+            }
+            for document_id in unique_document_ids
+            if document_id in document_by_id
+        ],
         "prohibitions": list(NARRATIVE_PROHIBITIONS),
     }
 

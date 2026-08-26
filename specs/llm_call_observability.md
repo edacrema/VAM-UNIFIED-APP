@@ -7,6 +7,8 @@ Storage prefix that is not served by any report or artifact endpoint.
 ## Runtime configuration
 
 - `LLM_TIMEOUT_SECONDS=90`: per-attempt deadline for ordinary LLM calls.
+- `MFI_MARKET_DRAFT_TIMEOUT_SECONDS=180`: per-attempt deadline for budgeted MFI
+  selected-market drafting calls.
 - `MFI_RED_TEAM_TIMEOUT_SECONDS=180`: per-attempt deadline for the compact MFI
   Red-Team review.
 - `LLM_MAX_RETRIES=2`: provider retry limit shared by traced calls.

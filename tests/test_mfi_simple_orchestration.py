@@ -12,18 +12,25 @@ from app.services.mfi_drafter.claim_identity import (
 from app.services.mfi_drafter.methodology import DISPLAY_DIMENSIONS
 from app.services.mfi_drafter.narrative import (
     apply_final_qa_annotations,
+    build_claim_catalog,
     validate_evidence_bound_narratives,
 )
 from app.services.mfi_drafter.simple_orchestration import (
+    MARKET_DRAFT_MAX_PROMPT_CHARACTERS,
     MAX_MARKETS_PER_DRAFT_BATCH,
+    MarketDraftPromptContractError,
     SEMANTIC_REVIEW_MAX_CHARACTERS,
+    build_budgeted_market_draft_batches,
     build_dimension_draft_batches,
     build_market_draft_batches,
+    build_market_prompt_projection,
     build_semantic_review_packages,
+    consolidated_correction_prompt_payload,
     validate_consolidated_correction_response,
     validate_dimension_draft_batch,
     validate_semantic_review_response,
 )
+from app.services.mfi_drafter.synthetic_fixtures import SyntheticSpec, build_profile
 
 
 def _claim(claim_id: str, *, metric_id: str = "metric.one") -> dict:
@@ -132,6 +139,12 @@ def _narratives(profile: dict) -> tuple[dict, dict, dict]:
     return dimensions, markets, executive
 
 
+@pytest.fixture(scope="module")
+def compact_market_bundle() -> tuple[dict, dict]:
+    profile = build_profile(SyntheticSpec(market_count=15)).model_dump()
+    return profile, build_claim_catalog(profile)
+
+
 def test_draft_batches_reduce_nine_dimensions_and_fifteen_markets() -> None:
     profile = _profile()
     dimension_batches = build_dimension_draft_batches(profile)
@@ -149,6 +162,180 @@ def test_draft_batches_reduce_nine_dimensions_and_fifteen_markets() -> None:
     assert [name for item in market_batches for name in item["artifact_ids"]] == (
         profile["priority_market_names"]
     )
+
+
+def test_compact_market_batches_obey_exact_prompt_budget_and_are_deterministic(
+    compact_market_bundle: tuple[dict, dict],
+) -> None:
+    profile, catalog = compact_market_bundle
+    first = build_budgeted_market_draft_batches(profile, catalog)
+    second = build_budgeted_market_draft_batches(profile, catalog)
+
+    assert first == second
+    assert [name for batch in first for name in batch["artifact_ids"]] == (
+        profile["priority_market_names"]
+    )
+    assert all(len(batch["artifact_ids"]) <= 5 for batch in first)
+    assert all(
+        batch["prompt_character_count"] == len(batch["prompt"])
+        <= MARKET_DRAFT_MAX_PROMPT_CHARACTERS
+        for batch in first
+    )
+    assert all(batch["projection_version"] == "mfi-market-prompt-v1" for batch in first)
+
+    projected_ids = {
+        metric_id
+        for market in profile["markets"]
+        if market["market_name"] in set(profile["priority_market_names"])
+        for metric_id in build_market_prompt_projection(
+            profile, market
+        )["selected_ledger_metric_ids"]
+    }
+    prompt_ids = {
+        entry["metric_id"]
+        for batch in first
+        for entry in batch["claim_catalog"]
+    }
+    assert prompt_ids == projected_ids.intersection(catalog)
+
+
+def test_market_prompt_budget_accepts_exact_boundary_and_rejects_one_over(
+    compact_market_bundle: tuple[dict, dict],
+) -> None:
+    profile, catalog = compact_market_bundle
+    one_market = copy.deepcopy(profile)
+    market_name = profile["priority_market_names"][0]
+    one_market["priority_market_names"] = [market_name]
+    exact = build_budgeted_market_draft_batches(
+        one_market,
+        catalog,
+        maximum_prompt_characters=MARKET_DRAFT_MAX_PROMPT_CHARACTERS,
+    )[0]["prompt_character_count"]
+
+    accepted = build_budgeted_market_draft_batches(
+        one_market,
+        catalog,
+        maximum_prompt_characters=exact,
+    )
+    assert accepted[0]["prompt_character_count"] == exact
+    with pytest.raises(MarketDraftPromptContractError) as caught:
+        build_budgeted_market_draft_batches(
+            one_market,
+            catalog,
+            maximum_prompt_characters=exact - 1,
+        )
+    assert caught.value.market_name == market_name
+    assert caught.value.character_count == exact
+
+
+def test_market_projection_is_bounded_and_does_not_mutate_analysis(
+    compact_market_bundle: tuple[dict, dict],
+) -> None:
+    profile, _catalog = compact_market_bundle
+    before = copy.deepcopy(profile)
+    market = next(
+        item
+        for item in profile["markets"]
+        if item["market_name"] == profile["priority_market_names"][0]
+    )
+    projection = build_market_prompt_projection(profile, market)
+
+    assert len(projection["weak_dimensions"]) == len(market["weak_dimensions"])
+    for weak in projection["weak_dimensions"]:
+        assert len(weak["official_subsections"]) <= 2
+        assert len(weak["explanatory_drivers"]) <= 4
+        assert len(weak["relevant_items"]) <= 3
+    assert profile == before
+
+
+def test_market_projection_preserves_food_quality_measure_and_maximum(
+) -> None:
+    severity = {dimension: 0.8 for dimension in DISPLAY_DIMENSIONS}
+    severity.update({"Food Quality": 0.1, "Service": 0.2, "Price": 0.3})
+    profile = build_profile(
+        SyntheticSpec(market_count=1, dimension_severity=severity)
+    ).model_dump()
+    market = copy.deepcopy(profile["markets"][0])
+    assert market["weak_dimensions"][0]["dimension"] == "Food Quality"
+
+    projection = build_market_prompt_projection(profile, market)
+    quality = next(
+        item
+        for item in projection["weak_dimensions"]
+        if item["dimension"] == "Food Quality"
+    )
+    assert [
+        item["source_metric_id"] for item in quality["official_subsections"]
+    ] == ["quality.measure", "quality.maximum"]
+    assert 1 <= len(quality["explanatory_drivers"]) <= 4
+    assert all(
+        item["role"] == "question_driver"
+        for item in quality["explanatory_drivers"]
+    )
+
+
+def test_consolidated_correction_deduplicates_shared_authorized_evidence(
+    compact_market_bundle: tuple[dict, dict],
+) -> None:
+    profile, catalog = compact_market_bundle
+    dimensions, markets, executive = _narratives(profile)
+    market_name = profile["priority_market_names"][0]
+    targets = [
+        {
+            "task_id": f"target-{index}",
+            "artifact_type": "market",
+            "artifact_id": market_name,
+            "field_name": field_name,
+            "flag_ids": [f"flag-{index}"],
+            "claim_ids": [],
+        }
+        for index, field_name in enumerate(
+            ("priority_issues", "recommended_interventions"), start=1
+        )
+    ]
+    flags = [
+        {
+            "flag_id": f"flag-{index}",
+            "code": "needs_revision",
+            "severity": "medium",
+            "claim_id": None,
+            "message": "Revise this field.",
+            "recommendation": "Use authorized evidence.",
+            "metric_ids": [],
+            "document_ids": [],
+        }
+        for index in (1, 2)
+    ]
+    payload = consolidated_correction_prompt_payload(
+        targets=targets,
+        flags=flags,
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=[],
+        assessment_profile=profile,
+        claim_catalog=catalog,
+        documents=[],
+    )
+
+    assert payload["contract_version"] == "mfi-consolidated-correction-v2"
+    assert len(payload["targets"]) == 2
+    assert all(
+        "authorized_claim_catalog" not in target for target in payload["targets"]
+    )
+    assert len(payload["artifact_contexts"]) == 1
+    assert len(payload["artifact_authorizations"]) == 1
+    assert payload["targets"][0]["artifact_context_id"] == (
+        payload["targets"][1]["artifact_context_id"]
+    )
+    metric_ids = [
+        item["metric_id"] for item in payload["authorized_claim_catalog"]
+    ]
+    assert metric_ids
+    assert len(metric_ids) == len(set(metric_ids))
+    authorization = next(iter(payload["artifact_authorizations"].values()))
+    assert authorization["metric_ids"]
+    assert len(authorization["metric_ids"]) == len(set(authorization["metric_ids"]))
 
 
 def test_dimension_batch_requires_exact_order_and_complete_rows() -> None:

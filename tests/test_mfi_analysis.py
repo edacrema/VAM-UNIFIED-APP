@@ -573,7 +573,7 @@ def test_analysis_node_makes_no_llm_call_and_market_selector_uses_profile(monkey
             return _Response()
 
     model = _Model()
-    monkeypatch.setattr(graph, "get_model", lambda: model)
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: model)
     state.update(analysis_update)
     recommendation_update = graph.node_market_recommendations_drafter(state)
 

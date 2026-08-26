@@ -1182,6 +1182,10 @@ class MFIGenerationDiagnostics(BaseModel):
     draft_batches_completed: int = Field(default=0, ge=0)
     draft_batches_failed: int = Field(default=0, ge=0)
     draft_batches: List[Dict[str, Any]] = Field(default_factory=list)
+    market_prompt_projection_version: str = "mfi-market-prompt-v1"
+    market_draft_prompt_max_characters: int = Field(default=160_000, gt=0)
+    market_draft_max_observed_prompt_characters: int = Field(default=0, ge=0)
+    market_draft_timeout_seconds: Optional[float] = Field(default=None, gt=0)
     semantic_reviews_total: int = Field(default=0, ge=0)
     semantic_reviews_completed: int = Field(default=0, ge=0)
     semantic_reviews_failed: int = Field(default=0, ge=0)
@@ -1192,6 +1196,10 @@ class MFIGenerationDiagnostics(BaseModel):
     consolidated_correction_call_id: Optional[str] = None
     consolidated_correction_field_count: int = Field(default=0, ge=0)
     consolidated_correction_llm_calls: int = Field(default=0, ge=0)
+    consolidated_correction_prompt_character_count: int = Field(default=0, ge=0)
+    consolidated_correction_prompt_max_characters: int = Field(
+        default=200_000, gt=0
+    )
     corrected_claim_verification_status: Literal[
         "not_needed", "pending", "completed", "failed"
     ] = "not_needed"

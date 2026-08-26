@@ -274,6 +274,28 @@ if isinstance(result, dict):
             "Failed semantic reviews",
             str(diagnostics.get("semantic_reviews_failed", 0)),
         )
+        prompt_columns = st.columns(3)
+        prompt_columns[0].metric(
+            "Largest market prompt",
+            (
+                f"{int(diagnostics.get('market_draft_max_observed_prompt_characters', 0) or 0):,} "
+                "characters"
+            ),
+        )
+        prompt_columns[1].metric(
+            "Market prompt limit",
+            (
+                f"{int(diagnostics.get('market_draft_prompt_max_characters', 0) or 0):,} "
+                "characters"
+            ),
+        )
+        prompt_columns[2].metric(
+            "Market call deadline",
+            (
+                f"{float(diagnostics.get('market_draft_timeout_seconds', 0) or 0):g} "
+                "seconds"
+            ),
+        )
         st.json(result.get("generation_diagnostics") or {})
         st.markdown("**LLM call diagnostics**")
         render_llm_diagnostics(result.get("llm_diagnostics") or {})

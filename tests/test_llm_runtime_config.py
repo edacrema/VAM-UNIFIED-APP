@@ -13,6 +13,7 @@ from app.services.mfi_drafter import graph, router
 def _clean_runtime(monkeypatch):
     for name in (
         "LLM_TIMEOUT_SECONDS",
+        "MFI_MARKET_DRAFT_TIMEOUT_SECONDS",
         "MFI_RED_TEAM_TIMEOUT_SECONDS",
         "LLM_MAX_RETRIES",
         "LLM_MAX_OUTPUT_TOKENS",
@@ -28,14 +29,17 @@ def _clean_runtime(monkeypatch):
 def test_llm_runtime_defaults_and_overrides(monkeypatch) -> None:
     defaults = llm.llm_runtime_config()
     assert defaults.default_timeout_seconds == 90.0
+    assert defaults.mfi_market_draft_timeout_seconds == 180.0
     assert defaults.mfi_red_team_timeout_seconds == 180.0
     assert defaults.max_retries == 2
 
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("MFI_MARKET_DRAFT_TIMEOUT_SECONDS", "210")
     monkeypatch.setenv("MFI_RED_TEAM_TIMEOUT_SECONDS", "240")
     monkeypatch.setenv("LLM_MAX_RETRIES", "3")
     configured = llm.llm_runtime_config()
     assert configured.default_timeout_seconds == 120.0
+    assert configured.mfi_market_draft_timeout_seconds == 210.0
     assert configured.mfi_red_team_timeout_seconds == 240.0
     assert configured.max_retries == 3
 
@@ -46,6 +50,7 @@ def test_llm_runtime_defaults_and_overrides(monkeypatch) -> None:
         ("LLM_TIMEOUT_SECONDS", "zero"),
         ("LLM_TIMEOUT_SECONDS", "NaN"),
         ("LLM_TIMEOUT_SECONDS", "0"),
+        ("MFI_MARKET_DRAFT_TIMEOUT_SECONDS", "601"),
         ("MFI_RED_TEAM_TIMEOUT_SECONDS", "601"),
         ("LLM_MAX_RETRIES", "-1"),
         ("LLM_MAX_RETRIES", "11"),
@@ -94,6 +99,57 @@ def test_vertex_clients_are_cached_by_effective_settings(monkeypatch) -> None:
     assert red_team_a is red_team_b
     assert default_a is not red_team_a
     assert [item["timeout"] for item in created] == [90.0, 180.0]
+
+
+def test_runtime_status_exposes_sanitized_market_deadline(monkeypatch) -> None:
+    monkeypatch.setenv("MFI_MARKET_DRAFT_TIMEOUT_SECONDS", "225")
+    status = llm.llm_runtime_status().model_dump()
+    assert status == {
+        "configuration_status": "configured",
+        "default_timeout_seconds": 90.0,
+        "mfi_market_draft_timeout_seconds": 225.0,
+        "mfi_red_team_timeout_seconds": 180.0,
+        "max_retries": 2,
+        "error_code": None,
+        "error_field": None,
+    }
+
+
+def test_failed_market_call_updates_exact_preplanned_batch() -> None:
+    error = LLMCallError(
+        failure_code="llm_transport_error",
+        call_id="llm-0005-market",
+        node="market_recommendations_drafter",
+        operation="mfi.market_batch_drafting.v2",
+        stage="transport",
+        batch_id="market-draft-stable",
+    )
+    diagnostics = graph.reconcile_generation_diagnostics_for_llm_failure(
+        {
+            "generation_diagnostics": {
+                "draft_batches_total": 1,
+                "draft_batches_completed": 0,
+                "draft_batches_failed": 0,
+                "draft_batches": [
+                    {
+                        "batch_id": "market-draft-stable",
+                        "batch_kind": "selected_markets",
+                        "artifact_ids": ["Market A"],
+                        "status": "pending",
+                        "operation": "mfi.market_batch_drafting.v2",
+                        "prompt_character_count": 123_456,
+                        "configured_timeout_seconds": 180.0,
+                    }
+                ],
+            }
+        },
+        error,
+    )
+    assert diagnostics["draft_batches_total"] == 1
+    assert diagnostics["draft_batches_failed"] == 1
+    assert diagnostics["draft_batches"][0]["status"] == "failed"
+    assert diagnostics["draft_batches"][0]["call_id"] == "llm-0005-market"
+    assert diagnostics["draft_batches"][0]["failure_code"] == "llm_transport_error"
 
 
 def test_call_can_complete_after_sixty_seconds_with_red_team_deadline(

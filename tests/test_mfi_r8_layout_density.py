@@ -321,8 +321,12 @@ def test_repeated_recommendations_receive_dimension_specific_guidance() -> None:
 
 
 def test_prompt_contracts_declare_limits_and_never_request_modality() -> None:
+    from app.services.mfi_drafter.simple_orchestration import (
+        compose_market_draft_prompt,
+    )
+
     dimension_source = inspect.getsource(graph.node_dimension_drafter)
-    market_source = inspect.getsource(graph.node_market_recommendations_drafter)
+    market_source = inspect.getsource(compose_market_draft_prompt)
     executive_source = inspect.getsource(graph.node_executive_summary_drafter)
     assert "R8 CLAIM CEILINGS" in dimension_source
     assert "R8 CLAIM CEILINGS" in market_source

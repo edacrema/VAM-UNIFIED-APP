@@ -1391,6 +1391,9 @@ def test_full_fake_graph_uses_one_correction_and_three_semantic_reviews(
     assert diagnostics["correction_tasks_completed"] == 3
     assert diagnostics["correction_attempts"] == 1
     assert diagnostics["consolidated_correction_llm_calls"] == 1
+    assert diagnostics["consolidated_correction_prompt_character_count"] <= (
+        diagnostics["consolidated_correction_prompt_max_characters"]
+    )
     assert diagnostics["semantic_reviews_total"] == 3
     assert diagnostics["semantic_reviews_completed"] == 3
     assert diagnostics["semantic_reviews_failed"] == 0
@@ -1402,7 +1405,76 @@ def test_full_fake_graph_uses_one_correction_and_three_semantic_reviews(
     assert diagnostics["claim_substitutions"] == []
     assert diagnostics["delivery_contract_status"] == "validated"
     assert result["qa_review"]["status"] == "passed"
+    market_calls = [
+        item
+        for item in result["llm_diagnostics"]["calls"]
+        if item.get("operation") == "mfi.market_batch_drafting.v2"
+    ]
+    assert len(market_calls) == 3
+    assert all(
+        item["configured_timeout_seconds"] == 180.0 for item in market_calls
+    )
+    market_batch_rows = [
+        item
+        for item in diagnostics["draft_batches"]
+        if item.get("batch_kind") == "selected_markets"
+    ]
+    assert len(market_batch_rows) == 3
+    assert all(
+        item["prompt_character_count"]
+        <= diagnostics["market_draft_prompt_max_characters"]
+        for item in market_batch_rows
+    )
     visible_text = "\n".join(block.get("text") or "" for block in result["report_blocks"])
     assert "LLM dimension summary." in visible_text
     blocks = resolve_mfi_report_blocks(result)
     assert build_docx_bytes_from_report_blocks(blocks, visualizations={}).startswith(b"PK")
+
+
+def test_oversized_consolidated_correction_fails_before_model_call(
+    monkeypatch,
+) -> None:
+    target = {
+        "task_id": "oversized-target",
+        "artifact_type": "dimension",
+        "artifact_id": "Price",
+        "field_name": "recommendations",
+        "flag_ids": ["flag-one"],
+    }
+    monkeypatch.setattr(
+        graph,
+        "build_consolidated_correction_targets",
+        lambda *_args, **_kwargs: [target],
+    )
+    monkeypatch.setattr(
+        graph,
+        "consolidated_correction_prompt_payload",
+        lambda **_kwargs: {"oversized": "x" * 200_000},
+    )
+    monkeypatch.setattr(
+        graph,
+        "get_model",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Vertex must not be called for an oversized prompt")
+        ),
+    )
+    state = {
+        "deterministic_flags": [_flag("flag-one")],
+        "red_team_flags": [],
+        "generation_diagnostics": {},
+        "assessment_profile": {},
+        "dimension_narratives": {},
+        "market_narratives": {},
+        "executive_summary_narrative": {},
+        "context_evidence": [],
+        "claim_catalog": {},
+        "contextual_documents": [],
+    }
+
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_consolidated_correction(state)
+    assert caught.value.code == (
+        "mfi_consolidated_correction_prompt_contract_failed"
+    )
+    assert caught.value.stage == "consolidated_correction"
+    assert caught.value.character_count > caught.value.target_characters

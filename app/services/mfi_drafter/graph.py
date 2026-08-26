@@ -113,26 +113,29 @@ from .narrative import (
     validate_structured_narratives,
 )
 from .simple_orchestration import (
+    CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS,
     CONSOLIDATED_CORRECTION_OPERATION,
     CORRECTED_CLAIM_VERIFICATION_OPERATION,
     DIMENSION_DRAFT_OPERATION,
     EXECUTIVE_DRAFT_OPERATION,
     MARKET_DRAFT_OPERATION,
+    MARKET_DRAFT_MAX_PROMPT_CHARACTERS,
+    MARKET_PROMPT_PROJECTION_VERSION,
+    MarketDraftPromptContractError,
     NARRATIVE_ORCHESTRATION_VERSION,
     SEMANTIC_REVIEW_CONTRACT_VERSION,
     SEMANTIC_REVIEW_MAX_CHARACTERS,
     SEMANTIC_REVIEW_OPERATIONS,
     apply_consolidated_patches,
+    build_budgeted_market_draft_batches,
     build_consolidated_correction_targets,
     build_corrected_claim_verification_package,
     build_dimension_draft_batches,
-    build_market_draft_batches,
     build_semantic_review_packages,
     consolidated_correction_prompt_payload,
     dimension_batch_catalog,
     dimension_batch_prompt_profiles,
     flags_outside_targets,
-    market_batch_catalog,
     material_local_flags,
     unresolved_high_flags,
     validate_consolidated_correction_response,
@@ -272,6 +275,12 @@ def create_initial_state(
             "draft_batches_completed": 0,
             "draft_batches_failed": 0,
             "draft_batches": [],
+            "market_prompt_projection_version": MARKET_PROMPT_PROJECTION_VERSION,
+            "market_draft_prompt_max_characters": (
+                MARKET_DRAFT_MAX_PROMPT_CHARACTERS
+            ),
+            "market_draft_max_observed_prompt_characters": 0,
+            "market_draft_timeout_seconds": None,
             "semantic_reviews_total": 0,
             "semantic_reviews_completed": 0,
             "semantic_reviews_failed": 0,
@@ -280,6 +289,10 @@ def create_initial_state(
             "consolidated_correction_call_id": None,
             "consolidated_correction_field_count": 0,
             "consolidated_correction_llm_calls": 0,
+            "consolidated_correction_prompt_character_count": 0,
+            "consolidated_correction_prompt_max_characters": (
+                CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS
+            ),
             "corrected_claim_verification_status": "not_needed",
             "corrected_claim_verification_call_id": None,
             "context_extraction_mode": "not_started",
@@ -387,6 +400,14 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("draft_batches_completed", 0)
     diagnostics.setdefault("draft_batches_failed", 0)
     diagnostics.setdefault("draft_batches", [])
+    diagnostics.setdefault(
+        "market_prompt_projection_version", MARKET_PROMPT_PROJECTION_VERSION
+    )
+    diagnostics.setdefault(
+        "market_draft_prompt_max_characters", MARKET_DRAFT_MAX_PROMPT_CHARACTERS
+    )
+    diagnostics.setdefault("market_draft_max_observed_prompt_characters", 0)
+    diagnostics.setdefault("market_draft_timeout_seconds", None)
     diagnostics.setdefault("semantic_reviews_total", 0)
     diagnostics.setdefault("semantic_reviews_completed", 0)
     diagnostics.setdefault("semantic_reviews_failed", 0)
@@ -395,6 +416,11 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("consolidated_correction_call_id", None)
     diagnostics.setdefault("consolidated_correction_field_count", 0)
     diagnostics.setdefault("consolidated_correction_llm_calls", 0)
+    diagnostics.setdefault("consolidated_correction_prompt_character_count", 0)
+    diagnostics.setdefault(
+        "consolidated_correction_prompt_max_characters",
+        CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS,
+    )
     diagnostics.setdefault("corrected_claim_verification_status", "not_needed")
     diagnostics.setdefault("corrected_claim_verification_call_id", None)
     diagnostics.setdefault("context_extraction_mode", "not_started")
@@ -496,9 +522,39 @@ def reconcile_generation_diagnostics_for_llm_failure(
     """Return the live generation diagnostics implied by a failed LLM node."""
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     if error.node in {"dimension_drafter", "market_recommendations_drafter"}:
-        diagnostics["draft_batches_failed"] = int(
-            diagnostics.get("draft_batches_failed", 0) or 0
-        ) + 1
+        rows = [
+            item
+            for item in diagnostics.get("draft_batches", []) or []
+            if isinstance(item, Mapping)
+        ]
+        active = next(
+            (
+                item
+                for item in rows
+                if (
+                    error.batch_id
+                    and str(item.get("batch_id") or "") == str(error.batch_id)
+                )
+                or (
+                    not error.batch_id
+                    and item.get("status") == "pending"
+                    and str(item.get("operation") or "") == str(error.operation)
+                )
+            ),
+            None,
+        )
+        if active is not None:
+            _set_draft_batch_status(
+                diagnostics,
+                active,
+                status="failed",
+                call_id=error.call_id,
+                failure_code=error.failure_code,
+            )
+        else:
+            diagnostics["draft_batches_failed"] = int(
+                diagnostics.get("draft_batches_failed", 0) or 0
+            ) + 1
     if error.node in {"semantic_review", "corrected_claim_verification"}:
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
@@ -580,6 +636,28 @@ def reconcile_generation_diagnostics_for_blocked_failure(
 ) -> Dict[str, Any]:
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     diagnostics.setdefault("fallback_policy", "disabled_live")
+    if error.code == "mfi_market_draft_prompt_contract_failed":
+        diagnostics["market_prompt_projection_version"] = (
+            MARKET_PROMPT_PROJECTION_VERSION
+        )
+        diagnostics["market_draft_prompt_max_characters"] = int(
+            error.target_characters or MARKET_DRAFT_MAX_PROMPT_CHARACTERS
+        )
+        diagnostics["market_draft_max_observed_prompt_characters"] = int(
+            error.character_count or 0
+        )
+        diagnostics["draft_batches_failed"] = max(
+            1, int(diagnostics.get("draft_batches_failed", 0) or 0)
+        )
+    if error.code == "mfi_consolidated_correction_prompt_contract_failed":
+        diagnostics["consolidated_correction_status"] = "failed"
+        diagnostics["consolidated_correction_prompt_character_count"] = int(
+            error.character_count or 0
+        )
+        diagnostics["consolidated_correction_prompt_max_characters"] = int(
+            error.target_characters
+            or CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS
+        )
     if error.stage in {"semantic_review", "corrected_claim_verification"}:
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
@@ -695,6 +773,50 @@ def _record_artifact_mode(
     if artifact_id not in values:
         values.append(artifact_id)
     values.sort(key=lambda value: str(value).casefold())
+
+
+def _set_draft_batch_status(
+    diagnostics: Dict[str, Any],
+    batch: Mapping[str, Any],
+    *,
+    status: Literal["pending", "completed", "failed"],
+    call_id: Optional[str] = None,
+    failure_code: Optional[str] = None,
+) -> None:
+    """Update one preplanned batch without duplicating diagnostic rows."""
+    rows = [
+        deepcopy(dict(item))
+        for item in diagnostics.get("draft_batches", []) or []
+        if isinstance(item, Mapping)
+    ]
+    batch_id = str(batch.get("batch_id") or "")
+    replacement = {
+        "batch_id": batch_id,
+        "batch_kind": batch.get("batch_kind"),
+        "artifact_ids": list(batch.get("artifact_ids", []) or []),
+        "status": status,
+        "operation": batch.get("operation"),
+        "prompt_character_count": batch.get("prompt_character_count"),
+        "catalog_entry_count": batch.get("catalog_entry_count"),
+        "selection_counts": deepcopy(batch.get("selection_counts") or {}),
+        "projection_version": batch.get("projection_version"),
+        "configured_timeout_seconds": batch.get("configured_timeout_seconds"),
+        "call_id": call_id,
+        "failure_code": failure_code,
+    }
+    found = False
+    for index, row in enumerate(rows):
+        if str(row.get("batch_id") or "") == batch_id:
+            rows[index] = {**row, **replacement}
+            found = True
+            break
+    if not found:
+        rows.append(replacement)
+    diagnostics["draft_batches"] = rows
+    statuses = Counter(str(item.get("status") or "") for item in rows)
+    diagnostics["draft_batches_total"] = len(rows)
+    diagnostics["draft_batches_completed"] = int(statuses.get("completed", 0))
+    diagnostics["draft_batches_failed"] = int(statuses.get("failed", 0))
 
 
 def _record_ignored_model_identifiers(
@@ -1274,6 +1396,70 @@ def node_mfi_analysis(state: MFIReportState) -> dict:
         },
     )
     profile_payload = profile.model_dump()
+    claim_catalog = build_claim_catalog(profile_payload)
+    dimension_batches = build_dimension_draft_batches(profile_payload)
+    try:
+        market_batches = build_budgeted_market_draft_batches(
+            profile_payload,
+            claim_catalog,
+        )
+    except MarketDraftPromptContractError as exc:
+        raise MFIGenerationBlockedError(
+            "mfi_market_draft_prompt_contract_failed",
+            "A selected market exceeds the MFI market-drafting prompt limit.",
+            stage="mfi_analysis",
+            status_code=500,
+            artifact_type="market",
+            artifact_id=exc.market_name,
+            character_count=exc.character_count,
+            target_characters=exc.target_characters,
+        ) from exc
+    runtime = llm_runtime_config()
+    diagnostics = _generation_diagnostics(state)
+    diagnostics.update(
+        {
+            "market_prompt_projection_version": MARKET_PROMPT_PROJECTION_VERSION,
+            "market_draft_prompt_max_characters": (
+                MARKET_DRAFT_MAX_PROMPT_CHARACTERS
+            ),
+            "market_draft_max_observed_prompt_characters": max(
+                (
+                    int(batch.get("prompt_character_count") or 0)
+                    for batch in market_batches
+                ),
+                default=0,
+            ),
+            "market_draft_timeout_seconds": (
+                runtime.mfi_market_draft_timeout_seconds
+            ),
+            "draft_batches_total": 0,
+            "draft_batches_completed": 0,
+            "draft_batches_failed": 0,
+            "draft_batches": [],
+        }
+    )
+    for batch in dimension_batches:
+        _set_draft_batch_status(
+            diagnostics,
+            {
+                **batch,
+                "operation": DIMENSION_DRAFT_OPERATION,
+                "configured_timeout_seconds": runtime.default_timeout_seconds,
+            },
+            status="pending",
+        )
+    for batch in market_batches:
+        _set_draft_batch_status(
+            diagnostics,
+            {
+                **batch,
+                "operation": MARKET_DRAFT_OPERATION,
+                "configured_timeout_seconds": (
+                    runtime.mfi_market_draft_timeout_seconds
+                ),
+            },
+            status="pending",
+        )
     market_score_distribution = [
         {
             "market_name": market.market_name,
@@ -1289,8 +1475,9 @@ def node_mfi_analysis(state: MFIReportState) -> dict:
             profile.mean_mfi_across_assessed_markets
         ),
         "assessment_profile": profile_payload,
-        "claim_catalog": build_claim_catalog(profile_payload),
+        "claim_catalog": claim_catalog,
         "market_score_distribution": market_score_distribution,
+        "generation_diagnostics": diagnostics,
         "current_node": "mfi_analysis",
     }
 
@@ -2008,10 +2195,7 @@ def node_dimension_drafter(state: MFIReportState) -> dict:
     catalog = state.get("claim_catalog") or {}
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
-    batch_rows = list(diagnostics.get("draft_batches", []) or [])
-    diagnostics["draft_batches_total"] = int(
-        diagnostics.get("draft_batches_total", 0) or 0
-    ) + len(batches)
+    runtime = llm_runtime_config()
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
@@ -2115,21 +2299,17 @@ where CLAIM is:
         llm_calls += used_calls
         for dimension in batch["artifact_ids"]:
             _record_artifact_mode(diagnostics, "dimensions", dimension, "llm")
-        batch_rows.append(
+        _set_draft_batch_status(
+            diagnostics,
             {
-                "batch_id": batch["batch_id"],
-                "batch_kind": batch["batch_kind"],
-                "artifact_ids": list(batch["artifact_ids"]),
-                "status": "completed",
-                "call_id": traced.call_id,
+                **batch,
                 "operation": DIMENSION_DRAFT_OPERATION,
-            }
+                "configured_timeout_seconds": runtime.default_timeout_seconds,
+            },
+            status="completed",
+            call_id=traced.call_id,
         )
-        diagnostics["draft_batches_completed"] = int(
-            diagnostics.get("draft_batches_completed", 0) or 0
-        ) + 1
 
-    diagnostics["draft_batches"] = batch_rows
     updates = {
         "dimension_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
@@ -2144,79 +2324,36 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
     """Draft selected markets in deterministic batches of at most five."""
     logger.info("[MarketRecDrafter] Generating batched market narratives")
     profile = state.get("assessment_profile") or {}
-    batches = build_market_draft_batches(profile)
+    catalog = state.get("claim_catalog") or {}
+    try:
+        batches = build_budgeted_market_draft_batches(profile, catalog)
+    except MarketDraftPromptContractError as exc:
+        raise MFIGenerationBlockedError(
+            "mfi_market_draft_prompt_contract_failed",
+            "A selected market exceeds the MFI market-drafting prompt limit.",
+            stage="market_recommendations_drafter",
+            status_code=500,
+            artifact_type="market",
+            artifact_id=exc.market_name,
+            character_count=exc.character_count,
+            target_characters=exc.target_characters,
+        ) from exc
     if not batches:
         return {"market_narratives": {}, "current_node": "market_recommendations_drafter"}
-    llm = get_model()
+    runtime = llm_runtime_config()
+    market_timeout = runtime.mfi_market_draft_timeout_seconds
+    llm = get_model(timeout_seconds=market_timeout)
     narratives: Dict[str, Dict[str, Any]] = {}
-    catalog = state.get("claim_catalog") or {}
     llm_calls = 0
     diagnostics = _generation_diagnostics(state)
-    batch_rows = list(diagnostics.get("draft_batches", []) or [])
-    diagnostics["draft_batches_total"] = int(
-        diagnostics.get("draft_batches_total", 0) or 0
-    ) + len(batches)
+    diagnostics["market_draft_timeout_seconds"] = market_timeout
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
     for batch in batches:
-        prompt_catalog = market_batch_catalog(catalog, batch)
-        prompt = f"""Draft targeted MFI narratives for the requested markets.
-
-Use English only and valid JSON only. The prompt contains only the markets'
-weak dimensions and matching market-scoped evidence. Every number must exactly
-match a `formatted_value` in CLAIM_CATALOG and cite the associated `metric_id`.
-Do not calculate or infer values. Every claim must declare metric_ids,
-document_ids, scope, and polarity. Recommendations must cite evidence used by a
-priority issue. A limitation is optional and may be included only when it is
-specific to this market and cites market-scoped evidence. Do not repeat a
-generic assessment limitation.
-
-PROHIBITIONS:
-{json.dumps(list(NARRATIVE_PROHIBITIONS))}
-
-REQUESTED_MARKETS_IN_REQUIRED_ORDER:
-{json.dumps(batch['artifact_ids'])}
-
-MARKET_PROFILES:
-{json.dumps(batch['profiles'])}
-
-CLAIM_CATALOG:
-{json.dumps(prompt_catalog)}
-
-CONSTRAINTS:
-{json.dumps(list(NARRATIVE_PROMPT_CONSTRAINTS))}
-
-R8 CLAIM CEILINGS (maximums, not quotas; order by analytical importance):
-- {NARRATIVE_DENSITY_POLICY.market_priority_issues} priority issues;
-- {NARRATIVE_DENSITY_POLICY.market_recommendations} linked recommendations;
-- {NARRATIVE_DENSITY_POLICY.market_limitations} market-specific limitation.
-
-Return:
-{{
-  "markets": [
-    {{
-      "market_name": "exact requested market name",
-      "narrative": {{
-        "priority_issues": [CLAIM],
-        "recommended_interventions": [CLAIM],
-        "limitations": [CLAIM]
-      }}
-    }}
-  ]
-}}
-where CLAIM is:
-{{
-  "text": "...",
-  "claim_kind": "finding|recommendation|limitation",
-  "metric_ids": ["ledger ids"],
-  "document_ids": [],
-  "scope": "market",
-  "polarity": "favorable|unfavorable|neutral|descriptive"
-}}
-"""
+        prompt = str(batch["prompt"])
         traced, used_calls = _invoke_json_with_one_normalization(
             trace=trace,
             model=llm,
@@ -2230,6 +2367,8 @@ where CLAIM is:
                 result,
                 batch=batch,
             ),
+            timeout_seconds=market_timeout,
+            max_retries=runtime.max_retries,
             batch_id=str(batch["batch_id"]),
         )
         result = traced.payload
@@ -2238,21 +2377,17 @@ where CLAIM is:
         llm_calls += used_calls
         for market_name in batch["artifact_ids"]:
             _record_artifact_mode(diagnostics, "markets", market_name, "llm")
-        batch_rows.append(
+        _set_draft_batch_status(
+            diagnostics,
             {
-                "batch_id": batch["batch_id"],
-                "batch_kind": batch["batch_kind"],
-                "artifact_ids": list(batch["artifact_ids"]),
-                "status": "completed",
-                "call_id": traced.call_id,
+                **batch,
                 "operation": MARKET_DRAFT_OPERATION,
-            }
+                "configured_timeout_seconds": market_timeout,
+            },
+            status="completed",
+            call_id=traced.call_id,
         )
-        diagnostics["draft_batches_completed"] = int(
-            diagnostics.get("draft_batches_completed", 0) or 0
-        ) + 1
 
-    diagnostics["draft_batches"] = batch_rows
     updates = {
         "market_narratives": narratives,
         "llm_calls": state.get("llm_calls", 0) + llm_calls,
@@ -2500,6 +2635,9 @@ def node_semantic_review(state: MFIReportState) -> dict:
     flags: List[Dict[str, Any]] = []
     calls = 0
     review_rows: List[Dict[str, Any]] = []
+    runtime = llm_runtime_config()
+    review_timeout = runtime.mfi_red_team_timeout_seconds
+    review_model = get_model(timeout_seconds=review_timeout)
     for review in reviews:
         character_count = int(review["character_count"])
         if character_count > SEMANTIC_REVIEW_MAX_CHARACTERS:
@@ -2518,7 +2656,7 @@ def node_semantic_review(state: MFIReportState) -> dict:
         operation = SEMANTIC_REVIEW_OPERATIONS[str(review["section"])]
         traced, used_calls = _invoke_json_with_one_normalization(
             trace=trace,
-            model=get_model(),
+            model=review_model,
             messages=[HumanMessage(content=_semantic_review_prompt(review))],
             node="semantic_review",
             operation=operation,
@@ -2529,6 +2667,8 @@ def node_semantic_review(state: MFIReportState) -> dict:
                 payload, review=review
             ),
             batch_id=str(review["review_id"]),
+            timeout_seconds=review_timeout,
+            max_retries=runtime.max_retries,
         )
         calls += used_calls
         flags.extend(traced.value)
@@ -2542,6 +2682,7 @@ def node_semantic_review(state: MFIReportState) -> dict:
                 "character_count": character_count,
                 "claim_count": len(review.get("claim_ids", [])),
                 "finding_count": len(traced.value),
+                "configured_timeout_seconds": review_timeout,
             }
         )
         diagnostics["semantic_reviews_completed"] = int(
@@ -2604,6 +2745,11 @@ finding, use only authorized evidence, and respect the supplied field contract.
 Do not return claim IDs or application validation metadata; the application
 reassigns them after merge.
 
+Each target's artifact_context_id points to one shared read-only artifact in
+artifact_contexts and to its allowed metric/document IDs in
+artifact_authorizations. Evidence values are defined once in the shared
+authorized_claim_catalog and authorized_documents collections.
+
 CORRECTION_PACKAGE:
 {json.dumps(payload)}
 
@@ -2637,14 +2783,31 @@ def node_consolidated_correction(state: MFIReportState) -> dict:
         documents=state.get("contextual_documents", []),
     )
     diagnostics = _generation_diagnostics(state)
+    prompt = _consolidated_correction_prompt(payload)
+    prompt_character_count = len(prompt)
     diagnostics.update(
         {
             "consolidated_correction_status": "pending",
             "consolidated_correction_field_count": len(targets),
             "correction_tasks_total": len(targets),
             "active_correction_task": "consolidated",
+            "consolidated_correction_prompt_character_count": (
+                prompt_character_count
+            ),
         }
     )
+    if prompt_character_count > CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS:
+        raise MFIGenerationBlockedError(
+            "mfi_consolidated_correction_prompt_contract_failed",
+            "The consolidated correction package exceeded the safety limit.",
+            stage="consolidated_correction",
+            status_code=500,
+            task_id="consolidated",
+            artifact_type="narrative_fields",
+            artifact_id="consolidated",
+            character_count=prompt_character_count,
+            target_characters=CONSOLIDATED_CORRECTION_MAX_PROMPT_CHARACTERS,
+        )
     history = _start_correction_attempt(
         history=list(state.get("correction_history", []) or []),
         flags=flags,
@@ -2657,10 +2820,12 @@ def node_consolidated_correction(state: MFIReportState) -> dict:
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
+    runtime = llm_runtime_config()
+    correction_timeout = runtime.mfi_red_team_timeout_seconds
     traced, call_count = _invoke_json_with_one_normalization(
         trace=trace,
-        model=get_model(),
-        messages=[HumanMessage(content=_consolidated_correction_prompt(payload))],
+        model=get_model(timeout_seconds=correction_timeout),
+        messages=[HumanMessage(content=prompt)],
         node="consolidated_correction",
         operation=CONSOLIDATED_CORRECTION_OPERATION,
         artifact_type="narrative_fields",
@@ -2672,6 +2837,8 @@ def node_consolidated_correction(state: MFIReportState) -> dict:
             ignored_metadata_fields=ignored_metadata_fields,
         ),
         task_id="consolidated",
+        timeout_seconds=correction_timeout,
+        max_retries=runtime.max_retries,
     )
     try:
         merged = apply_consolidated_patches(
@@ -2779,9 +2946,11 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
         run_id=str(state.get("run_id") or "mfi-direct"),
         initial=state.get("llm_diagnostics"),
     )
+    runtime = llm_runtime_config()
+    review_timeout = runtime.mfi_red_team_timeout_seconds
     traced, call_count = _invoke_json_with_one_normalization(
         trace=trace,
-        model=get_model(),
+        model=get_model(timeout_seconds=review_timeout),
         messages=[HumanMessage(content=_corrected_claim_verification_prompt(review))],
         node="corrected_claim_verification",
         operation=CORRECTED_CLAIM_VERIFICATION_OPERATION,
@@ -2792,6 +2961,8 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
             payload, review=review
         ),
         batch_id=str(review["review_id"]),
+        timeout_seconds=review_timeout,
+        max_retries=runtime.max_retries,
     )
     retained = flags_outside_targets(state.get("red_team_flags", []), targets)
     red_team_flags = [*retained, *traced.value]
@@ -4452,6 +4623,9 @@ def run_mfi_report_generation(
             "mfi_deployment_revision": control.deployment_revision,
             "mfi_country": country,
             "mfi_llm_timeout_seconds": runtime.default_timeout_seconds,
+            "mfi_market_draft_timeout_seconds": (
+                runtime.mfi_market_draft_timeout_seconds
+            ),
             "mfi_red_team_timeout_seconds": runtime.mfi_red_team_timeout_seconds,
             "mfi_llm_max_retries": runtime.max_retries,
         },
@@ -4468,9 +4642,8 @@ def run_mfi_report_generation(
     
     agent = build_graph(on_step=on_step)
     try:
-        # Three bounded correction cycles plus final delivery exceed LangGraph's
-        # conservative default of 25 supersteps in the worst case.  The graph's own
-        # MAX_CORRECTION_ATTEMPTS remains the controlling limit.
+        # The complete analytical, drafting, review, optional correction, and delivery
+        # path exceeds LangGraph's conservative default of 25 supersteps.
         with llm_trace_session(
             service="mfi-drafter",
             run_id=initial_state["run_id"],
@@ -4526,6 +4699,18 @@ def run_mfi_report_generation(
             "mfi_draft_batches_completed": diagnostics.get(
                 "draft_batches_completed", 0
             ),
+            "mfi_market_prompt_projection_version": diagnostics.get(
+                "market_prompt_projection_version"
+            ),
+            "mfi_market_draft_prompt_max_characters": diagnostics.get(
+                "market_draft_prompt_max_characters", 0
+            ),
+            "mfi_market_draft_max_observed_prompt_characters": diagnostics.get(
+                "market_draft_max_observed_prompt_characters", 0
+            ),
+            "mfi_market_draft_timeout_seconds": diagnostics.get(
+                "market_draft_timeout_seconds"
+            ),
             "mfi_semantic_reviews_total": diagnostics.get(
                 "semantic_reviews_total", 0
             ),
@@ -4537,6 +4722,9 @@ def run_mfi_report_generation(
             ),
             "mfi_consolidated_correction_field_count": diagnostics.get(
                 "consolidated_correction_field_count", 0
+            ),
+            "mfi_consolidated_correction_prompt_character_count": diagnostics.get(
+                "consolidated_correction_prompt_character_count", 0
             ),
             "mfi_corrected_claim_verification_status": diagnostics.get(
                 "corrected_claim_verification_status"

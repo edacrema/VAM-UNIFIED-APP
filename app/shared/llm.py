@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 90.0
+DEFAULT_MFI_MARKET_DRAFT_TIMEOUT_SECONDS = 180.0
 DEFAULT_MFI_RED_TEAM_TIMEOUT_SECONDS = 180.0
 DEFAULT_LLM_MAX_RETRIES = 2
 MAX_LLM_TIMEOUT_SECONDS = 600.0
@@ -40,6 +41,10 @@ class LLMRuntimeConfig(BaseModel):
     model: str
     location: str
     default_timeout_seconds: float = Field(gt=0, le=MAX_LLM_TIMEOUT_SECONDS)
+    mfi_market_draft_timeout_seconds: float = Field(
+        gt=0,
+        le=MAX_LLM_TIMEOUT_SECONDS,
+    )
     mfi_red_team_timeout_seconds: float = Field(
         gt=0,
         le=MAX_LLM_TIMEOUT_SECONDS,
@@ -53,6 +58,7 @@ class LLMRuntimeStatus(BaseModel):
 
     configuration_status: Literal["configured", "invalid"]
     default_timeout_seconds: Optional[float] = None
+    mfi_market_draft_timeout_seconds: Optional[float] = None
     mfi_red_team_timeout_seconds: Optional[float] = None
     max_retries: Optional[int] = None
     error_code: Optional[str] = None
@@ -147,6 +153,10 @@ def llm_runtime_config() -> LLMRuntimeConfig:
             "LLM_TIMEOUT_SECONDS",
             DEFAULT_LLM_TIMEOUT_SECONDS,
         ),
+        mfi_market_draft_timeout_seconds=_float_setting(
+            "MFI_MARKET_DRAFT_TIMEOUT_SECONDS",
+            DEFAULT_MFI_MARKET_DRAFT_TIMEOUT_SECONDS,
+        ),
         mfi_red_team_timeout_seconds=_float_setting(
             "MFI_RED_TEAM_TIMEOUT_SECONDS",
             DEFAULT_MFI_RED_TEAM_TIMEOUT_SECONDS,
@@ -169,6 +179,9 @@ def llm_runtime_status() -> LLMRuntimeStatus:
     return LLMRuntimeStatus(
         configuration_status="configured",
         default_timeout_seconds=config.default_timeout_seconds,
+        mfi_market_draft_timeout_seconds=(
+            config.mfi_market_draft_timeout_seconds
+        ),
         mfi_red_team_timeout_seconds=config.mfi_red_team_timeout_seconds,
         max_retries=config.max_retries,
     )

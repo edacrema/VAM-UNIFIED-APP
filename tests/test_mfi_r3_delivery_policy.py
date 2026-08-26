@@ -296,8 +296,16 @@ def test_the_market_prompt_no_longer_requests_a_modality_conclusion() -> None:
 )
 def test_every_prompt_carries_the_prohibitions(node_name) -> None:
     import inspect
+    from app.services.mfi_drafter.simple_orchestration import (
+        compose_market_draft_prompt,
+    )
 
-    source = inspect.getsource(getattr(graph, node_name))
+    target = (
+        compose_market_draft_prompt
+        if node_name == "node_market_recommendations_drafter"
+        else getattr(graph, node_name)
+    )
+    source = inspect.getsource(target)
 
     assert "NARRATIVE_PROHIBITIONS" in source
 
