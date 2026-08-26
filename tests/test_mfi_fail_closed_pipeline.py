@@ -370,6 +370,79 @@ def test_corrected_claim_verification_uses_exact_prompt_boundary(
         assert diagnostics["corrected_claim_verification_max_characters"] == 400_000
 
 
+def test_corrected_claim_verification_persists_success_before_final_qa_policy(
+    monkeypatch,
+) -> None:
+    review = {
+        "review_id": "corrected-claims-verification",
+        "section": "corrected_claims",
+        "claim_ids": ["dimension.price.geography.2"],
+        "character_count": 41,
+        "package": {
+            "claims": [],
+            "evidence_by_metric_id": [],
+            "accepted_context": [],
+            "cited_documents": [],
+        },
+    }
+    residual = {
+        "flag_id": "semantic-data-mismatch-residual",
+        "source": "red_team",
+        "code": "semantic_data_mismatch",
+        "severity": "high",
+        "artifact_type": "dimension",
+        "artifact_id": "Price",
+        "field_name": "geographic_patterns",
+        "claim_id": "dimension.price.geography.2",
+        "message": "A material mismatch remains.",
+        "repairable": True,
+    }
+    monkeypatch.setattr(
+        graph, "build_corrected_claim_verification_package", lambda **_kwargs: review
+    )
+    monkeypatch.setattr(graph, "llm_runtime_config", _semantic_runtime)
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        graph,
+        "get_trace_session",
+        lambda **_kwargs: SimpleNamespace(snapshot=lambda: {"calls": []}),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_invoke_json_with_one_normalization",
+        lambda **_kwargs: (
+            SimpleNamespace(call_id="verification-success", value=[residual]),
+            1,
+        ),
+    )
+    result = graph.node_corrected_claim_verification(
+        {
+            "run_id": "mfi-verification-persistence",
+            "correction_targets": [
+                {
+                    "task_id": "dimension-price-geography",
+                    "artifact_type": "dimension",
+                    "artifact_id": "Price",
+                    "field_name": "geographic_patterns",
+                }
+            ],
+            "generation_diagnostics": {},
+            "llm_diagnostics": {},
+            "red_team_flags": [],
+            "deterministic_flags": [],
+            "correction_history": [],
+        }
+    )
+
+    assert result["red_team_flags"] == [residual]
+    diagnostics = result["generation_diagnostics"]
+    assert diagnostics["corrected_claim_verification_status"] == "completed"
+    assert diagnostics["corrected_claim_verification_call_id"] == (
+        "verification-success"
+    )
+    assert diagnostics["corrected_claim_verification_package_character_count"] == 41
+
+
 def test_field_only_geographic_patch_merges_without_requiring_summary() -> None:
     original = _dimension_narrative()
     task = build_sequential_correction_tasks(

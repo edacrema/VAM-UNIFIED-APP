@@ -99,6 +99,7 @@ from .narrative import (
     build_claim_catalog,
     build_qa_review,
     apply_final_qa_annotations,
+    classify_final_qa_flags,
     compact_catalog,
     dimension_catalog_ids,
     executive_catalog_ids,
@@ -318,6 +319,12 @@ def create_initial_state(
             "unresolved_high_count": 0,
             "unresolved_medium_count": 0,
             "unresolved_low_count": 0,
+            "blocking_high_count": 0,
+            "unverified_figure_flag_count": 0,
+            "unverified_figure_claim_count": 0,
+            "unverified_figure_flag_ids": [],
+            "unverified_figure_values": [],
+            "delivery_qa_status": "not_evaluated",
             "retrievers": {},
             "claim_identity_authority": CLAIM_IDENTITY_AUTHORITY,
             "claim_identity_version": CLAIM_IDENTITY_VERSION,
@@ -454,6 +461,12 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     diagnostics.setdefault("unresolved_high_count", 0)
     diagnostics.setdefault("unresolved_medium_count", 0)
     diagnostics.setdefault("unresolved_low_count", 0)
+    diagnostics.setdefault("blocking_high_count", 0)
+    diagnostics.setdefault("unverified_figure_flag_count", 0)
+    diagnostics.setdefault("unverified_figure_claim_count", 0)
+    diagnostics.setdefault("unverified_figure_flag_ids", [])
+    diagnostics.setdefault("unverified_figure_values", [])
+    diagnostics.setdefault("delivery_qa_status", "not_evaluated")
     diagnostics.setdefault("retrievers", {})
     diagnostics.setdefault("claim_substitutions", [])
     diagnostics.setdefault("unmatched_high_claim_ids", [])
@@ -674,6 +687,15 @@ def reconcile_generation_diagnostics_for_blocked_failure(
 ) -> Dict[str, Any]:
     diagnostics = deepcopy(dict(metadata.get("generation_diagnostics", {}) or {}))
     diagnostics.setdefault("fallback_policy", "disabled_live")
+    diagnostics.setdefault("delivery_qa_status", "not_evaluated")
+    diagnostics.setdefault("blocking_high_count", 0)
+    diagnostics.setdefault("unverified_figure_flag_count", 0)
+    diagnostics.setdefault("unverified_figure_claim_count", 0)
+    diagnostics.setdefault("unverified_figure_flag_ids", [])
+    diagnostics.setdefault("unverified_figure_values", [])
+    if error.code == "mfi_narrative_qa_unresolved":
+        diagnostics["delivery_qa_status"] = "blocked"
+        diagnostics["blocking_high_count"] = int(error.target_count or 0)
     if error.code == "mfi_market_draft_prompt_contract_failed":
         diagnostics["market_prompt_projection_version"] = (
             MARKET_PROMPT_PROJECTION_VERSION
@@ -796,6 +818,8 @@ def reconcile_generation_diagnostics_for_blocked_failure(
     diagnostics["delivery_contract_status"] = (
         "failed" if error.stage == "finalize_delivery" else "not_validated"
     )
+    if error.stage in {"finalize_qa", "finalize_delivery"}:
+        diagnostics["delivery_qa_status"] = "blocked"
     qa_flags = []
     qa_review = metadata.get("qa_review")
     if isinstance(qa_review, Mapping):
@@ -3187,7 +3211,6 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
     retained = flags_outside_targets(state.get("red_team_flags", []), targets)
     red_team_flags = [*retained, *traced.value]
     combined = [*state.get("deterministic_flags", []), *red_team_flags]
-    high = unresolved_high_flags(combined)
     diagnostics = _generation_diagnostics(state)
     diagnostics.update(
         {
@@ -3209,8 +3232,6 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
         combined,
         close_pending_execution=True,
     )
-    if high:
-        _raise_unresolved_qa(state, high)
     return {
         "red_team_flags": red_team_flags,
         "correction_history": history,
@@ -4225,6 +4246,7 @@ def _raise_unresolved_qa(state: MFIReportState, flags: Sequence[Mapping[str, Any
         stage="finalize_qa",
         status_code=502,
         attempt=int(state.get("correction_attempts", 0) or 0),
+        target_count=len(flags),
     )
 
 
@@ -4584,13 +4606,10 @@ def route_correction_queue(state: MFIReportState) -> Literal["more", "validate"]
 
 
 def node_finalize_qa(state: MFIReportState) -> dict:
-    """Finalize when no high-severity finding remains."""
+    """Apply the final delivery policy after the single correction boundary."""
     deterministic_flags = list(state.get("deterministic_flags", []) or [])
     red_team_flags = list(state.get("red_team_flags", []) or [])
     combined = [*deterministic_flags, *red_team_flags]
-    high = unresolved_high_flags(combined)
-    if high:
-        _raise_unresolved_qa(state, high)
     diagnostics = _generation_diagnostics(state)
     try:
         (
@@ -4612,6 +4631,29 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         canonical_executive,
         canonical_context,
     )
+    final_partition = classify_final_qa_flags(
+        combined,
+        dimension_narratives=canonical_dimensions,
+        market_narratives=canonical_markets,
+        executive_narrative=canonical_executive,
+        correction_completed=(
+            diagnostics.get("consolidated_correction_status") == "completed"
+            and int(state.get("correction_attempts", 0) or 0) >= 1
+        ),
+        corrected_verification_completed=(
+            diagnostics.get("corrected_claim_verification_status") == "completed"
+        ),
+    )
+    blocking_high = list(final_partition["blocking_high_flags"])
+    if blocking_high:
+        _raise_unresolved_qa(state, blocking_high)
+    final_flags = list(final_partition["flags"])
+    deterministic_flags = [
+        flag for flag in final_flags if flag.get("source") == "deterministic"
+    ]
+    red_team_flags = [
+        flag for flag in final_flags if flag.get("source") != "deterministic"
+    ]
     context_status = reconcile_context_status(
         state.get("context_status") or not_attempted_context_status().model_dump(),
         documents=list(state.get("contextual_documents", []) or []),
@@ -4619,7 +4661,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
     )
     correction_history = _reconcile_correction_history(
         list(state.get("correction_history", []) or []),
-        combined,
+        final_flags,
         close_pending_execution=True,
     )
     review = build_qa_review(
@@ -4655,6 +4697,20 @@ def node_finalize_qa(state: MFIReportState) -> dict:
             "unresolved_high_count": int(severity_counts.get("high", 0)),
             "unresolved_medium_count": int(severity_counts.get("medium", 0)),
             "unresolved_low_count": int(severity_counts.get("low", 0)),
+            "blocking_high_count": len(blocking_high),
+            "unverified_figure_flag_count": len(
+                final_partition["unverified_figure_flag_ids"]
+            ),
+            "unverified_figure_claim_count": len(
+                final_partition["unverified_figure_claim_ids"]
+            ),
+            "unverified_figure_flag_ids": list(
+                final_partition["unverified_figure_flag_ids"]
+            ),
+            "unverified_figure_values": list(
+                final_partition["unverified_figure_values"]
+            ),
+            "delivery_qa_status": review.get("status", "not_evaluated"),
             "claim_substitutions": [],
             "unmatched_high_claim_ids": [],
         }
@@ -4670,6 +4726,7 @@ def node_finalize_qa(state: MFIReportState) -> dict:
         "generation_diagnostics": diagnostics,
         "claim_substitutions": [],
         "deterministic_flags": deterministic_flags,
+        "red_team_flags": red_team_flags,
         "correction_targets": [],
         "current_node": "finalize_qa",
     }
@@ -4689,17 +4746,31 @@ def node_finalize_delivery(state: MFIReportState) -> dict:
         )
     except MFIClaimIdentityError as exc:
         raise claim_identity_blocked(str(exc), stage="finalize_delivery") from exc
-    if unresolved_high_flags(
-        [*state.get("deterministic_flags", []), *state.get("red_team_flags", [])]
+    final_partition = classify_final_qa_flags(
+        [*state.get("deterministic_flags", []), *state.get("red_team_flags", [])],
+        dimension_narratives=state.get("dimension_narratives", {}),
+        market_narratives=state.get("market_narratives", {}),
+        executive_narrative=state.get("executive_summary_narrative", {}),
+        correction_completed=(
+            diagnostics.get("consolidated_correction_status") == "completed"
+            and int(state.get("correction_attempts", 0) or 0) >= 1
+        ),
+        corrected_verification_completed=(
+            diagnostics.get("corrected_claim_verification_status") == "completed"
+        ),
+    )
+    if final_partition["blocking_high_flags"]:
+        _raise_unresolved_qa(state, final_partition["blocking_high_flags"])
+    if (
+        final_partition["deliverable_figure_flags"]
+        and (state.get("qa_review") or {}).get("status")
+        != "delivered_with_unverified_figures"
     ):
-        _raise_unresolved_qa(
-            state,
-            unresolved_high_flags(
-                [
-                    *state.get("deterministic_flags", []),
-                    *state.get("red_team_flags", []),
-                ]
-            ),
+        raise MFIGenerationBlockedError(
+            "mfi_report_delivery_contract_failed",
+            "Final QA status does not disclose retained unverified figures.",
+            stage="finalize_delivery",
+            status_code=500,
         )
     try:
         blocks = build_mfi_report_blocks(dict(state))
@@ -5055,6 +5126,16 @@ def run_mfi_report_generation(
             ),
             "mfi_delivery_contract_status": diagnostics.get(
                 "delivery_contract_status"
+            ),
+            "mfi_delivery_qa_status": diagnostics.get("delivery_qa_status"),
+            "mfi_blocking_high_count": diagnostics.get(
+                "blocking_high_count", 0
+            ),
+            "mfi_unverified_figure_flag_count": diagnostics.get(
+                "unverified_figure_flag_count", 0
+            ),
+            "mfi_unverified_figure_claim_count": diagnostics.get(
+                "unverified_figure_claim_count", 0
             ),
         },
     )

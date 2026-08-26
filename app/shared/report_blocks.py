@@ -725,9 +725,34 @@ def _mfi_claim_warning(
         if record.get("execution_outcome") not in {"pending", "not_executed"}
     ]
     substitution = qa_context.get("substitutions", {}).get(claim_id)
+    figure_flags = [
+        flag
+        for flag in flags
+        if flag.get("delivery_disposition")
+        == "retained_unverified_figure_for_delivery"
+    ]
+    figure_values = list(
+        dict.fromkeys(
+            token
+            for flag in figure_flags
+            for token in re.findall(
+                r"[-+]?\d+(?:\.\d+)?%?",
+                str(flag.get("actual_value") or ""),
+            )
+        )
+    )
     if substitution:
         disposition = "replaced_by_deterministic_fallback"
         lead = "[DO NOT USE ORIGINAL] Original draft withdrawn; deterministic fallback shown."
+    elif figure_flags:
+        disposition = "retained_unverified_figure_for_delivery"
+        rendered_values = ", ".join(f'“{value}”' for value in figure_values)
+        lead = (
+            "[FIGURE TO BE CHECKED — REVIEW REQUIRED] "
+            f"The figure{'s' if len(figure_values) != 1 else ''} "
+            f"{rendered_values or 'identified by QA'} could not be verified "
+            "against the cited evidence after the single correction attempt."
+        )
     elif severity == "medium":
         disposition = "retained_unverified_for_delivery"
         lead = "[UNVERIFIED] Unverified — review required."
@@ -866,6 +891,10 @@ def _mfi_flag_audit(
     )
     if claim_key in qa_context.get("substitutions", {}):
         disposition = "replaced_by_deterministic_fallback"
+    elif flag.get("delivery_disposition") == (
+        "retained_unverified_figure_for_delivery"
+    ):
+        disposition = "retained_unverified_figure_for_delivery"
     elif str(flag.get("flag_id")) in qa_context.get("rendered_flag_ids", set()):
         disposition = (
             "retained_unverified_for_delivery"
@@ -1584,7 +1613,15 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         ]
         substitutions = qa_context.get("substitutions", {})
         summary_parts = [
-            "Narrative QA completed with unresolved material issues.",
+            (
+                "Report delivered with figures requiring verification."
+                if any(
+                    flag.get("delivery_disposition")
+                    == "retained_unverified_figure_for_delivery"
+                    for flag in material_flags
+                )
+                else "Narrative QA completed with unresolved material issues."
+            ),
             (
                 f"High: {severity_counts['high']}; medium: "
                 f"{severity_counts['medium']}; low: {severity_counts['low']}; "
@@ -1599,6 +1636,18 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         if rendered_ids:
             summary_parts.append(
                 "Retained material claims carry visible claim-level review notices."
+            )
+        figure_claim_ids = {
+            str(flag.get("claim_id"))
+            for flag in material_flags
+            if flag.get("claim_id")
+            and flag.get("delivery_disposition")
+            == "retained_unverified_figure_for_delivery"
+        }
+        if figure_claim_ids:
+            summary_parts.append(
+                f"Figures in {len(figure_claim_ids)} claim(s) must be checked "
+                "against the source data before operational use."
             )
         if global_flags:
             summary_parts.append(

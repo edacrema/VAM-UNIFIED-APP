@@ -59,6 +59,13 @@ from .visualization import format_market_coverage
 
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?%?")
 _MATERIAL_SEVERITIES = {"high", "medium"}
+DELIVERABLE_UNVERIFIED_FIGURE_CODES = frozenset(
+    {
+        "numeric_value_mismatch",
+        "uncited_numeric_value",
+        "unit_mismatch",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1437,6 +1444,9 @@ def validate_structured_narratives(
                     claim_id=claim_id,
                     message="Percentage claim does not cite a proportion metric.",
                     metric_ids=cited_ids,
+                    actual_value=", ".join(
+                        token for token, _numeric, percent in numbers if percent
+                    ),
                 )
             )
         declared_scope = str(claim.get("scope") or "assessment")
@@ -1776,6 +1786,9 @@ def validate_evidence_bound_narratives(
                     claim_id=claim_id,
                     message="Percentage claim does not cite proportion evidence.",
                     metric_ids=cited_ids,
+                    actual_value=", ".join(
+                        token for token, _numeric, percent in numbers if percent
+                    ),
                 )
             )
         claim_flags = _deduplicate_flags(claim_flags)
@@ -2091,6 +2104,157 @@ def build_correction_targets(
     ]
 
 
+def _flag_numeric_values(
+    flag: Mapping[str, Any], claim_text: str
+) -> list[str]:
+    """Return exact flagged numeric tokens that are still present in the claim."""
+    flagged_tokens = [
+        token
+        for token, _value, _percent in _numeric_tokens(
+            str(flag.get("actual_value") or "")
+        )
+    ]
+    claim_tokens = {
+        token for token, _value, _percent in _numeric_tokens(claim_text)
+    }
+    return list(
+        dict.fromkeys(token for token in flagged_tokens if token in claim_tokens)
+    )
+
+
+def classify_final_qa_flags(
+    flags: Sequence[Mapping[str, Any]],
+    *,
+    dimension_narratives: Mapping[str, Any],
+    market_narratives: Mapping[str, Any],
+    executive_narrative: Mapping[str, Any],
+    correction_completed: bool,
+    corrected_verification_completed: bool,
+) -> dict[str, Any]:
+    """Partition final high findings into deliverable figures and blockers.
+
+    This is deliberately a final-delivery policy, not a relaxation of claim
+    validation.  A figure can be retained only after the single correction and
+    its verification have completed, and only when the application can map the
+    exact numeric token to one canonical reader-facing claim.
+    """
+    unique_flags = _deduplicate_flags(flags)
+    canonical_claim_index(
+        dimension_narratives,
+        market_narratives,
+        executive_narrative,
+    )
+    claim_text_by_id = {
+        str(claim.get("claim_id")): str(claim.get("text") or "")
+        for _location, claim in _iter_claims(
+            dimension_narratives,
+            market_narratives,
+            executive_narrative,
+        )
+        if claim.get("claim_id")
+    }
+    high_flags = [
+        flag for flag in unique_flags if str(flag.get("severity")) == "high"
+    ]
+    candidate_ids: set[str] = set()
+    values_by_flag_id: dict[str, list[str]] = {}
+    if correction_completed and corrected_verification_completed:
+        for flag in high_flags:
+            flag_id = str(flag.get("flag_id") or "")
+            claim_id = str(flag.get("claim_id") or "")
+            if (
+                str(flag.get("source")) != "deterministic"
+                or str(flag.get("code"))
+                not in DELIVERABLE_UNVERIFIED_FIGURE_CODES
+                or not flag_id
+                or not claim_id
+                or claim_id not in claim_text_by_id
+            ):
+                continue
+            numeric_values = _flag_numeric_values(
+                flag, claim_text_by_id[claim_id]
+            )
+            if not numeric_values:
+                continue
+            candidate_ids.add(flag_id)
+            values_by_flag_id[flag_id] = numeric_values
+
+    initially_blocking = [
+        flag
+        for flag in high_flags
+        if str(flag.get("flag_id") or "") not in candidate_ids
+    ]
+    blocked_claim_ids = {
+        str(flag.get("claim_id"))
+        for flag in initially_blocking
+        if flag.get("claim_id")
+    }
+    claim_id_by_flag_id = {
+        str(flag.get("flag_id") or ""): str(flag.get("claim_id") or "")
+        for flag in high_flags
+    }
+    deliverable_ids = {
+        flag_id
+        for flag_id in candidate_ids
+        if claim_id_by_flag_id.get(flag_id, "") not in blocked_claim_ids
+    }
+
+    annotated_flags: list[dict[str, Any]] = []
+    deliverable_flags: list[dict[str, Any]] = []
+    for raw_flag in unique_flags:
+        flag = dict(raw_flag)
+        flag_id = str(flag.get("flag_id") or "")
+        severity = str(flag.get("severity") or "")
+        if flag_id in deliverable_ids:
+            flag["delivery_disposition"] = (
+                "retained_unverified_figure_for_delivery"
+            )
+            deliverable_flags.append(flag)
+        elif severity == "high":
+            flag["delivery_disposition"] = "blocking"
+        elif severity == "medium":
+            flag["delivery_disposition"] = "retained_unverified_for_delivery"
+        elif severity == "low":
+            flag["delivery_disposition"] = "advisory"
+        annotated_flags.append(
+            MFINarrativeQAFlag.model_validate(flag).model_dump()
+        )
+
+    deliverable_flag_ids = {
+        str(flag.get("flag_id") or "") for flag in deliverable_flags
+    }
+    figure_values = list(
+        dict.fromkeys(
+            value
+            for flag in annotated_flags
+            if str(flag.get("flag_id") or "") in deliverable_flag_ids
+            for value in values_by_flag_id.get(str(flag.get("flag_id") or ""), [])
+        )
+    )
+    return {
+        "flags": annotated_flags,
+        "deliverable_figure_flags": [
+            flag
+            for flag in annotated_flags
+            if str(flag.get("flag_id") or "") in deliverable_flag_ids
+        ],
+        "blocking_high_flags": [
+            flag
+            for flag in annotated_flags
+            if flag.get("delivery_disposition") == "blocking"
+        ],
+        "unverified_figure_flag_ids": sorted(deliverable_flag_ids),
+        "unverified_figure_claim_ids": sorted(
+            {
+                str(flag.get("claim_id"))
+                for flag in deliverable_flags
+                if flag.get("claim_id")
+            }
+        ),
+        "unverified_figure_values": figure_values,
+    }
+
+
 def build_qa_review(
     deterministic_flags: Sequence[Mapping[str, Any]],
     red_team_flags: Sequence[Mapping[str, Any]],
@@ -2101,8 +2265,21 @@ def build_qa_review(
     flags = _deduplicate_flags([*deterministic_flags, *red_team_flags])
     material = [flag for flag in flags if flag["severity"] in _MATERIAL_SEVERITIES]
     low = [flag for flag in flags if flag["severity"] == "low"]
+    figure_flags = [
+        flag
+        for flag in flags
+        if flag.get("delivery_disposition")
+        == "retained_unverified_figure_for_delivery"
+    ]
+    blocking_high = any(
+        flag.get("severity") == "high"
+        and flag.get("delivery_disposition") == "blocking"
+        for flag in flags
+    )
     status = (
-        "completed_with_warnings"
+        "delivered_with_unverified_figures"
+        if figure_flags and not blocking_high
+        else "completed_with_warnings"
         if material
         else "passed_with_advisories"
         if low
@@ -2116,6 +2293,27 @@ def build_qa_review(
             for record in correction_history
         ],
         flags=[MFINarrativeQAFlag.model_validate(flag) for flag in flags],
+        unverified_figure_flag_ids=sorted(
+            str(flag.get("flag_id"))
+            for flag in figure_flags
+            if flag.get("flag_id")
+        ),
+        unverified_figure_claim_ids=sorted(
+            {
+                str(flag.get("claim_id"))
+                for flag in figure_flags
+                if flag.get("claim_id")
+            }
+        ),
+        unverified_figure_values=list(
+            dict.fromkeys(
+                token
+                for flag in figure_flags
+                for token, _value, _percent in _numeric_tokens(
+                    str(flag.get("actual_value") or "")
+                )
+            )
+        ),
     ).model_dump()
 
 

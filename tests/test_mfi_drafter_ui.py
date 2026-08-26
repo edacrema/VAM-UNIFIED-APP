@@ -286,6 +286,70 @@ def test_phase3_mean_priorities_limitations_and_qa_are_visible(monkeypatch):
     )
 
 
+def test_unverified_figures_are_delivered_as_warning_not_application_error(monkeypatch):
+    backend = FakeMFIBackend(
+        upload=FakeUpload(),
+        result={
+            "run_id": "mfi-run-figure-warning",
+            "country": "Gaza",
+            "mean_mfi_across_assessed_markets": 5.4,
+            "llm_calls": 14,
+            "report_blocks": [
+                {
+                    "type": "claim_warning",
+                    "text": "Figure to be checked.",
+                    "meta": {"claim_id": "dimension.price.geography.2"},
+                }
+            ],
+            "assessment_profile": {
+                "assessed_market_count": 27,
+                "priority_dimension_names": ["Price"],
+                "limitations": [],
+            },
+            "qa_review": {
+                "status": "delivered_with_unverified_figures",
+                "correction_attempts": 1,
+                "flags": [
+                    {
+                        "severity": "high",
+                        "code": "numeric_value_mismatch",
+                        "claim_id": "dimension.price.geography.2",
+                        "delivery_disposition": (
+                            "retained_unverified_figure_for_delivery"
+                        ),
+                    }
+                ],
+            },
+            "generation_diagnostics": {
+                "unverified_figure_claim_count": 1,
+                "unverified_figure_flag_count": 1,
+                "delivery_qa_status": "delivered_with_unverified_figures",
+            },
+        },
+    )
+    app = _app(monkeypatch, backend)
+
+    app = _element(app.button, "Generate report").click().run(timeout=20)
+
+    assert not app.exception
+    assert any(
+        metric.label == "Narrative QA"
+        and metric.value == "Delivered With Unverified Figures"
+        for metric in app.metric
+    )
+    assert any(
+        metric.label == "Figures to check" and metric.value == "1"
+        for metric in app.metric
+    )
+    assert any(
+        "Delivered with unverified figures" in warning.value
+        for warning in app.warning
+    )
+    assert not any(
+        "unresolved material issues" in error.value for error in app.error
+    )
+
+
 def test_r7_context_status_is_informational_or_warning_in_technical_details(monkeypatch):
     neutral_backend = FakeMFIBackend(
         upload=FakeUpload(),

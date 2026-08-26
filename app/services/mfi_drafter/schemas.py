@@ -909,6 +909,14 @@ class MFINarrativeQAFlag(BaseModel):
     repairable: bool = True
     review_batch_id: Optional[str] = None
     review_batch_ids: List[str] = Field(default_factory=list)
+    delivery_disposition: Optional[
+        Literal[
+            "blocking",
+            "retained_unverified_figure_for_delivery",
+            "retained_unverified_for_delivery",
+            "advisory",
+        ]
+    ] = None
 
 
 class MFIRedTeamFlagDraft(BaseModel):
@@ -1139,12 +1147,16 @@ class MFIQAReview(BaseModel):
         "passed",
         "passed_with_advisories",
         "completed_with_warnings",
+        "delivered_with_unverified_figures",
     ] = "not_recorded"
     correction_attempts: int = 0
     correction_history: List[MFICorrectionAttemptRecord] = Field(
         default_factory=list
     )
     flags: List[MFINarrativeQAFlag] = Field(default_factory=list)
+    unverified_figure_flag_ids: List[str] = Field(default_factory=list)
+    unverified_figure_claim_ids: List[str] = Field(default_factory=list)
+    unverified_figure_values: List[str] = Field(default_factory=list)
 
 
 class MFIReleaseControl(BaseModel):
@@ -1252,6 +1264,19 @@ class MFIGenerationDiagnostics(BaseModel):
     unresolved_high_count: int = 0
     unresolved_medium_count: int = 0
     unresolved_low_count: int = 0
+    blocking_high_count: int = Field(default=0, ge=0)
+    unverified_figure_flag_count: int = Field(default=0, ge=0)
+    unverified_figure_claim_count: int = Field(default=0, ge=0)
+    unverified_figure_flag_ids: List[str] = Field(default_factory=list)
+    unverified_figure_values: List[str] = Field(default_factory=list)
+    delivery_qa_status: Literal[
+        "not_evaluated",
+        "passed",
+        "passed_with_advisories",
+        "completed_with_warnings",
+        "delivered_with_unverified_figures",
+        "blocked",
+    ] = "not_evaluated"
     retrievers: Dict[str, str] = Field(default_factory=dict)
     claim_substitutions: List[Dict[str, Any]] = Field(default_factory=list)
     unmatched_high_claim_ids: List[str] = Field(default_factory=list)

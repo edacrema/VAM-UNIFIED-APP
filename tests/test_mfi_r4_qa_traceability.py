@@ -160,6 +160,77 @@ def test_multiple_material_flags_share_one_adjacent_claim_warning() -> None:
     assert [row["row_id"] for row in qa_table.meta["rows"]] == ["flag-b", "flag-a"]
 
 
+def test_unverified_figure_is_retained_with_adjacent_warning_and_docx_notice() -> None:
+    flag = _flag(
+        "numeric-16",
+        severity="high",
+        code="numeric_value_mismatch",
+        message="Numeric value 16 is not authorized by the cited evidence.",
+    )
+    flag["actual_value"] = "16"
+    flag["delivery_disposition"] = (
+        "retained_unverified_figure_for_delivery"
+    )
+    result = _result(
+        claim=_claim("The review identified 16 affected markets."),
+        flags=[flag],
+    )
+    result["qa_review"].update(
+        {
+            "status": "delivered_with_unverified_figures",
+            "correction_attempts": 1,
+            "unverified_figure_flag_ids": ["numeric-16"],
+            "unverified_figure_claim_ids": ["dimension.price.finding.1"],
+            "unverified_figure_values": ["16"],
+            "correction_history": [
+                {
+                    "attempt_number": 1,
+                    "artifact_type": "dimension",
+                    "artifact_id": "Price",
+                    "field_name": "key_findings",
+                    "claim_id": "dimension.price.finding.1",
+                    "flag_ids": ["numeric-16"],
+                    "flag_codes": ["numeric_value_mismatch"],
+                    "execution_outcome": "llm_completed",
+                    "validation_outcome": "unresolved",
+                }
+            ],
+        }
+    )
+
+    blocks = build_mfi_report_blocks(result)
+    claim_index = next(
+        index
+        for index, block in enumerate(blocks)
+        if block.type == "paragraph"
+        and (block.meta or {}).get("claim_id") == "dimension.price.finding.1"
+    )
+    assert blocks[claim_index + 1].type == "evidence_note"
+    warning = blocks[claim_index + 2]
+    assert warning.type == "claim_warning"
+    assert warning.meta["disposition"] == (
+        "retained_unverified_figure_for_delivery"
+    )
+    assert "FIGURE TO BE CHECKED" in warning.text
+    assert "“16”" in warning.text
+    assert "numeric_value_mismatch" in warning.text
+    assert "Repair attempted: yes; attempts: 1" in warning.text
+
+    qa_table = next(
+        block
+        for block in blocks
+        if block.type == "table" and (block.meta or {}).get("title") == "QA findings"
+    )
+    assert qa_table.meta["rows"][0]["raw_values"]["disposition"] == (
+        "retained_unverified_figure_for_delivery"
+    )
+    docx_text = _docx_text(
+        build_docx_bytes_from_report_blocks(blocks, visualizations={})
+    )
+    assert "FIGURE TO BE CHECKED" in docx_text
+    assert "Report delivered with figures requiring verification" in docx_text
+
+
 def test_high_claim_shows_withdrawal_and_never_exports_rejected_text() -> None:
     rejected = "Use MFI alone to choose cash assistance."
     replacement = "MFI findings do not determine transfer modality."

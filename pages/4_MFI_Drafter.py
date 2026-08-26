@@ -197,7 +197,10 @@ if isinstance(result, dict):
     }
     diagnostics = result.get("generation_diagnostics") or {}
     substitutions = diagnostics.get("claim_substitutions", []) or []
-    qa_columns = st.columns(5)
+    unverified_figure_claim_count = int(
+        diagnostics.get("unverified_figure_claim_count", 0) or 0
+    )
+    qa_columns = st.columns(6)
     qa_columns[0].metric("High QA findings", str(severity_counts["high"]))
     qa_columns[1].metric("Medium QA findings", str(severity_counts["medium"]))
     qa_columns[2].metric("Low QA findings", str(severity_counts["low"]))
@@ -205,19 +208,29 @@ if isinstance(result, dict):
         "Correction cycles", str(qa_review.get("correction_attempts") or 0)
     )
     qa_columns[4].metric("Withdrawn drafts", str(len(substitutions)))
+    qa_columns[5].metric(
+        "Figures to check", str(unverified_figure_claim_count)
+    )
     if material_qa_flags:
         claim_scoped = any(
             isinstance(block, dict) and block.get("type") == "claim_warning"
             for block in result.get("report_blocks", []) or []
         )
-        st.error(
-            "Narrative QA completed with unresolved material issues. "
-            + (
-                "Review the claim-level notices and final QA findings table."
-                if claim_scoped
-                else "Review the process-level notices and final QA findings table."
-            )
+        qa_location = (
+            "Review the claim-level notices and final QA findings table."
+            if claim_scoped
+            else "Review the process-level notices and final QA findings table."
         )
+        if qa_review.get("status") == "delivered_with_unverified_figures":
+            st.warning(
+                "Delivered with unverified figures. Check every marked figure "
+                f"against the source data before operational use. {qa_location}"
+            )
+        else:
+            st.error(
+                "Narrative QA completed with unresolved material issues. "
+                + qa_location
+            )
 
     def _preview() -> None:
         render_report_blocks(result.get("report_blocks"), visualizations=result.get("visualizations"))
