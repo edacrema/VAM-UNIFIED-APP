@@ -1721,7 +1721,7 @@ def test_oversized_consolidated_correction_fails_before_model_call(
     monkeypatch.setattr(
         graph,
         "consolidated_correction_prompt_payload",
-        lambda **_kwargs: {"oversized": "x" * 300_000},
+        lambda **_kwargs: {"oversized": "x" * 600_000},
     )
     monkeypatch.setattr(
         graph,
@@ -1750,7 +1750,7 @@ def test_oversized_consolidated_correction_fails_before_model_call(
     )
     assert caught.value.stage == "consolidated_correction"
     assert caught.value.character_count > caught.value.target_characters
-    assert caught.value.target_characters == 300_000
+    assert caught.value.target_characters == 600_000
     assert caught.value.target_count == 1
     diagnostics = graph.reconcile_generation_diagnostics_for_blocked_failure(
         state, caught.value
@@ -1758,3 +1758,10 @@ def test_oversized_consolidated_correction_fails_before_model_call(
     assert diagnostics["consolidated_correction_field_count"] == 1
     assert diagnostics["correction_tasks_total"] == 1
     assert diagnostics["consolidated_correction_llm_calls"] == 0
+    assert diagnostics["consolidated_correction_prompt_max_characters"] == 600_000
+    assert (
+        MFIGenerationDiagnostics.model_validate(
+            diagnostics
+        ).consolidated_correction_prompt_max_characters
+        == 600_000
+    )

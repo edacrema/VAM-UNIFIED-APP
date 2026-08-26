@@ -1198,7 +1198,7 @@ class MFIGenerationDiagnostics(BaseModel):
     consolidated_correction_llm_calls: int = Field(default=0, ge=0)
     consolidated_correction_prompt_character_count: int = Field(default=0, ge=0)
     consolidated_correction_prompt_max_characters: int = Field(
-        default=300_000, gt=0
+        default=600_000, gt=0
     )
     corrected_claim_verification_status: Literal[
         "not_needed", "pending", "completed", "failed"
