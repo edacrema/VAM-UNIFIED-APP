@@ -1204,6 +1204,15 @@ class MFIGenerationDiagnostics(BaseModel):
         "not_needed", "pending", "completed", "failed"
     ] = "not_needed"
     corrected_claim_verification_call_id: Optional[str] = None
+    corrected_claim_verification_package_character_count: int = Field(
+        default=0, ge=0
+    )
+    corrected_claim_verification_prompt_character_count: int = Field(
+        default=0, ge=0
+    )
+    corrected_claim_verification_max_characters: int = Field(
+        default=400_000, gt=0
+    )
     context_extraction_mode: Literal[
         "not_started",
         "llm",

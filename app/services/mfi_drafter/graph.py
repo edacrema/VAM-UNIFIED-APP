@@ -295,6 +295,11 @@ def create_initial_state(
             ),
             "corrected_claim_verification_status": "not_needed",
             "corrected_claim_verification_call_id": None,
+            "corrected_claim_verification_package_character_count": 0,
+            "corrected_claim_verification_prompt_character_count": 0,
+            "corrected_claim_verification_max_characters": (
+                SEMANTIC_REVIEW_MAX_CHARACTERS
+            ),
             "context_extraction_mode": "not_started",
             "context_classification_status": "not_started",
             "executive_summary_mode": "not_started",
@@ -423,6 +428,14 @@ def _generation_diagnostics(state: MFIReportState) -> Dict[str, Any]:
     )
     diagnostics.setdefault("corrected_claim_verification_status", "not_needed")
     diagnostics.setdefault("corrected_claim_verification_call_id", None)
+    diagnostics.setdefault(
+        "corrected_claim_verification_package_character_count", 0
+    )
+    diagnostics.setdefault("corrected_claim_verification_prompt_character_count", 0)
+    diagnostics.setdefault(
+        "corrected_claim_verification_max_characters",
+        SEMANTIC_REVIEW_MAX_CHARACTERS,
+    )
     diagnostics.setdefault("context_extraction_mode", "not_started")
     diagnostics.setdefault("context_classification_status", "not_started")
     diagnostics.setdefault("executive_summary_mode", "not_started")
@@ -558,11 +571,36 @@ def reconcile_generation_diagnostics_for_llm_failure(
     if error.node in {"semantic_review", "corrected_claim_verification"}:
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
-        diagnostics["semantic_reviews_failed"] = int(
-            diagnostics.get("semantic_reviews_failed", 0) or 0
-        ) + 1
-        if error.node == "corrected_claim_verification":
+        diagnostics["red_team_review_operation"] = "mfi.semantic_review.*.v2"
+        diagnostics["red_team_structured_output"] = True
+        diagnostics["red_team_package_target_characters"] = (
+            SEMANTIC_REVIEW_MAX_CHARACTERS
+        )
+        if error.node == "semantic_review":
+            rows = getattr(error, "mfi_semantic_review_diagnostics", None)
+            if rows:
+                diagnostics.update(_semantic_review_diagnostic_rollup(rows))
+            else:
+                diagnostics["semantic_reviews_failed"] = int(
+                    diagnostics.get("semantic_reviews_failed", 0) or 0
+                ) + 1
+        else:
             diagnostics["corrected_claim_verification_status"] = "failed"
+            diagnostics["corrected_claim_verification_call_id"] = error.call_id
+            verification = getattr(
+                error, "mfi_corrected_claim_verification_diagnostic", None
+            )
+            if isinstance(verification, Mapping):
+                diagnostics[
+                    "corrected_claim_verification_package_character_count"
+                ] = int(verification.get("package_character_count") or 0)
+                diagnostics[
+                    "corrected_claim_verification_prompt_character_count"
+                ] = int(verification.get("prompt_character_count") or 0)
+                diagnostics["corrected_claim_verification_max_characters"] = int(
+                    verification.get("target_characters")
+                    or SEMANTIC_REVIEW_MAX_CHARACTERS
+                )
     if error.node == "consolidated_correction":
         diagnostics["consolidated_correction_status"] = "failed"
         diagnostics["correction_tasks_failed"] = int(
@@ -669,11 +707,38 @@ def reconcile_generation_diagnostics_for_blocked_failure(
     if error.stage in {"semantic_review", "corrected_claim_verification"}:
         diagnostics["red_team_status"] = "failed"
         diagnostics["red_team_contract_version"] = SEMANTIC_REVIEW_CONTRACT_VERSION
-        diagnostics["semantic_reviews_failed"] = int(
-            diagnostics.get("semantic_reviews_failed", 0) or 0
-        ) + 1
-        if error.stage == "corrected_claim_verification":
+        diagnostics["red_team_review_operation"] = "mfi.semantic_review.*.v2"
+        diagnostics["red_team_structured_output"] = True
+        diagnostics["red_team_package_target_characters"] = int(
+            error.target_characters or SEMANTIC_REVIEW_MAX_CHARACTERS
+        )
+        if error.stage == "semantic_review":
+            rows = deepcopy(error.batch_diagnostics) or list(
+                diagnostics.get("semantic_reviews", []) or []
+            )
+            if rows:
+                diagnostics.update(_semantic_review_diagnostic_rollup(rows))
+            else:
+                diagnostics["semantic_reviews_total"] = 3
+                diagnostics["semantic_reviews_completed"] = 0
+                diagnostics["semantic_reviews_failed"] = 1
+            diagnostics["failed_red_team_batch"] = error.batch_id
+            diagnostics["failed_red_team_batch_kind"] = error.batch_kind
+            diagnostics["failed_red_team_character_count"] = error.character_count
+            diagnostics["red_team_package_within_target"] = False
+        else:
             diagnostics["corrected_claim_verification_status"] = "failed"
+            diagnostics["corrected_claim_verification_prompt_character_count"] = int(
+                error.character_count or 0
+            )
+            diagnostics["corrected_claim_verification_max_characters"] = int(
+                error.target_characters or SEMANTIC_REVIEW_MAX_CHARACTERS
+            )
+            verification_rows = deepcopy(error.batch_diagnostics)
+            if verification_rows:
+                diagnostics[
+                    "corrected_claim_verification_package_character_count"
+                ] = int(verification_rows[0].get("package_character_count") or 0)
     if error.stage == "consolidated_correction":
         diagnostics["consolidated_correction_status"] = "failed"
     if error.stage == "red_team":
@@ -2606,6 +2671,77 @@ Return exactly:
 """
 
 
+def _semantic_review_diagnostic_rollup(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Summarize the application-owned semantic-review execution rows."""
+    statuses = Counter(str(item.get("status") or "") for item in rows)
+    prompt_counts = [int(item.get("prompt_character_count") or 0) for item in rows]
+    return {
+        "semantic_reviews_total": len(rows),
+        "semantic_reviews_completed": int(statuses.get("completed", 0)),
+        "semantic_reviews_failed": int(statuses.get("failed", 0)),
+        "semantic_reviews": [deepcopy(dict(item)) for item in rows],
+        "red_team_package_character_count": sum(prompt_counts),
+        "red_team_package_target_characters": SEMANTIC_REVIEW_MAX_CHARACTERS,
+        "red_team_package_within_target": all(
+            count <= SEMANTIC_REVIEW_MAX_CHARACTERS for count in prompt_counts
+        ),
+    }
+
+
+def _prepare_semantic_review_prompts(
+    reviews: Sequence[Mapping[str, Any]],
+    *,
+    timeout_seconds: float,
+    prompt_builder: Optional[Callable[[Mapping[str, Any]], str]] = None,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build and measure every final review prompt before any model call."""
+    prompt_builder = prompt_builder or _semantic_review_prompt
+    prepared: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
+    for review in reviews:
+        section = str(review["section"])
+        operation = SEMANTIC_REVIEW_OPERATIONS[section]
+        prompt = prompt_builder(review)
+        package = review.get("package", {})
+        row = {
+            "review_id": str(review["review_id"]),
+            "section": section,
+            "operation": operation,
+            "status": "pending",
+            "call_id": None,
+            "package_character_count": int(review.get("character_count") or 0),
+            "prompt_character_count": len(prompt),
+            # Retained as the contract-measured value for older diagnostics readers.
+            "character_count": len(prompt),
+            "claim_count": len(review.get("claim_ids", []) or []),
+            "evidence_count": len(
+                package.get("evidence_by_metric_id", []) or []
+            ),
+            "context_statement_count": len(
+                package.get("accepted_context", []) or []
+            ),
+            "document_count": len(package.get("cited_documents", []) or []),
+            "finding_count": 0,
+            "target_characters": SEMANTIC_REVIEW_MAX_CHARACTERS,
+            "configured_timeout_seconds": timeout_seconds,
+            "failure_code": None,
+        }
+        prepared.append({**dict(review), "prompt": prompt, "operation": operation})
+        rows.append(row)
+    return prepared, rows
+
+
+def _attach_semantic_review_rows(
+    error: LLMCallError, rows: Sequence[Mapping[str, Any]]
+) -> None:
+    """Carry MFI-local review diagnostics to the async failure reconciler."""
+    error.mfi_semantic_review_diagnostics = [
+        deepcopy(dict(item)) for item in rows
+    ]
+
+
 def node_semantic_review(state: MFIReportState) -> dict:
     """Run exactly three application-owned semantic review sections."""
     logger.info("[SemanticReview] Reviewing overview, dimensions, and markets")
@@ -2648,6 +2784,39 @@ def node_semantic_review(state: MFIReportState) -> dict:
             status_code=500,
         ) from exc
 
+    runtime = llm_runtime_config()
+    review_timeout = runtime.mfi_red_team_timeout_seconds
+    prepared_reviews, review_rows = _prepare_semantic_review_prompts(
+        reviews,
+        timeout_seconds=review_timeout,
+    )
+    oversized = next(
+        (
+            (review, row)
+            for review, row in zip(prepared_reviews, review_rows)
+            if int(row["prompt_character_count"])
+            > SEMANTIC_REVIEW_MAX_CHARACTERS
+        ),
+        None,
+    )
+    if oversized is not None:
+        review, row = oversized
+        row["status"] = "failed"
+        row["failure_code"] = "mfi_semantic_review_contract_failed"
+        diagnostics.update(_semantic_review_diagnostic_rollup(review_rows))
+        diagnostics["red_team_status"] = "failed"
+        raise MFIGenerationBlockedError(
+            "mfi_semantic_review_contract_failed",
+            "A semantic review prompt exceeded the safety limit.",
+            stage="semantic_review",
+            status_code=500,
+            batch_id=str(review["review_id"]),
+            batch_kind=str(review["section"]),
+            character_count=int(row["prompt_character_count"]),
+            target_characters=SEMANTIC_REVIEW_MAX_CHARACTERS,
+            batch_diagnostics=review_rows,
+        )
+
     trace = get_trace_session(
         service="mfi-drafter",
         run_id=str(state.get("run_id") or "mfi-direct"),
@@ -2655,69 +2824,45 @@ def node_semantic_review(state: MFIReportState) -> dict:
     )
     flags: List[Dict[str, Any]] = []
     calls = 0
-    review_rows: List[Dict[str, Any]] = []
-    runtime = llm_runtime_config()
-    review_timeout = runtime.mfi_red_team_timeout_seconds
     review_model = get_model(timeout_seconds=review_timeout)
-    for review in reviews:
-        character_count = int(review["character_count"])
-        if character_count > SEMANTIC_REVIEW_MAX_CHARACTERS:
-            diagnostics["red_team_status"] = "failed"
-            diagnostics["semantic_reviews_failed"] = 1
-            raise MFIGenerationBlockedError(
-                "mfi_semantic_review_contract_failed",
-                "A semantic review package exceeded the safety limit.",
-                stage="semantic_review",
-                status_code=500,
+    for index, review in enumerate(prepared_reviews):
+        row = review_rows[index]
+        row["status"] = "in_progress"
+        try:
+            traced, used_calls = _invoke_json_with_one_normalization(
+                trace=trace,
+                model=review_model,
+                messages=[HumanMessage(content=str(review["prompt"]))],
+                node="semantic_review",
+                operation=str(review["operation"]),
+                artifact_type="review_section",
+                artifact_id=str(review["section"]),
+                correction_attempt=0,
+                validator=lambda payload, review=review: validate_semantic_review_response(
+                    payload, review=review
+                ),
                 batch_id=str(review["review_id"]),
-                batch_kind=str(review["section"]),
-                character_count=character_count,
-                target_characters=SEMANTIC_REVIEW_MAX_CHARACTERS,
+                timeout_seconds=review_timeout,
+                max_retries=runtime.max_retries,
             )
-        operation = SEMANTIC_REVIEW_OPERATIONS[str(review["section"])]
-        traced, used_calls = _invoke_json_with_one_normalization(
-            trace=trace,
-            model=review_model,
-            messages=[HumanMessage(content=_semantic_review_prompt(review))],
-            node="semantic_review",
-            operation=operation,
-            artifact_type="review_section",
-            artifact_id=str(review["section"]),
-            correction_attempt=0,
-            validator=lambda payload, review=review: validate_semantic_review_response(
-                payload, review=review
-            ),
-            batch_id=str(review["review_id"]),
-            timeout_seconds=review_timeout,
-            max_retries=runtime.max_retries,
-        )
+        except LLMCallError as exc:
+            row["status"] = "failed"
+            row["call_id"] = exc.call_id
+            row["failure_code"] = exc.failure_code
+            _attach_semantic_review_rows(exc, review_rows)
+            raise
         calls += used_calls
         flags.extend(traced.value)
-        review_rows.append(
+        row.update(
             {
-                "review_id": review["review_id"],
-                "section": review["section"],
-                "operation": operation,
                 "status": "completed",
                 "call_id": traced.call_id,
-                "character_count": character_count,
-                "claim_count": len(review.get("claim_ids", [])),
                 "finding_count": len(traced.value),
-                "configured_timeout_seconds": review_timeout,
             }
         )
-        diagnostics["semantic_reviews_completed"] = int(
-            diagnostics.get("semantic_reviews_completed", 0) or 0
-        ) + 1
-        diagnostics["semantic_reviews"] = list(review_rows)
+        diagnostics.update(_semantic_review_diagnostic_rollup(review_rows))
     diagnostics["red_team_status"] = "completed"
-    diagnostics["red_team_package_character_count"] = sum(
-        int(item["character_count"]) for item in reviews
-    )
-    diagnostics["red_team_package_within_target"] = all(
-        int(item["character_count"]) <= SEMANTIC_REVIEW_MAX_CHARACTERS
-        for item in reviews
-    )
+    diagnostics.update(_semantic_review_diagnostic_rollup(review_rows))
     qa_review = build_qa_review(
         state.get("deterministic_flags", []),
         flags,
@@ -2963,14 +3108,45 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
             "data_collection_end": state.get("data_collection_end"),
         },
     )
-    if int(review["character_count"]) > SEMANTIC_REVIEW_MAX_CHARACTERS:
+    prompt = _corrected_claim_verification_prompt(review)
+    prompt_character_count = len(prompt)
+    verification_diagnostic = {
+        "review_id": str(review["review_id"]),
+        "section": str(review["section"]),
+        "operation": CORRECTED_CLAIM_VERIFICATION_OPERATION,
+        "status": "pending",
+        "call_id": None,
+        "package_character_count": int(review["character_count"]),
+        "prompt_character_count": prompt_character_count,
+        "character_count": prompt_character_count,
+        "claim_count": len(review.get("claim_ids", []) or []),
+        "evidence_count": len(
+            review.get("package", {}).get("evidence_by_metric_id", []) or []
+        ),
+        "context_statement_count": len(
+            review.get("package", {}).get("accepted_context", []) or []
+        ),
+        "document_count": len(
+            review.get("package", {}).get("cited_documents", []) or []
+        ),
+        "target_characters": SEMANTIC_REVIEW_MAX_CHARACTERS,
+        "failure_code": None,
+    }
+    if prompt_character_count > SEMANTIC_REVIEW_MAX_CHARACTERS:
+        verification_diagnostic["status"] = "failed"
+        verification_diagnostic[
+            "failure_code"
+        ] = "mfi_semantic_review_contract_failed"
         raise MFIGenerationBlockedError(
             "mfi_semantic_review_contract_failed",
-            "The corrected-claim verification package exceeded the safety limit.",
+            "The corrected-claim verification prompt exceeded the safety limit.",
             stage="corrected_claim_verification",
             status_code=500,
-            character_count=int(review["character_count"]),
+            batch_id=str(review["review_id"]),
+            batch_kind=str(review["section"]),
+            character_count=prompt_character_count,
             target_characters=SEMANTIC_REVIEW_MAX_CHARACTERS,
+            batch_diagnostics=[verification_diagnostic],
         )
     trace = get_trace_session(
         service="mfi-drafter",
@@ -2979,22 +3155,35 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
     )
     runtime = llm_runtime_config()
     review_timeout = runtime.mfi_red_team_timeout_seconds
-    traced, call_count = _invoke_json_with_one_normalization(
-        trace=trace,
-        model=get_model(timeout_seconds=review_timeout),
-        messages=[HumanMessage(content=_corrected_claim_verification_prompt(review))],
-        node="corrected_claim_verification",
-        operation=CORRECTED_CLAIM_VERIFICATION_OPERATION,
-        artifact_type="corrected_claims",
-        artifact_id="corrected_claims",
-        correction_attempt=1,
-        validator=lambda payload: validate_semantic_review_response(
-            payload, review=review
-        ),
-        batch_id=str(review["review_id"]),
-        timeout_seconds=review_timeout,
-        max_retries=runtime.max_retries,
-    )
+    verification_diagnostic["configured_timeout_seconds"] = review_timeout
+    verification_diagnostic["status"] = "in_progress"
+    try:
+        traced, call_count = _invoke_json_with_one_normalization(
+            trace=trace,
+            model=get_model(timeout_seconds=review_timeout),
+            messages=[HumanMessage(content=prompt)],
+            node="corrected_claim_verification",
+            operation=CORRECTED_CLAIM_VERIFICATION_OPERATION,
+            artifact_type="corrected_claims",
+            artifact_id="corrected_claims",
+            correction_attempt=1,
+            validator=lambda payload: validate_semantic_review_response(
+                payload, review=review
+            ),
+            batch_id=str(review["review_id"]),
+            timeout_seconds=review_timeout,
+            max_retries=runtime.max_retries,
+        )
+    except LLMCallError as exc:
+        verification_diagnostic["status"] = "failed"
+        verification_diagnostic["call_id"] = exc.call_id
+        verification_diagnostic["failure_code"] = exc.failure_code
+        exc.mfi_corrected_claim_verification_diagnostic = deepcopy(
+            verification_diagnostic
+        )
+        raise
+    verification_diagnostic["status"] = "completed"
+    verification_diagnostic["call_id"] = traced.call_id
     retained = flags_outside_targets(state.get("red_team_flags", []), targets)
     red_team_flags = [*retained, *traced.value]
     combined = [*state.get("deterministic_flags", []), *red_team_flags]
@@ -3004,6 +3193,15 @@ def node_corrected_claim_verification(state: MFIReportState) -> dict:
         {
             "corrected_claim_verification_status": "completed",
             "corrected_claim_verification_call_id": traced.call_id,
+            "corrected_claim_verification_package_character_count": int(
+                review["character_count"]
+            ),
+            "corrected_claim_verification_prompt_character_count": (
+                prompt_character_count
+            ),
+            "corrected_claim_verification_max_characters": (
+                SEMANTIC_REVIEW_MAX_CHARACTERS
+            ),
         }
     )
     history = _reconcile_correction_history(
@@ -4689,6 +4887,19 @@ def run_mfi_report_generation(
             result["llm_diagnostics"] = trace.snapshot()
             log_llm_run_summary(result["llm_diagnostics"])
     except Exception as exc:
+        failure_review_rows = (
+            getattr(exc, "mfi_semantic_review_diagnostics", None)
+            if isinstance(exc, LLMCallError)
+            else exc.batch_diagnostics
+            if isinstance(exc, MFIGenerationBlockedError)
+            and exc.stage == "semantic_review"
+            else None
+        )
+        failure_review_statuses = Counter(
+            str(item.get("status") or "")
+            for item in failure_review_rows or []
+            if isinstance(item, Mapping)
+        )
         logger.exception(
             "MFI Drafter 2.0 generation failed",
             extra={
@@ -4706,6 +4917,34 @@ def run_mfi_report_generation(
                 "mfi_failure_node": getattr(exc, "node", None),
                 "mfi_failure_task_id": getattr(exc, "task_id", None),
                 "mfi_failure_batch_id": getattr(exc, "batch_id", None),
+                "mfi_failure_batch_kind": getattr(exc, "batch_kind", None),
+                "mfi_failure_character_count": getattr(
+                    exc, "character_count", None
+                ),
+                "mfi_failure_target_characters": getattr(
+                    exc, "target_characters", None
+                ),
+                "mfi_semantic_review_contract_version": (
+                    SEMANTIC_REVIEW_CONTRACT_VERSION
+                    if getattr(exc, "node", None)
+                    in {"semantic_review", "corrected_claim_verification"}
+                    else None
+                ),
+                "mfi_semantic_reviews_total": (
+                    len(failure_review_rows or [])
+                    if failure_review_rows is not None
+                    else None
+                ),
+                "mfi_semantic_reviews_completed": (
+                    int(failure_review_statuses.get("completed", 0))
+                    if failure_review_rows is not None
+                    else None
+                ),
+                "mfi_semantic_reviews_failed": (
+                    int(failure_review_statuses.get("failed", 0))
+                    if failure_review_rows is not None
+                    else None
+                ),
             },
         )
         raise
@@ -4748,6 +4987,17 @@ def run_mfi_report_generation(
             "mfi_semantic_reviews_completed": diagnostics.get(
                 "semantic_reviews_completed", 0
             ),
+            "mfi_semantic_reviews_failed": diagnostics.get(
+                "semantic_reviews_failed", 0
+            ),
+            "mfi_semantic_review_prompt_limit": diagnostics.get(
+                "red_team_package_target_characters", 0
+            ),
+            "mfi_semantic_review_prompt_character_counts": [
+                int(item.get("prompt_character_count") or 0)
+                for item in diagnostics.get("semantic_reviews", []) or []
+                if isinstance(item, Mapping)
+            ],
             "mfi_consolidated_correction_status": diagnostics.get(
                 "consolidated_correction_status"
             ),

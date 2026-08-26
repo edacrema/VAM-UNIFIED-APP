@@ -4,6 +4,7 @@ import copy
 
 import pytest
 
+from app.services.mfi_drafter import graph
 from app.services.mfi_drafter.claim_identity import (
     dimension_claim_id,
     executive_claim_id,
@@ -339,6 +340,70 @@ def test_consolidated_correction_deduplicates_shared_authorized_evidence(
     assert len(authorization["metric_ids"]) == len(set(authorization["metric_ids"]))
 
 
+def test_consolidated_correction_authorizes_regional_and_count_evidence() -> None:
+    profile = _profile(priority_count=1, market_count=15)
+    dimensions, markets, executive = _narratives(profile)
+    dimension = profile["dimensions"][0]["dimension"]
+    region_id = (
+        f"region.region-01.dimension.{dimension.casefold().replace(' ', '-')}.mean"
+    )
+    count_id = "assessment.assessed_markets.count"
+    profile["dimensions"][0]["regional_summaries"] = [
+        {"region": "Region 01", "ledger_metric_ids": [region_id]}
+    ]
+    profile["dimensions"][0]["ledger_metric_ids"].append(count_id)
+    target = {
+        "task_id": "dimension-regional-correction",
+        "artifact_type": "dimension",
+        "artifact_id": dimension,
+        "field_name": "summary",
+        "flag_ids": ["invalid-regional-reference"],
+        "claim_ids": [dimensions[dimension]["summary"]["claim_id"]],
+    }
+    payload = consolidated_correction_prompt_payload(
+        targets=[target],
+        flags=[
+            {
+                "flag_id": "invalid-regional-reference",
+                "code": "invalid_metric_id",
+                "severity": "high",
+                "claim_id": dimensions[dimension]["summary"]["claim_id"],
+                "message": "Use a canonical regional metric and cite the count.",
+                "recommendation": "Replace the invalid IDs.",
+                "metric_ids": ["region.region-01.mean"],
+                "document_ids": [],
+            }
+        ],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=[],
+        assessment_profile=profile,
+        claim_catalog={
+            region_id: {
+                "metric_id": region_id,
+                "formatted_value": "4.25/10",
+                "allowed_renderings": ["4.25/10"],
+                "unit": "score_0_10",
+                "dimension": dimension,
+            },
+            count_id: {
+                "metric_id": count_id,
+                "formatted_value": "15",
+                "allowed_renderings": ["15"],
+                "unit": "count",
+            },
+        },
+        documents=[],
+    )
+    authorized_ids = {
+        item["metric_id"] for item in payload["authorized_claim_catalog"]
+    }
+    assert {region_id, count_id} <= authorized_ids
+    authorization = payload["artifact_authorizations"][f"dimension:{dimension}"]
+    assert {region_id, count_id} <= set(authorization["metric_ids"])
+
+
 def test_dimension_batch_requires_exact_order_and_complete_rows() -> None:
     profile = _profile(priority_count=1, market_count=1)
     batch = build_dimension_draft_batches(profile)[-1]
@@ -603,6 +668,65 @@ def test_semantic_review_receives_actual_data_and_source_excerpts() -> None:
     assert evidence["pooled_denominator_available"] is False
 
 
+def test_gaza_scale_market_review_remains_complete_under_400000_prompt_budget() -> None:
+    profile = _profile(market_count=15)
+    dimensions, markets, executive = _narratives(profile)
+    long_fragments = []
+    for index, narrative in enumerate(markets.values(), start=1):
+        fragment = f"Market evidence fragment {index}: " + ("x" * 16_000)
+        long_fragments.append(fragment)
+        narrative["priority_issues"][0]["text"] = fragment
+        narrative["priority_issues"][0]["document_ids"] = ["doc-gaza"]
+    context = [
+        {
+            "statement_id": "context-gaza",
+            "text": "The accepted source provides report-specific context.",
+            "classification": "potentially_explanatory",
+            "document_ids": ["doc-gaza"],
+        }
+    ]
+    documents = [
+        {
+            "doc_id": "doc-gaza",
+            "source": "Seerist",
+            "title": "Gaza context",
+            "date": "2026-01-10",
+            "content": "C" * 1_200,
+        }
+    ]
+    review = build_semantic_review_packages(
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        context_evidence=context,
+        assessment_profile=profile,
+        claim_catalog={
+            "metric.one": {
+                "metric_id": "metric.one",
+                "label": "Metric one",
+                "formatted_value": "5.00/10",
+                "unit": "score_0_10",
+                "scope": "assessment",
+            }
+        },
+        documents=documents,
+        deterministic_flags=[],
+        report_context={"country": "Gaza"},
+    )[2]
+    prompt = graph._semantic_review_prompt(review)
+
+    assert 200_000 < len(prompt) <= SEMANTIC_REVIEW_MAX_CHARACTERS
+    assert len(review["package"]["claims"]) == 15
+    projected_text = "\n".join(
+        row["text"] for row in review["package"]["claims"]
+    )
+    assert all(fragment in projected_text for fragment in long_fragments)
+    assert review["package"]["accepted_context"] == context
+    assert review["package"]["cited_documents"][0]["content_excerpt"] == (
+        "C" * 800
+    )
+
+
 def test_consolidated_response_requires_every_target_exactly_once() -> None:
     targets = [
         {
@@ -716,3 +840,131 @@ def test_reduced_validator_checks_only_numbers_and_citation_existence(
         if flag.get("claim_id") == summary["claim_id"]
     }
     assert codes == expected_codes
+
+
+def test_reduced_validator_requires_canonical_regional_ledger_id() -> None:
+    profile = _profile(market_count=1)
+    dimensions, markets, executive = _narratives(profile)
+    dimension = DISPLAY_DIMENSIONS[0]
+    summary = dimensions[dimension]["summary"]
+    summary["text"] = "The regional mean was 4.25/10."
+    canonical_id = f"region.region-01.dimension.{dimension.casefold().replace(' ', '-')}.mean"
+    catalog = {
+        canonical_id: {
+            "metric_id": canonical_id,
+            "formatted_value": "4.25/10",
+            "allowed_renderings": ["4.25/10"],
+            "unit": "score_0_10",
+            "dimension": dimension,
+        }
+    }
+
+    summary["metric_ids"] = ["region.region-01.mean"]
+    invalid, *_ = validate_evidence_bound_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog=catalog,
+        assessment_profile=profile,
+        documents=[],
+    )
+    assert "invalid_metric_id" in {
+        flag["code"] for flag in invalid["flags"]
+    }
+
+    summary["metric_ids"] = [canonical_id]
+    valid, *_ = validate_evidence_bound_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog=catalog,
+        assessment_profile=profile,
+        documents=[],
+    )
+    assert not {
+        flag["code"]
+        for flag in valid["flags"]
+        if flag.get("claim_id") == summary["claim_id"]
+    }
+
+
+def test_reduced_validator_requires_cited_count_metric() -> None:
+    profile = _profile(market_count=1)
+    dimensions, markets, executive = _narratives(profile)
+    summary = dimensions[DISPLAY_DIMENSIONS[0]]["summary"]
+    summary["text"] = "The assessment includes 15 markets."
+    count_id = "assessment.assessed_markets.count"
+    catalog = {
+        count_id: {
+            "metric_id": count_id,
+            "formatted_value": "15",
+            "allowed_renderings": ["15"],
+            "numeric_value": 15,
+            "unit": "count",
+        }
+    }
+
+    summary["metric_ids"] = []
+    uncited, *_ = validate_evidence_bound_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog=catalog,
+        assessment_profile=profile,
+        documents=[],
+    )
+    assert {"uncited_numeric_value", "numeric_value_mismatch"} <= {
+        flag["code"] for flag in uncited["flags"]
+    }
+
+    summary["metric_ids"] = [count_id]
+    cited, *_ = validate_evidence_bound_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog=catalog,
+        assessment_profile=profile,
+        documents=[],
+    )
+    assert not {
+        flag["code"]
+        for flag in cited["flags"]
+        if flag.get("claim_id") == summary["claim_id"]
+    }
+
+
+def test_reduced_validator_checks_numbers_embedded_in_category_labels() -> None:
+    profile = _profile(market_count=1)
+    dimensions, markets, executive = _narratives(profile)
+    summary = dimensions[DISPLAY_DIMENSIONS[0]]["summary"]
+    summary["text"] = "Category 2 recorded 42.0%."
+    summary["metric_ids"] = ["metric.category"]
+    validation, *_ = validate_evidence_bound_narratives(
+        context_evidence=[],
+        dimension_narratives=dimensions,
+        market_narratives=markets,
+        executive_narrative=executive,
+        claim_catalog={
+            "metric.category": {
+                "metric_id": "metric.category",
+                "formatted_value": "42.0%",
+                "allowed_renderings": ["42.0%"],
+                "numeric_value": 0.42,
+                "unit": "proportion",
+                "dimension": DISPLAY_DIMENSIONS[0],
+            }
+        },
+        assessment_profile=profile,
+        documents=[],
+    )
+    mismatches = [
+        flag
+        for flag in validation["flags"]
+        if flag["code"] == "numeric_value_mismatch"
+    ]
+    assert len(mismatches) == 1
+    assert mismatches[0]["actual_value"] == "2"

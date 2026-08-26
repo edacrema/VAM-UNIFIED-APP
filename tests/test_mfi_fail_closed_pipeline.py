@@ -84,6 +84,31 @@ def _flag(
     }
 
 
+def _semantic_contract_reviews() -> list[dict]:
+    return [
+        {
+            "review_id": f"semantic-review-{section}",
+            "section": section,
+            "sequence": sequence,
+            "claim_ids": [],
+            "character_count": 17,
+            "package": {
+                "claims": [],
+                "evidence_by_metric_id": [],
+                "accepted_context": [],
+                "cited_documents": [],
+            },
+        }
+        for sequence, section in enumerate(
+            ("overview", "dimensions", "markets"), start=1
+        )
+    ]
+
+
+def _semantic_runtime() -> SimpleNamespace:
+    return SimpleNamespace(mfi_red_team_timeout_seconds=600.0, max_retries=2)
+
+
 def test_correction_tasks_group_exact_field_and_follow_report_order() -> None:
     flags = [
         _flag("price-rec", artifact_id="Price", field_name="recommendations"),
@@ -106,6 +131,243 @@ def test_correction_tasks_group_exact_field_and_follow_report_order() -> None:
     ]
     infrastructure = tasks[1]
     assert infrastructure["flag_ids"] == ["infra-geo-1", "infra-geo-2"]
+
+
+def test_semantic_review_preflight_measures_exact_final_prompt_boundary(
+    monkeypatch,
+) -> None:
+    reviews = _semantic_contract_reviews()
+    sizes = {"overview": 400_000, "dimensions": 64, "markets": 128}
+    monkeypatch.setattr(
+        graph,
+        "_semantic_review_prompt",
+        lambda review: "x" * sizes[str(review["section"])],
+    )
+    prepared, rows = graph._prepare_semantic_review_prompts(
+        reviews,
+        timeout_seconds=600.0,
+    )
+    assert [row["prompt_character_count"] for row in rows] == [
+        400_000,
+        64,
+        128,
+    ]
+    assert rows[0]["package_character_count"] == 17
+    assert rows[0]["character_count"] == 400_000
+    assert rows[0]["target_characters"] == 400_000
+    assert prepared[0]["package"] == reviews[0]["package"]
+    assert len(prepared[0]["prompt"]) == 400_000
+    monkeypatch.setattr(
+        graph, "build_semantic_review_packages", lambda **_kwargs: reviews
+    )
+    monkeypatch.setattr(graph, "llm_runtime_config", _semantic_runtime)
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        graph,
+        "get_trace_session",
+        lambda **_kwargs: SimpleNamespace(snapshot=lambda: {"calls": []}),
+    )
+    invocation_count = 0
+
+    def invoke(**_kwargs):
+        nonlocal invocation_count
+        invocation_count += 1
+        return SimpleNamespace(call_id=f"review-{invocation_count}", value=[]), 1
+
+    monkeypatch.setattr(graph, "_invoke_json_with_one_normalization", invoke)
+    result = graph.node_semantic_review(
+        {
+            "run_id": "mfi-boundary",
+            "generation_diagnostics": {},
+            "llm_diagnostics": {},
+            "deterministic_flags": [],
+            "correction_history": [],
+        }
+    )
+    assert invocation_count == 3
+    assert result["generation_diagnostics"]["semantic_reviews_completed"] == 3
+    assert result["generation_diagnostics"]["red_team_package_within_target"] is True
+
+
+def test_semantic_review_preflight_rejects_400001_before_any_llm_call(
+    monkeypatch,
+) -> None:
+    reviews = _semantic_contract_reviews()
+    sizes = {"overview": 100, "dimensions": 200, "markets": 400_001}
+    monkeypatch.setattr(
+        graph, "build_semantic_review_packages", lambda **_kwargs: reviews
+    )
+    monkeypatch.setattr(
+        graph,
+        "_semantic_review_prompt",
+        lambda review: "x" * sizes[str(review["section"])],
+    )
+    monkeypatch.setattr(graph, "llm_runtime_config", _semantic_runtime)
+    monkeypatch.setattr(
+        graph,
+        "get_model",
+        lambda **_kwargs: pytest.fail("preflight must run before model creation"),
+    )
+
+    with pytest.raises(MFIGenerationBlockedError) as caught:
+        graph.node_semantic_review(
+            {
+                "run_id": "mfi-preflight",
+                "generation_diagnostics": {},
+                "llm_diagnostics": {},
+            }
+        )
+
+    error = caught.value
+    assert error.code == "mfi_semantic_review_contract_failed"
+    assert error.batch_kind == "markets"
+    assert error.character_count == 400_001
+    assert error.target_characters == 400_000
+    assert [row["status"] for row in error.batch_diagnostics] == [
+        "pending",
+        "pending",
+        "failed",
+    ]
+    diagnostics = graph.reconcile_generation_diagnostics_for_blocked_failure(
+        {"generation_diagnostics": {}, "llm_diagnostics": {"calls": []}}, error
+    )
+    assert diagnostics["semantic_reviews_total"] == 3
+    assert diagnostics["semantic_reviews_completed"] == 0
+    assert diagnostics["semantic_reviews_failed"] == 1
+    assert diagnostics["red_team_status"] == "failed"
+    assert diagnostics["red_team_package_target_characters"] == 400_000
+    assert diagnostics["failed_red_team_batch_kind"] == "markets"
+    assert diagnostics["failed_red_team_character_count"] == 400_001
+
+
+def test_semantic_review_partial_llm_failure_preserves_completed_rows(
+    monkeypatch,
+) -> None:
+    reviews = _semantic_contract_reviews()
+    monkeypatch.setattr(
+        graph, "build_semantic_review_packages", lambda **_kwargs: reviews
+    )
+    monkeypatch.setattr(graph, "_semantic_review_prompt", lambda _review: "ok")
+    monkeypatch.setattr(graph, "llm_runtime_config", _semantic_runtime)
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        graph,
+        "get_trace_session",
+        lambda **_kwargs: SimpleNamespace(snapshot=lambda: {"calls": []}),
+    )
+    invocations = 0
+
+    def invoke(**kwargs):
+        nonlocal invocations
+        invocations += 1
+        if invocations == 1:
+            return SimpleNamespace(call_id="llm-overview", value=[]), 1
+        raise LLMCallError(
+            failure_code="llm_transport_error",
+            call_id="llm-dimensions",
+            node="semantic_review",
+            operation=str(kwargs["operation"]),
+            stage="transport",
+            batch_id=str(kwargs["batch_id"]),
+        )
+
+    monkeypatch.setattr(graph, "_invoke_json_with_one_normalization", invoke)
+
+    with pytest.raises(LLMCallError) as caught:
+        graph.node_semantic_review(
+            {
+                "run_id": "mfi-partial-review",
+                "generation_diagnostics": {},
+                "llm_diagnostics": {},
+            }
+        )
+
+    diagnostics = graph.reconcile_generation_diagnostics_for_llm_failure(
+        {"generation_diagnostics": {}, "llm_diagnostics": {"calls": []}},
+        caught.value,
+    )
+    assert diagnostics["semantic_reviews_total"] == 3
+    assert diagnostics["semantic_reviews_completed"] == 1
+    assert diagnostics["semantic_reviews_failed"] == 1
+    assert [row["status"] for row in diagnostics["semantic_reviews"]] == [
+        "completed",
+        "failed",
+        "pending",
+    ]
+    assert diagnostics["semantic_reviews"][0]["call_id"] == "llm-overview"
+    assert diagnostics["semantic_reviews"][1]["call_id"] == "llm-dimensions"
+
+
+@pytest.mark.parametrize(
+    ("prompt_size", "should_fail"),
+    [(400_000, False), (400_001, True)],
+)
+def test_corrected_claim_verification_uses_exact_prompt_boundary(
+    monkeypatch, prompt_size: int, should_fail: bool
+) -> None:
+    review = {
+        "review_id": "corrected-claims-verification",
+        "section": "corrected_claims",
+        "claim_ids": [],
+        "character_count": 23,
+        "package": {
+            "claims": [],
+            "evidence_by_metric_id": [],
+            "accepted_context": [],
+            "cited_documents": [],
+        },
+    }
+    monkeypatch.setattr(
+        graph, "build_corrected_claim_verification_package", lambda **_kwargs: review
+    )
+    monkeypatch.setattr(
+        graph,
+        "_corrected_claim_verification_prompt",
+        lambda _review: "x" * prompt_size,
+    )
+    monkeypatch.setattr(graph, "llm_runtime_config", _semantic_runtime)
+    monkeypatch.setattr(graph, "get_model", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        graph,
+        "get_trace_session",
+        lambda **_kwargs: SimpleNamespace(snapshot=lambda: {"calls": []}),
+    )
+    monkeypatch.setattr(
+        graph,
+        "_invoke_json_with_one_normalization",
+        lambda **_kwargs: (SimpleNamespace(call_id="verification", value=[]), 1),
+    )
+    state = {
+        "run_id": "mfi-corrected-boundary",
+        "correction_targets": [
+            {
+                "task_id": "dimension-price-summary",
+                "artifact_type": "dimension",
+                "artifact_id": "Price",
+                "field_name": "summary",
+            }
+        ],
+        "generation_diagnostics": {},
+        "llm_diagnostics": {},
+        "red_team_flags": [],
+        "deterministic_flags": [],
+        "correction_history": [],
+    }
+    if should_fail:
+        with pytest.raises(MFIGenerationBlockedError) as caught:
+            graph.node_corrected_claim_verification(state)
+        assert caught.value.character_count == 400_001
+        assert caught.value.target_characters == 400_000
+        assert caught.value.batch_diagnostics[0][
+            "package_character_count"
+        ] == 23
+    else:
+        result = graph.node_corrected_claim_verification(state)
+        diagnostics = result["generation_diagnostics"]
+        assert diagnostics[
+            "corrected_claim_verification_prompt_character_count"
+        ] == 400_000
+        assert diagnostics["corrected_claim_verification_max_characters"] == 400_000
 
 
 def test_field_only_geographic_patch_merges_without_requiring_summary() -> None:

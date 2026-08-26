@@ -274,7 +274,7 @@ if isinstance(result, dict):
             "Failed semantic reviews",
             str(diagnostics.get("semantic_reviews_failed", 0)),
         )
-        prompt_columns = st.columns(3)
+        prompt_columns = st.columns(5)
         prompt_columns[0].metric(
             "Largest market prompt",
             (
@@ -294,6 +294,22 @@ if isinstance(result, dict):
             (
                 f"{float(diagnostics.get('market_draft_timeout_seconds', 0) or 0):g} "
                 "seconds"
+            ),
+        )
+        semantic_prompt_sizes = [
+            int(item.get("prompt_character_count") or 0)
+            for item in diagnostics.get("semantic_reviews", []) or []
+            if isinstance(item, dict)
+        ]
+        prompt_columns[3].metric(
+            "Largest semantic-review prompt",
+            f"{max(semantic_prompt_sizes, default=0):,} characters",
+        )
+        prompt_columns[4].metric(
+            "Semantic-review prompt limit",
+            (
+                f"{int(diagnostics.get('red_team_package_target_characters', 0) or 0):,} "
+                "characters"
             ),
         )
         st.json(result.get("generation_diagnostics") or {})
