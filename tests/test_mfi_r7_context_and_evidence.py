@@ -788,18 +788,24 @@ def test_context_status_propagates_through_outputs_metadata_and_offline_render(
     )
 
 
-def test_report_evidence_notes_keep_ids_in_metadata_and_adjacent_to_claims(
+def test_current_report_omits_evidence_notes_but_keeps_citations_in_claim_metadata(
     deterministic_run,
 ) -> None:
     blocks = deterministic_run.blocks
-    evidence_count = 0
-    for index, block in enumerate(blocks):
-        if block.type != "evidence_note":
+    assert not [block for block in blocks if block.type == "evidence_note"]
+    cited_claim_count = 0
+    for block in blocks:
+        if block.type != "paragraph" or not (block.meta or {}).get("claim_id"):
             continue
-        evidence_count += 1
-        assert index > 0 and blocks[index - 1].type == "paragraph"
         metric_ids = list((block.meta or {}).get("metric_ids", []) or [])
         document_ids = list((block.meta or {}).get("document_ids", []) or [])
+        if not metric_ids and not document_ids:
+            continue
+        cited_claim_count += 1
         for raw_id in [*metric_ids, *document_ids]:
             assert str(raw_id) not in str(block.text)
-    assert evidence_count > 0
+    assert cited_claim_count > 0
+    document = Document(BytesIO(deterministic_run.docx))
+    assert not any(
+        paragraph.text.startswith("Evidence:") for paragraph in document.paragraphs
+    )

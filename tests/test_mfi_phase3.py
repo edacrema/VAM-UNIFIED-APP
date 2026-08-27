@@ -28,7 +28,11 @@ from app.services.mfi_drafter.router import _build_mfi_output
 from app.streamlit_backend.dispatcher import _build_mfi_report_output
 from app.shared.docx_export import build_docx_bytes_from_report_blocks
 from app.shared.llm_observability import LLMCallError
-from app.shared.report_blocks import build_mfi_report_blocks
+from app.shared.report_blocks import (
+    ReportBlock,
+    build_mfi_report_blocks,
+    resolve_mfi_report_blocks,
+)
 
 
 @pytest.fixture(scope="module")
@@ -926,7 +930,7 @@ def test_graph_runs_simplified_review_and_single_correction_path():
     assert ("finalize_qa", "finalize_delivery") in edges
 
 
-def test_report_hierarchy_evidence_notes_and_docx_match(phase3_bundle):
+def test_current_report_hierarchy_omits_reader_facing_evidence_notes(phase3_bundle):
     result = copy.deepcopy(phase3_bundle["result"])
     quality_profile = next(
         item
@@ -962,14 +966,19 @@ def test_report_hierarchy_evidence_notes_and_docx_match(phase3_bundle):
         "Access & Protection",
     ):
         assert heading_texts.count(dimension) == 1
-    for index, block in enumerate(blocks[:-1]):
+    assert not [block for block in blocks if block.type == "evidence_note"]
+    cited_claim_count = 0
+    for block in blocks:
         if (
             block.type == "paragraph"
             and block.meta
             and block.meta.get("claim_id")
             and (block.meta.get("metric_ids") or block.meta.get("document_ids"))
         ):
-            assert blocks[index + 1].type == "evidence_note"
+            cited_claim_count += 1
+            assert isinstance(block.meta.get("metric_ids"), list)
+            assert isinstance(block.meta.get("document_ids"), list)
+    assert cited_claim_count > 0
     assert not [
         block
         for block in blocks
@@ -990,6 +999,40 @@ def test_report_hierarchy_evidence_notes_and_docx_match(phase3_bundle):
     assert "Assessment metadata and coverage" in document_text
     assert "Executive summary" in document_text
     assert "Methodology, limitations, and QA notices" in document_text
+    assert "Evidence:" not in document_text
+
+
+def test_historical_evidence_notes_remain_renderable(phase3_bundle):
+    result = copy.deepcopy(phase3_bundle["result"])
+    legacy_blocks = build_mfi_report_blocks(result, include_evidence_notes=True)
+    evidence_notes = [
+        block for block in legacy_blocks if block.type == "evidence_note"
+    ]
+    assert evidence_notes
+
+    persisted = resolve_mfi_report_blocks(
+        {"report_blocks": [block.model_dump() for block in legacy_blocks]}
+    )
+    assert persisted == legacy_blocks
+
+    legacy_without_persisted_blocks = resolve_mfi_report_blocks(result)
+    assert any(
+        block.type == "evidence_note" for block in legacy_without_persisted_blocks
+    )
+
+    historical_docx = build_docx_bytes_from_report_blocks(
+        [
+            ReportBlock(
+                type="evidence_note",
+                text="Claim scope: assessed-market profile; Price mean: 5.00/10.",
+            )
+        ],
+        visualizations={},
+    )
+    document = Document(io.BytesIO(historical_docx))
+    assert any(
+        paragraph.text.startswith("Evidence:") for paragraph in document.paragraphs
+    )
 
 
 def test_report_delivers_prominent_unresolved_qa_warning(phase3_bundle):

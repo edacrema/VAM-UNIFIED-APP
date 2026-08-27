@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, Mm, Pt, RGBColor
@@ -138,7 +138,6 @@ def _append_word_field(paragraph: Any, instruction: str, placeholder: str = "1")
 def _configure_mfi_document(doc: Document, context: Dict[str, Any]) -> None:
     _configure_mfi_styles(doc)
     country = str(context.get("country") or "").strip()
-    methodology = str(context.get("methodology_version") or "").strip()
     for section in doc.sections:
         section.page_width = Mm(210)
         section.page_height = Mm(297)
@@ -153,12 +152,8 @@ def _configure_mfi_document(doc: Document, context: Dict[str, Any]) -> None:
         header.text = "MFI Drafter 2.0" + (f" - {country}" if country else "")
         footer = section.footer.paragraphs[0]
         footer.style = _MFI_STYLE_NAMES["footer"]
-        footer.paragraph_format.tab_stops.add_tab_stop(
-            Mm(174.4), WD_TAB_ALIGNMENT.RIGHT
-        )
-        footer.add_run(
-            f"Methodology: {methodology or 'databridge-current'}\tPage "
-        )
+        footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        footer.add_run("Page ")
         _append_word_field(footer, "PAGE")
         footer.add_run(" of ")
         _append_word_field(footer, "NUMPAGES")

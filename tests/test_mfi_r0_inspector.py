@@ -399,11 +399,10 @@ def test_boilerplate_is_not_repeated_verbatim(ratchet_report) -> None:
     assert ratchet_report.max_boilerplate_repetition <= 1
 
 
-def test_coverage_notes_are_not_restated_on_every_citation(ratchet_report) -> None:
-    repetition = ratchet_report.coverage_note_repetition
-    assert max(repetition.values(), default=0) <= RATCHET_SPEC.market_count
-    assert ratchet_report.evidence_note_word_count > 0
-    assert ratchet_report.coverage_note_total < ratchet_report.evidence_note_count
+def test_current_report_has_no_reader_facing_evidence_notes(ratchet_report) -> None:
+    assert ratchet_report.evidence_note_count == 0
+    assert ratchet_report.evidence_note_word_count == 0
+    assert ratchet_report.coverage_note_total == 0
 
 
 def test_unverified_claims_are_visibly_marked() -> None:

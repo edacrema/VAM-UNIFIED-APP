@@ -417,6 +417,9 @@ def test_docx_contains_r8_styles_geometry_fields_and_grouping() -> None:
     assert "w:keepLines" in document_xml
     assert "MFI Drafter 2.0 - Testland" in header_xml
     assert "PAGE" in footer_xml and "NUMPAGES" in footer_xml
+    assert "Methodology:" not in footer_xml
+    assert "databridge-current" not in footer_xml
+    assert 'w:jc w:val="right"' in footer_xml
     assert not re.search(r"</w:tbl>\s*<w:p\s*/>", document_xml)
     inspected = inspect_docx_bytes(docx)
     assert inspected.max_boilerplate_repetition <= 1

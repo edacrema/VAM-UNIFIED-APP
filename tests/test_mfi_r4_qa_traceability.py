@@ -145,8 +145,7 @@ def test_multiple_material_flags_share_one_adjacent_claim_warning() -> None:
         if block.type == "paragraph"
         and (block.meta or {}).get("claim_id") == "dimension.price.finding.1"
     )
-    assert blocks[claim_index + 1].type == "evidence_note"
-    warning = blocks[claim_index + 2]
+    warning = blocks[claim_index + 1]
     assert warning.type == "claim_warning"
     assert warning.meta["flag_codes"] == ["polarity_mismatch", "scope_mismatch"]
     assert warning.meta["disposition"] == "retained_unverified_for_delivery"
@@ -205,8 +204,7 @@ def test_unverified_figure_is_retained_with_adjacent_warning_and_docx_notice() -
         if block.type == "paragraph"
         and (block.meta or {}).get("claim_id") == "dimension.price.finding.1"
     )
-    assert blocks[claim_index + 1].type == "evidence_note"
-    warning = blocks[claim_index + 2]
+    warning = blocks[claim_index + 1]
     assert warning.type == "claim_warning"
     assert warning.meta["disposition"] == (
         "retained_unverified_figure_for_delivery"

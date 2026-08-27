@@ -68,7 +68,7 @@ def resolve_mfi_report_blocks(
         prepared["data_collection_start"] = data_collection_start
     if data_collection_end is not None:
         prepared["data_collection_end"] = data_collection_end
-    return build_mfi_report_blocks(prepared)
+    return build_mfi_report_blocks(prepared, include_evidence_notes=True)
 
 
 class MFIReportLayoutHint(BaseModel):
@@ -804,6 +804,7 @@ def _append_mfi_claim(
     catalog: Dict[str, Any],
     documents: Dict[str, Dict[str, Any]],
     qa_context: Optional[Dict[str, Any]] = None,
+    include_evidence_notes: bool = False,
 ) -> None:
     if not isinstance(claim, dict) or not str(claim.get("text") or "").strip():
         return
@@ -820,7 +821,11 @@ def _append_mfi_claim(
             },
         )
     )
-    note = compose_evidence_note(claim, catalog, documents)
+    note = (
+        compose_evidence_note(claim, catalog, documents)
+        if include_evidence_notes
+        else ""
+    )
     if note:
         blocks.append(
             ReportBlock(
@@ -1166,8 +1171,17 @@ def _apply_mfi_layout_contract(
     return blocks
 
 
-def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
-    """Build the Phase 3 report solely from canonical profile and narratives."""
+def build_mfi_report_blocks(
+    result: Dict[str, Any],
+    *,
+    include_evidence_notes: bool = False,
+) -> List[ReportBlock]:
+    """Build the Phase 3 report solely from canonical profile and narratives.
+
+    Reader-facing evidence notes are omitted for current reports.  The opt-in is
+    retained solely so legacy results without persisted report blocks can be
+    reconstructed with their original presentation.
+    """
     country = str(result.get("country") or "").strip()
     title = f"MFI Report - {country}" if country else "MFI Report"
     profile = result.get("assessment_profile") or {}
@@ -1220,6 +1234,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         catalog=catalog,
         documents=documents,
         qa_context=qa_context,
+        include_evidence_notes=include_evidence_notes,
     )
     methodology_warnings = result.get("methodology_warnings") or []
     excluded = result.get("excluded_market_records") or []
@@ -1296,6 +1311,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 catalog=catalog,
                 documents=documents,
                 qa_context=qa_context,
+                include_evidence_notes=include_evidence_notes,
             )
     cited_document_ids = {
         str(document_id)
@@ -1330,6 +1346,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         catalog=catalog,
         documents=documents,
         qa_context=qa_context,
+        include_evidence_notes=include_evidence_notes,
     )
     if visualizations.get("mfi_radar"):
         blocks.append(
@@ -1383,6 +1400,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         catalog=catalog,
         documents=documents,
         qa_context=qa_context,
+        include_evidence_notes=include_evidence_notes,
     )
 
 
@@ -1393,6 +1411,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
         catalog=catalog,
         documents=documents,
         qa_context=qa_context,
+        include_evidence_notes=include_evidence_notes,
     )
     for field in ("key_findings", "recommendations", "limitations"):
         if executive.get(field):
@@ -1406,6 +1425,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 catalog=catalog,
                 documents=documents,
                 qa_context=qa_context,
+                include_evidence_notes=include_evidence_notes,
             )
 
     blocks.append(ReportBlock(type="heading", text="MFI dimensions", level=2))
@@ -1423,6 +1443,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
             catalog=catalog,
             documents=documents,
             qa_context=qa_context,
+            include_evidence_notes=include_evidence_notes,
         )
         safe_name = re.sub(
             r"[^a-z0-9_]+",
@@ -1451,6 +1472,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                     catalog=catalog,
                     documents=documents,
                     qa_context=qa_context,
+                    include_evidence_notes=include_evidence_notes,
                 )
 
     blocks.append(
@@ -1482,6 +1504,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                 catalog=catalog,
                 documents=documents,
                 qa_context=qa_context,
+                include_evidence_notes=include_evidence_notes,
             )
         for spec_id, label in (
             ("mfi.official_subsection.v1", "Official subsection evidence"),
@@ -1559,6 +1582,7 @@ def build_mfi_report_blocks(result: Dict[str, Any]) -> List[ReportBlock]:
                     catalog=catalog,
                     documents=documents,
                     qa_context=qa_context,
+                    include_evidence_notes=include_evidence_notes,
                 )
 
     blocks.append(
