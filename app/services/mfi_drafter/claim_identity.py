@@ -16,7 +16,7 @@ from typing import Any, Mapping, MutableMapping, Sequence
 
 
 CLAIM_IDENTITY_AUTHORITY = "application"
-CLAIM_IDENTITY_VERSION = "mfi-claim-id-v1"
+CLAIM_IDENTITY_VERSION = "mfi-claim-id-v2"
 
 
 class MFIClaimIdentityError(ValueError):
@@ -174,25 +174,26 @@ def canonicalize_narrative_identities(
                 artifacts=[f"market:{key}"],
             )
         market_name = str(narrative.get("market_name") or key)
+        identity_name = str(narrative.get("market_key") or market_name)
         artifact = f"market:{market_name}"
         _assign_list(
             narrative,
             "priority_issues",
-            lambda position: market_claim_id(market_name, "issue", position),
+            lambda position: market_claim_id(identity_name, "issue", position),
             artifact=artifact,
         )
         _assign_list(
             narrative,
             "recommended_interventions",
             lambda position: market_claim_id(
-                market_name, "intervention", position
+                identity_name, "intervention", position
             ),
             artifact=artifact,
         )
         _assign_list(
             narrative,
             "limitations",
-            lambda position: market_claim_id(market_name, "limitation", position),
+            lambda position: market_claim_id(identity_name, "limitation", position),
             artifact=artifact,
         )
         # Retained only in the API model for compatibility; R8 keeps it null. If an
@@ -200,7 +201,7 @@ def canonicalize_narrative_identities(
         _assign_single(
             narrative,
             "modality_consideration",
-            market_claim_id(market_name, "modality_consideration", 1),
+            market_claim_id(identity_name, "modality_consideration", 1),
             artifact=artifact,
             required=False,
         )
@@ -419,7 +420,7 @@ def _expected_id(
         return dimension_claim_id(dimension, field, location.position)
     if location.artifact_type == "market":
         narrative = market_narratives.get(location.artifact_id) or {}
-        market_name = str(narrative.get("market_name") or location.artifact_id)
+        market_name = str(narrative.get("market_key") or narrative.get("market_name") or location.artifact_id)
         field = {
             "priority_issues": "issue",
             "recommended_interventions": "intervention",

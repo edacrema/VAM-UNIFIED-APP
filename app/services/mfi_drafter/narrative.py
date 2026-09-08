@@ -57,7 +57,7 @@ from .schemas import (
 )
 from .visualization import format_market_coverage
 
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?%?")
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _MATERIAL_SEVERITIES = {"high", "medium"}
 DELIVERABLE_UNVERIFIED_FIGURE_CODES = frozenset(
     {
@@ -180,6 +180,8 @@ def build_claim_catalog(
             representation_required=representation_required,
         )
         catalog[metric_id] = entry.model_dump()
+    from .facts import catalog_facts
+    catalog_facts(assessment_profile, catalog)
     return catalog
 
 
@@ -258,6 +260,7 @@ def compact_catalog(
                 # wording does not have to be inferred from the label; the classification
                 # enums behind it stay internal, since validation reads the full catalog.
                 "permitted_subject_phrase": entry.get("permitted_subject_phrase"),
+                **({"fact": {key: value for key, value in entry["fact"].items() if key not in {"source_metric_ids", "member_ids"}}} if entry.get("fact") else {}),
             }
         )
     return result
@@ -346,7 +349,11 @@ def executive_catalog_ids(
             continue
         if dimension.get("dimension") not in priority:
             continue
-        ids.extend(dimension_catalog_ids(dimension))
+        if assessment_profile.get("workflow_revision"):
+            ids.extend(dimension.get("ledger_metric_ids", []))
+            ids.extend(dimension.get("analytical_facts", {}).keys())
+        else:
+            ids.extend(dimension_catalog_ids(dimension))
     return list(dict.fromkeys(ids))
 
 
@@ -412,6 +419,8 @@ def parse_context_evidence(
         statement = MFIContextEvidenceStatement(
             statement_id=statement_id,
             text=text,
+            source_passages=[dict(p) for p in raw.get("source_passages", []) if isinstance(p, Mapping)],
+            passage_binding_required=bool(raw.get("passage_binding_required")),
             classification=classification,
             document_ids=valid_ids,
             validation_status="unverified" if flags else "verified",
@@ -461,6 +470,10 @@ def parse_dimension_narrative(
     """Normalize one LLM dimension payload into the canonical schema."""
     dimension = str(dimension_profile["dimension"])
     is_priority = bool(dimension_profile.get("is_priority"))
+    reliable = assessment_profile.get("workflow_revision") == "mfi-reliable-v1"
+    if reliable:
+        from .facts import render_payload
+        payload = render_payload(payload, build_claim_catalog(assessment_profile))
     if not isinstance(payload, Mapping):
         if strict:
             raise ValueError("Dimension narrative response must be an object")
@@ -527,6 +540,8 @@ def parse_dimension_narrative(
             if is_priority
             else NARRATIVE_DENSITY_POLICY.non_priority_recommendations
         )
+        if reliable:
+            finding_limit = geography_limit = limitation_limit = None
         summary = _claim_from_payload(
             payload.get("summary"),
             claim_id=dimension_claim_id(dimension, "summary", 1),
@@ -564,11 +579,11 @@ def parse_dimension_narrative(
         subdimensions: list[MFISubdimensionNarrative] = []
         raw_subdimensions = (
             (payload.get("subdimension_analysis", []) or [])
-            if is_priority
+            if is_priority or reliable
             else []
         )
         for index, raw in enumerate(
-            raw_subdimensions[: NARRATIVE_DENSITY_POLICY.priority_subdimensions]
+            raw_subdimensions if reliable else raw_subdimensions[: NARRATIVE_DENSITY_POLICY.priority_subdimensions]
         ):
             if not isinstance(raw, Mapping):
                 continue
@@ -697,6 +712,9 @@ def parse_executive_narrative(
     assessment_profile: Mapping[str, Any],
     strict: bool = False,
 ) -> dict[str, Any]:
+    if assessment_profile.get("workflow_revision"):
+        from .facts import render_payload
+        payload = render_payload(payload, build_claim_catalog(assessment_profile))
     if not isinstance(payload, Mapping):
         if strict:
             raise ValueError("Executive narrative response must be an object")
@@ -1735,6 +1753,19 @@ def validate_evidence_bound_narratives(
                         metric_ids=wrong,
                     )
                 )
+        if assessment_profile.get("workflow_revision") == "mfi-reliable-v1":
+            from .facts import subject_binding_problems, subsection_binding_problems
+            for problem in [*subject_binding_problems(str(claim.get("text") or ""), cited_entries), *subsection_binding_problems(claim, claim_catalog)]:
+                claim_flags.append(_flag(code="citation_context_mismatch", severity="high", artifact_type=location["artifact_type"], artifact_id=location.get("artifact_id"), field_name=location.get("field_name"), claim_id=claim_id, message=problem, metric_ids=cited_ids))
+            passages = []
+            for passage in claim.get("source_passages", []):
+                document = known_documents.get(str(passage.get("document_id") or passage.get("doc_id")))
+                excerpt = str(passage.get("text") or "")
+                if document and str(passage.get("document_id") or passage.get("doc_id")) in {str(item) for item in claim.get("document_ids", [])} and excerpt and excerpt in str(document.get("content") or ""):
+                    passages.append({"content": excerpt})
+                else:
+                    claim_flags.append(_flag(code="invalid_source_passage", severity="high", artifact_type=location["artifact_type"], artifact_id=location.get("artifact_id"), field_name=location.get("field_name"), claim_id=claim_id, message="The cited passage is not present in the original document."))
+            valid_documents = passages
         numbers = _numeric_tokens(str(claim.get("text") or ""))
         if numbers and not cited_ids and not claim.get("document_ids"):
             claim_flags.append(
@@ -1876,6 +1907,8 @@ def apply_narrative_density_policy(
     dimensions = deepcopy(dict(dimension_narratives))
     for narrative in dimensions.values():
         if not isinstance(narrative, dict):
+            continue
+        if assessment_profile.get("workflow_revision") == "mfi-reliable-v1":
             continue
         priority = bool(narrative.get("is_priority"))
         narrative["key_findings"] = list(narrative.get("key_findings") or [])[
@@ -2609,6 +2642,9 @@ def _claim_from_payload(
         raise ValueError("Narrative claim text is required")
     return MFINarrativeClaim(
         claim_id=claim_id,
+        segments=list(raw.get("segments") or []),
+        fact_ids=list(raw.get("fact_ids") or []),
+        source_passages=list(raw.get("source_passages") or []),
         text=text,
         claim_kind=claim_kind,
         metric_ids=[str(item) for item in raw.get("metric_ids", []) if item],
@@ -2790,10 +2826,35 @@ def _numeric_tokens(text: str) -> list[tuple[str, float, bool]]:
         token = match.group(0)
         is_percent = token.endswith("%")
         try:
-            numeric = float(token[:-1] if is_percent else token)
+            numeric = float((token[:-1] if is_percent else token).replace(",", ""))
         except ValueError:
             continue
         tokens.append((token, numeric, is_percent))
+    units = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
+    scales = {"hundred":100, "thousand":1000, "million":1000000, "billion":1000000000}
+    words = "|".join([*units, *scales])
+    pattern = r"\b((?:" + words + r")(?:[- ]+(?:(?:and|point)[- ]+)?(?:" + words + r"))*)\s+(?:(?:assessed|surveyed|included)\s+)?(?:markets?|traders?|regions?|dimensions?|percent(?:age points)?|per cent|points?|of)\b"
+    for match in re.finditer(pattern, cleaned, re.I):
+        token = match.group(1)
+        parts = re.split(r"[- ]+", token.lower())
+        total = current = 0
+        decimal = None
+        for word in parts:
+            if word == "point":
+                decimal = ""
+            elif word == "and":
+                continue
+            elif decimal is not None and word in units and units[word] < 10:
+                decimal += str(units[word])
+            elif word in units:
+                current += units[word]
+            elif word == "hundred":
+                current = (current or 1) * 100
+            elif word in scales:
+                total += (current or 1) * scales[word]
+                current = 0
+        numeric = total + current + (float("0." + decimal) if decimal else 0)
+        tokens.append((token, float(numeric), bool(re.search(r"percent|per cent", match.group(0), re.I))))
     return tokens
 
 
@@ -3467,6 +3528,19 @@ def _context_contract_flags(
     flags: list[dict[str, Any]] = []
     for statement in statements:
         statement_id = str(statement.get("statement_id") or "")
+        if statement.get("withdrawn") or statement.get("classification") == "unrelated":
+            continue
+        if statement.get("passage_binding_required"):
+            passages = []
+            for passage in statement.get("source_passages", []):
+                document = documents.get(passage.get("document_id"))
+                excerpt = str(passage.get("text") or "")
+                if document and excerpt and excerpt in str(document.get("content") or ""):
+                    passages.append({"content": excerpt})
+            if not passages or any(not _numeric_token_is_authorized(value, percent, [], passages) for _, value, percent in _numeric_tokens(str(statement.get("text") or ""))):
+                flags.append(_flag(code="invalid_source_passage", severity="high", artifact_type="context",
+                    artifact_id=statement_id, field_name="text", claim_id=statement_id,
+                    message="Context claim is not supported by its exact cited source passage.", document_ids=statement.get("document_ids", [])))
         document_ids = [
             str(item) for item in statement.get("document_ids", []) if item
         ]

@@ -150,6 +150,7 @@ _REPRESENTATION_SUFFIXES: Mapping[str, str] = {
 _AVAILABILITY_TO_REPRESENTATION: Mapping[str, str] = {
     "complete": "all_assessed_markets",
     "partial_optional": "represented_assessed_markets",
+    "unknown_applicability": "incomplete_assessed_markets",
     "not_applicable": "applicable_assessed_markets",
     "partial_required": "incomplete_assessed_markets",
     "unusable_required": "incomplete_assessed_markets",
@@ -460,13 +461,15 @@ def build_assessment_profile(
             metric.metric_id
             for metric in analyzed_drivers.get(dimension, [])
             if metric.availability is not None
-            and metric.availability.classification == "partial_optional"
+            and metric.availability.classification in {"partial_optional", "unknown_applicability"}
+            and metric.availability.applicability_rule in {"optional_item", "optional_product_group"}
+            and metric.coverage.available_market_count > 0
         )
         if not partial_optional:
             continue
         add_ledger(
             f"assessment.coverage.partial_optional_items.{_slug(dimension)}.count",
-            label=f"{dimension} optional items represented in some assessed markets",
+            label=f"{dimension} optional items with incomplete evidence and uncertain applicability",
             value=len(partial_optional),
             statistic="count",
             unit="count",
@@ -477,8 +480,8 @@ def build_assessment_profile(
             source_metric_ids=partial_optional,
             semantics=MFILedgerSemantics(
                 permitted_subject_phrase=(
-                    "the number of optional items in this dimension represented in only "
-                    "some assessed markets"
+                    "the number of optional items in this dimension with usable evidence in only "
+                    "some assessed markets; applicability elsewhere is unknown"
                 ),
             ),
         )
@@ -628,7 +631,7 @@ def build_assessment_profile(
         for record in dimension_ranked
         if str(record["name"]) in priority_dimensions
     ]
-    return MFIAssessmentProfile(
+    profile = MFIAssessmentProfile(
         analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         analysis_version=ANALYSIS_VERSION,
         methodology_version=str(
@@ -648,6 +651,8 @@ def build_assessment_profile(
         metric_ledger=dict(sorted(ledger.items())),
         tables=tables,
     )
+    from .facts import enrich_profile
+    return MFIAssessmentProfile.model_validate(enrich_profile(profile.model_dump(), markets, context))
 
 
 def _coerce_config(
@@ -1222,24 +1227,24 @@ def _classify_evidence_availability(
     invalid: int,
     raw: Optional[float],
     config: MFIAnalysisConfig,
+    explicitly_inapplicable: int = 0,
 ) -> MFIEvidenceAvailability:
     """Classify why a metric's evidence is incomplete.
 
-    The distinction that matters is *why* a metric covers fewer markets than were
-    assessed. Required evidence that is absent or invalid is a methodology problem. An
-    optional item that was simply not traded in every market is normal, and reporting it
-    as missing evidence is a false alarm — the authoritative Level-1 score does not
-    depend on it.
+    Required evidence that is absent or invalid is a methodology problem.
+    Partial optional evidence retains its measured coverage, but non-applicability
+    requires explicit source evidence; missing values alone do not establish it.
     """
     rule = str(getattr(definition, "applicability_rule", "required") or "required")
     complete = available >= assessed_count and invalid == 0
 
-    if rule == "quality_applicability":
-        # Food Quality applicability is decided per market by the assessment itself, so
-        # partial coverage is the designed behaviour rather than missing evidence.
-        classification = "complete" if complete else "not_applicable"
+    if not complete and explicitly_inapplicable > 0 and available + explicitly_inapplicable == assessed_count and invalid == 0:
+        classification = "not_applicable"
+    elif rule == "quality_applicability":
+        # The special component rule does not establish source applicability.
+        classification = "complete" if complete else "unknown_applicability"
     elif rule in {"optional_item", "optional_product_group"}:
-        classification = "complete" if complete else "partial_optional"
+        classification = "complete" if complete else "unknown_applicability"
     elif invalid > 0 or available == 0 or raw is None:
         classification = "unusable_required"
     elif available < assessed_count:
@@ -1294,6 +1299,7 @@ def _analyze_evidence(
             invalid=int(summary.get("missing_count") or 0),
             raw=raw,
             config=config,
+            explicitly_inapplicable=sum(int((summary.get("applicability_counts") or {}).get(key, 0)) for key in ("not_applicable", "not_represented")),
         )
         if availability.warrants_warning:
             unavailable.append(metric_id)

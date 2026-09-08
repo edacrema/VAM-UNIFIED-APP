@@ -856,7 +856,7 @@ def test_field_correction_prompt_is_closed_catalog_and_patch_is_targeted(
         update["generation_diagnostics"][
             "ignored_correction_metadata_field_count"
         ]
-        == 5
+        == 6
     )
     assert update["llm_diagnostics"]["calls"][-1]["operation"].endswith(
         "_field_correction.v3"

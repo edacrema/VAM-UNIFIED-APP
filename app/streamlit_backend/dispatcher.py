@@ -474,6 +474,7 @@ def _build_mfi_report_output(
 
     return {
         "run_id": run_id,
+        "workflow_revision": (result.get("assessment_profile") or {}).get("workflow_revision"),
         "country": country,
         "data_collection_start": data_collection_start,
         "data_collection_end": data_collection_end,
@@ -1140,6 +1141,30 @@ def _dispatch_mfi_drafter(
     files: Any,
     params: Dict[str, Any],
 ) -> LocalResponse:
+    if len(parts) == 2 and parts[0] in {"resume", "draft", "analysis", "export-draft-docx"}:
+        from app.services.mfi_drafter.execution_service import schedule_resume, get_mfi_run
+        from app.services.mfi_drafter.execution import RecoveryError
+        from app.services.mfi_drafter.drafts import draft_payload, analysis_payload, export_draft
+        try:
+            if get_mfi_run(parts[1]) is None:
+                raise RecoveryError("Run ID not found", 404)
+            options = json_body if isinstance(json_body, dict) else {}
+            if method == "POST" and parts[0] == "resume":
+                if not isinstance(options.get("expected_revision"), int) or not str(options.get("idempotency_key") or "").strip():
+                    raise RecoveryError("expected_revision and idempotency_key are required", 422)
+                def schedule(function, *args):
+                    threading.Thread(target=function, args=args, daemon=True).start()
+                return _json_response(schedule_resume(parts[1], options["expected_revision"], options["idempotency_key"], schedule), status_code=202)
+            if method == "GET" and parts[0] == "draft":
+                return _json_response(draft_payload(parts[1], params.get("snapshot_revision")))
+            if method == "GET" and parts[0] == "analysis":
+                return _json_response(analysis_payload(parts[1]))
+            if method == "POST" and parts[0] == "export-draft-docx":
+                content, filename = export_draft(parts[1], options.get("snapshot_revision"))
+                return LocalResponse(status_code=200, content=content, headers={"Content-Disposition": build_content_disposition(filename),
+                    "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"})
+        except RecoveryError as exc:
+            raise LocalHTTPException(exc.status_code, str(exc)) from exc
     if method == "POST" and parts == ["generate"]:
         return _mfi_drafter_generate(json_body=json_body)
     if method == "POST" and parts == ["generate-from-csv"]:
@@ -1332,9 +1357,16 @@ def _mfi_drafter_generate_from_csv_async(
 
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
+    from app.services.mfi_drafter.execution_service import prepare_submission
+    from app.services.mfi_drafter.execution import RecoveryError
+    try:
+        reservation = prepare_submission(run_id, csv_data)
+    except RecoveryError as exc:
+        set_run_failed(run_id, error=str(exc))
+        raise LocalHTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     update_run(
         run_id,
-        metadata={"release_control": release_control.model_dump()},
+        metadata={"release_control": release_control.model_dump(), "workflow_revision": csv_data.get("workflow_revision")},
     )
 
     progress_map = {
@@ -1437,6 +1469,7 @@ def _mfi_drafter_generate_from_csv_async(
                 release_control=release_control,
                 run_id=run_id,
                 llm_trace_sink=on_llm_trace,
+                **({"execution_reservation": reservation} if reservation else {}),
             )
 
             update_run(run_id, warnings=result.get("warnings", []))
@@ -1600,6 +1633,8 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
 
 
 def _mfi_drafter_status(run_id: str) -> LocalResponse:
+    from app.services.mfi_drafter.execution_service import get_mfi_run as get_run, effective_contract
+    from app.services.mfi_drafter.execution import execution_status
     run = get_run(run_id)
     if run is None:
         raise LocalHTTPException(404, f"Run ID not found: {run_id}")
@@ -1607,6 +1642,7 @@ def _mfi_drafter_status(run_id: str) -> LocalResponse:
         {
             "run_id": run_id,
             "status": run.status,
+            **execution_status(run_id, runtime=effective_contract()),
             "current_node": run.current_node,
             "progress_pct": run.progress_pct,
             "warnings": run.warnings,
@@ -1618,6 +1654,7 @@ def _mfi_drafter_status(run_id: str) -> LocalResponse:
 
 
 def _mfi_drafter_result(run_id: str) -> LocalResponse:
+    from app.services.mfi_drafter.execution_service import get_mfi_run as get_run
     run = get_run(run_id)
     if run is None:
         raise LocalHTTPException(404, f"Run ID not found: {run_id}")
@@ -1651,6 +1688,7 @@ def _mfi_drafter_artifact(run_id: str, artifact_id: str) -> LocalResponse:
 
 
 def _mfi_drafter_export_docx(run_id: str, *, json_body: Any) -> LocalResponse:
+    from app.services.mfi_drafter.execution_service import get_mfi_run as get_run
     run = get_run(run_id)
     if run is None:
         raise LocalHTTPException(404, f"Run ID not found: {run_id}")

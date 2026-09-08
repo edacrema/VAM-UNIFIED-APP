@@ -7,14 +7,14 @@ prefix, or case-insensitive matching.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import sqrt
 from types import MappingProxyType
 from typing import Iterable, Literal, Mapping, Optional
 
 METHODOLOGY_VERSION = "databridge-current"
-ANALYSIS_SCHEMA_VERSION = "2.0"
-NARRATIVE_SCHEMA_VERSION = "2.0"
+ANALYSIS_SCHEMA_VERSION = "2.1"
+NARRATIVE_SCHEMA_VERSION = "2.1"
 SCORE_AUTHORITY = "databridge_level_1"
 SCORE_VALIDATION_ABS_TOLERANCE = 1e-6
 CURRENT_DATABRIDGE_ALPHA = 0.5
@@ -239,6 +239,7 @@ class MetricDefinition:
     question_group: Optional[str] = None
     item_name: Optional[str] = None
     severity_weight: Optional[int] = None
+    parent_subsection_id: Optional[str] = None
 
     @property
     def key(self) -> tuple[int, str, str]:
@@ -1132,6 +1133,10 @@ def _driver_definitions() -> list[MetricDefinition]:
 OFFICIAL_SCORE_DEFINITIONS = tuple(_official_score_definitions())
 SUBSECTION_DEFINITIONS = tuple(_subsection_definitions())
 DRIVER_DEFINITIONS = tuple(_driver_definitions())
+_parents = {(d.dimension, d.question_group): d.metric_id for d in SUBSECTION_DEFINITIONS}
+DRIVER_DEFINITIONS = tuple(replace(d, parent_subsection_id="quality.measure" if d.dimension == "Food Quality" else _parents.get((d.dimension, d.question_group))) for d in DRIVER_DEFINITIONS)
+if any(d.parent_subsection_id not in {s.metric_id for s in SUBSECTION_DEFINITIONS} for d in DRIVER_DEFINITIONS):
+    raise RuntimeError("Every MFI driver must identify its registered parent subsection")
 ALL_METRIC_DEFINITIONS = (
     *OFFICIAL_SCORE_DEFINITIONS,
     *SUBSECTION_DEFINITIONS,

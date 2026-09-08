@@ -170,7 +170,7 @@ def test_loader_preserves_authoritative_scores_and_has_no_internal_alias():
     market = result["markets_data"][0]
     assert market["overall_mfi"] == official
     assert "sub_scores" not in market
-    assert result["analysis_schema_version"] == "2.0"
+    assert result["analysis_schema_version"] == "2.1"
     assert result["methodology_version"] == "databridge-current"
     assert result["score_authority"] == "databridge_level_1"
 
@@ -357,8 +357,10 @@ def test_missing_driver_applicability_is_null_aware_and_never_defaulted():
     )
 
     assert (quality["raw_value"], quality["normalized_value"]) == (None, None)
-    assert quality["applicability_status"] == "not_applicable"
-    assert optional_item["applicability_status"] == "not_represented"
+    assert quality["applicability_status"] == "missing"
+    assert quality["applicability_basis"] == "unknown"
+    assert optional_item["applicability_status"] == "missing"
+    assert optional_item["applicability"] == "unknown"
     assert fixed["applicability_status"] == "missing"
 
 

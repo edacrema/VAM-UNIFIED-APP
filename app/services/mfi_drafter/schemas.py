@@ -20,6 +20,7 @@ from .methodology import (
     OFFICIAL_DIMENSION_SCORE_VARIABLES,
     SCORE_AUTHORITY,
 )
+from .reliable_contracts import NarrativeSegment, SourcePassage
 from .table_projection import MFIReportTableColumn, MFIReportTableSpec
 
 
@@ -155,9 +156,14 @@ class SurveyMetadata:
 # ============================================================================
 
 class MFIMetric(BaseModel):
+    applicability: Literal["applicable", "not_applicable", "not_represented", "unknown"] = "unknown"
     """One exact processed-DataBridge metric for one assessed market."""
 
     metric_id: str
+    parsing_status: str = "valid"
+    applicability_basis: str = "observed"
+    source_rows: List[int] = Field(default_factory=list)
+    source_values: List[Optional[str]] = Field(default_factory=list)
     dimension: str
     display_name: str
     variable_name: str
@@ -217,6 +223,7 @@ class MFIMetricSummary(BaseModel):
     available_market_count: int = 0
     total_assessed_market_count: int = 0
     missing_count: int = 0
+    applicability_counts: Dict[str, int] = Field(default_factory=dict)
     unit: str
     orientation: str
     evidence_scope: str
@@ -326,6 +333,7 @@ class MFIEvidenceAvailability(BaseModel):
 
     classification: Literal[
         "complete",
+        "unknown_applicability",
         "partial_required",
         "partial_optional",
         "not_applicable",
@@ -428,6 +436,8 @@ class MFIDimensionProfile(BaseModel):
     """Complete deterministic analytical profile for one official dimension."""
 
     dimension: str
+    workflow_revision: Optional[str] = None
+    analytical_facts: Dict[str, Any] = Field(default_factory=dict)
     statistics: MFIStatisticalSummary
     profile_rank: int
     selection_order: int
@@ -457,6 +467,7 @@ class MFIMarketProfile(BaseModel):
     """Stored overall score, relative rank, and weak dimensions for one market."""
 
     market_name: str
+    market_key: Optional[str] = None
     region: Optional[str] = None
     overall_mfi: float
     score_rank: int
@@ -576,7 +587,11 @@ class MFIDeterministicTables(BaseModel):
 class MFIAssessmentProfile(BaseModel):
     """Complete public Phase 2 deterministic assessment profile."""
 
-    analysis_schema_version: Literal["2.0"] = ANALYSIS_SCHEMA_VERSION
+    analysis_schema_version: Literal["2.0", "2.1"] = ANALYSIS_SCHEMA_VERSION
+    workflow_revision: Optional[str] = None
+    analytical_facts: Dict[str, Any] = Field(default_factory=dict)
+    coverage_manifest: List[Dict[str, Any]] = Field(default_factory=list)
+    market_identities: Dict[str, Any] = Field(default_factory=dict)
     analysis_version: str
     methodology_version: str
     score_authority: str
@@ -599,6 +614,9 @@ class MFIAssessmentProfile(BaseModel):
 # ============================================================================
 
 class MFIContextEvidenceStatement(BaseModel):
+    withdrawn: bool = False
+    passage_binding_required: bool = False
+    source_passages: List[Dict[str, Any]] = Field(default_factory=list)
     """One source-linked contextual statement classified before drafting."""
 
     statement_id: str
@@ -749,6 +767,7 @@ class MFIClaimCatalogEntry(BaseModel):
     """Closed deterministic value that narrative claims may cite."""
 
     metric_id: str
+    fact: Optional[Dict[str, Any]] = None
     label: str
     numeric_value: float
     formatted_value: str
@@ -788,6 +807,10 @@ class MFINarrativeClaim(BaseModel):
     """One independently cited and validated narrative statement."""
 
     claim_id: str
+    segments: List[Dict[str, Any]] = Field(default_factory=list)
+    fact_ids: List[str] = Field(default_factory=list)
+    source_passages: List[Dict[str, Any]] = Field(default_factory=list)
+    revision: int = 1
     text: str
     claim_kind: Literal[
         "summary",
@@ -852,6 +875,7 @@ class MFIMarketNarrative(BaseModel):
     """Canonical recommendation narrative for one selected market."""
 
     market_name: str
+    market_key: Optional[str] = None
     region: Optional[str] = None
     overall_mfi: float
     score_rank: int
@@ -974,6 +998,9 @@ class MFIClaimPatchValue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1)
+    segments: List[NarrativeSegment] = Field(default_factory=list)
+    fact_ids: List[str] = Field(default_factory=list)
+    source_passages: List[SourcePassage] = Field(default_factory=list)
     claim_kind: Optional[Literal[
         "summary",
         "finding",
@@ -1029,6 +1056,11 @@ class MFIContextClassificationFieldPatch(BaseModel):
 class MFIContextDocumentsFieldPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     replacement: List[str]
+
+
+class MFIContextWithdrawalPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: Literal[True]
 
 
 class MFIRedTeamBatchDiagnostic(BaseModel):
@@ -1092,6 +1124,9 @@ class MFIClaimValidationResult(BaseModel):
 
 
 class MFICorrectionTarget(BaseModel):
+    expected_field_hash: Optional[str] = None
+    expected_field_revision: Optional[int] = None
+    patch_kind: Optional[str] = None
     """Exact narrative field selected for a targeted repair."""
 
     artifact_type: Literal[
@@ -1281,7 +1316,7 @@ class MFIGenerationDiagnostics(BaseModel):
     claim_substitutions: List[Dict[str, Any]] = Field(default_factory=list)
     unmatched_high_claim_ids: List[str] = Field(default_factory=list)
     claim_identity_authority: Literal["application"] = "application"
-    claim_identity_version: Literal["mfi-claim-id-v1"] = "mfi-claim-id-v1"
+    claim_identity_version: Literal["mfi-claim-id-v1", "mfi-claim-id-v2"] = "mfi-claim-id-v2"
     ignored_model_identifier_count: int = Field(default=0, ge=0)
     ignored_correction_metadata_field_count: int = Field(default=0, ge=0)
     identity_fallback_artifacts: List[str] = Field(default_factory=list)
@@ -1342,16 +1377,17 @@ class GenerateMFIReportFromCSVInput(BaseModel):
 
 
 class GenerateMFIReportOutput(BaseModel):
+    workflow_revision: Optional[str] = None
     """Output of MFI report generation."""
     run_id: str
     country: str
     data_collection_start: str
     data_collection_end: str
 
-    analysis_schema_version: Literal["2.0"] = ANALYSIS_SCHEMA_VERSION
+    analysis_schema_version: Literal["2.0", "2.1"] = ANALYSIS_SCHEMA_VERSION
     methodology_version: Literal["databridge-current"] = METHODOLOGY_VERSION
     score_authority: Literal["databridge_level_1", "synthetic_mock"] = SCORE_AUTHORITY
-    narrative_schema_version: Literal["2.0"] = NARRATIVE_SCHEMA_VERSION
+    narrative_schema_version: Literal["2.0", "2.1"] = NARRATIVE_SCHEMA_VERSION
     release_control: MFIReleaseControl
     generation_diagnostics: MFIGenerationDiagnostics = Field(
         default_factory=MFIGenerationDiagnostics
@@ -1438,6 +1474,20 @@ class GenerateMFIReportOutput(BaseModel):
 class MFIReportStatusOutput(BaseModel):
     """Status of an in-progress report."""
     run_id: str
+    workflow_revision: Optional[str] = None
+    run_revision: int = 0
+    execution_state: Optional[str] = None
+    active_task: Optional[str] = None
+    last_error: Optional[str] = None
+    recovery_storage: Optional[str] = None
+    resumable: bool = False
+    resume_block_reason: Optional[str] = None
+    draft_available: bool = False
+    draft_revision: Optional[int] = None
+    analysis_available: bool = False
+    qa_evaluation_status: str = "not_evaluated"
+    unresolved_counts: Optional[Dict[str, int]] = None
+    work_totals: Dict[str, int] = Field(default_factory=dict)
     status: Literal["pending", "running", "completed", "failed"]
     current_node: Optional[str] = None
     progress_pct: int = 0

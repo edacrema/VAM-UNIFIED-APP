@@ -1,4 +1,6 @@
 import streamlit as st
+import json
+import uuid
 
 from streamlit_shared import (
     apply_wfp_theme,
@@ -12,6 +14,7 @@ from streamlit_shared import (
     render_report_blocks,
     render_wfp_sidebar_logo,
     request_json,
+    request_bytes,
     run_async_and_poll,
     safe_show_error,
 )
@@ -78,6 +81,12 @@ with st.form("mfi_drafter_csv"):
         disabled=not generation_enabled,
     )
 
+def _remember_run(run_id):
+    st.session_state["mfi_last_run_id"] = run_id
+    st.session_state.pop("mfi_last_result", None)
+    st.query_params["mfi_run"] = run_id
+
+
 if run_csv:
     try:
         if uploaded is None:
@@ -112,6 +121,7 @@ if run_csv:
                     start_files=files,
                     poll_interval_seconds=2.0,
                     timeout_seconds=3600,
+                    on_started=_remember_run,
                 )
                 st.session_state["mfi_last_result"] = result
                 st.session_state["mfi_last_run_id"] = run_id
@@ -129,6 +139,54 @@ if run_csv:
 
 result = st.session_state.get("mfi_last_result")
 run_id = st.session_state.get("mfi_last_run_id")
+if not run_id and st.query_params.get("mfi_run"):
+    run_id = str(st.query_params["mfi_run"])
+    st.session_state["mfi_last_run_id"] = run_id
+
+
+@st.fragment(run_every="10s")
+def _recovery_panel(active_run):
+    if not active_run:
+        return
+    try:
+        status = request_json("GET", f"/mfi-drafter/status/{active_run}", timeout=30)
+        if status.get("status") == "completed":
+            if st.session_state.get("mfi_last_result") is None:
+                st.session_state["mfi_last_result"] = request_json("GET", f"/mfi-drafter/result/{active_run}", timeout=120)
+                st.rerun()
+            return
+        st.caption(f"Run {active_run} · {status.get('execution_state') or status.get('status')} · {status.get('current_node') or 'starting'}")
+        if status.get("error"):
+            st.warning(status["error"])
+        if status.get("resumable"):
+            st.caption("Resume continues saved work and may make additional model calls.")
+            if st.button("Resume", key=f"resume-{active_run}"):
+                key = st.session_state.setdefault(f"resume-key-{active_run}-{status['run_revision']}", uuid.uuid4().hex)
+                request_json("POST", f"/mfi-drafter/resume/{active_run}", json_body={"expected_revision": status["run_revision"], "idempotency_key": key}, timeout=60)
+                st.rerun(scope="fragment")
+        if status.get("analysis_available"):
+            if st.button("Prepare analytical download", key=f"analysis-{active_run}"):
+                analytical = request_json("GET", f"/mfi-drafter/analysis/{active_run}", timeout=120)
+                st.session_state[f"analysis-download-{active_run}"] = json.dumps(analytical, ensure_ascii=False)
+            if st.session_state.get(f"analysis-download-{active_run}"):
+                st.download_button("Download validated analysis (JSON)", st.session_state[f"analysis-download-{active_run}"],
+                    file_name=f"mfi-analysis-{active_run}.json", mime="application/json", key=f"download-analysis-{active_run}")
+        if status.get("draft_available"):
+            st.caption("Incomplete draft — not validated. Includes unresolved findings and completion markers.")
+            revision = status["draft_revision"]
+            cache_key = f"draft-download-{active_run}-{revision}"
+            if st.button("Prepare incomplete draft", key=f"prepare-{cache_key}"):
+                st.session_state[cache_key] = request_bytes("POST", f"/mfi-drafter/export-draft-docx/{active_run}",
+                    json_body={"snapshot_revision": revision}, timeout=180)
+            if cache_key in st.session_state:
+                st.download_button("Download INCOMPLETE DRAFT", st.session_state[cache_key],
+                    file_name=f"DRAFT-mfi-{active_run}-r{revision}.docx", key=cache_key,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except Exception as exc:
+        safe_show_error(exc)
+
+
+_recovery_panel(run_id)
 
 if isinstance(result, dict):
 

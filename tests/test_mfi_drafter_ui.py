@@ -103,6 +103,7 @@ shared.render_report_blocks = lambda *args, **kwargs: None
 shared.render_mfi_raw_table_downloads = lambda *args, **kwargs: None
 shared.render_llm_diagnostics = lambda *args, **kwargs: None
 shared.request_json = backend.request_json
+shared.request_bytes = lambda *args, **kwargs: (b"draft", {{}})
 shared.run_async_and_poll = backend.run_async_and_poll
 shared.safe_show_error = lambda error: st.error(str(error))
 sys.modules["streamlit_shared"] = shared

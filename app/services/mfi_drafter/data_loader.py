@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import io
+import math
 import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional, Union
 
 import pandas as pd
+from .input_validation import MFIInputError, clean, market_metadata, parse_collection_date, prepare_identities
+from .reliable_contracts import InputFinding, ValidatedAssessment, WORKFLOW_REVISION, fingerprint
 
 from .methodology import (
     ANALYSIS_SCHEMA_VERSION,
@@ -47,6 +50,9 @@ REQUIRED_COLUMNS = {
 REQUIRED_COLLECTION_DATE_FIELDS = ("StartDate", "EndDate")
 
 DATABRIDGES_COLUMN_MAP = {
+    "applicability_status": "MetricApplicability", "applicabilityStatus": "MetricApplicability", "ApplicabilityStatus": "MetricApplicability",
+    "survey_id": "SurveyID", "market_id": "MarketID", "adm0_code": "Adm0Code", "adm1_code": "Adm1Code", "adm2_code": "Adm2Code",
+    **{alias: target for target in ("SurveyID", "MarketID", "Adm0Code", "Adm1Code", "Adm2Code") for alias in (target[0].lower() + target[1:], target.replace("ID", "Id"), target.lower())},
     "marketName": "MarketName",
     "market_name": "MarketName",
     "adm0Name": "Adm0Name",
@@ -104,6 +110,19 @@ def load_mfi_from_dataframe(
     prepared = _prepare_dataframe(df)
     start_date = _required_collection_date(prepared, "StartDate", start_date_override)
     end_date = _required_collection_date(prepared, "EndDate", end_date_override)
+    if start_date > end_date:
+        raise MFIInputError("MFI collection StartDate must not be later than EndDate")
+    if not country_override and not any(clean(v) for v in prepared["Adm0Name"]):
+        raise MFIInputError("MFI data requires a country or an explicit country override")
+    for row in prepared.attrs.get("source_intervals") or prepared.to_dict("records"):
+        start = parse_collection_date(start_date_override or row.get("StartDate"))
+        end = parse_collection_date(end_date_override or row.get("EndDate"))
+        if start == "Unknown" or end == "Unknown" or start > end:
+            message = f"Invalid collection interval at source row {row['_source_row']}"
+            raise MFIInputError(message, [InputFinding(code="invalid_collection_interval", severity="error",
+                message=message, row_references=[row["_source_row"]], fields=["StartDate", "EndDate"]).model_dump()])
+    source_metadata = dict(prepared.attrs)
+    prepared.attrs.clear()  # pandas deep-copies attrs during every row/column projection
     included_markets, excluded_records = _classify_market_records(prepared)
 
     methodology_warnings: list[MFIMethodologyWarning] = []
@@ -121,6 +140,8 @@ def load_mfi_from_dataframe(
 
     market_records: list[dict[str, Any]] = []
     evidence_models: dict[str, dict[str, list[MFIMetric]]] = {}
+    input_findings = list(source_metadata.get("input_findings", []))
+    identities = source_metadata["market_identities"]
     for market_name in included_markets:
         market_df = prepared[prepared["MarketName"] == market_name]
         rows_by_key = _rows_by_semantic_key(market_df)
@@ -153,18 +174,32 @@ def load_mfi_from_dataframe(
 
         representative = market_df.iloc[0]
         admin1 = _clean_text(representative.get("Adm1Name")) or ""
-        traders = _nullable_int(_first_non_null(market_df["TradersSampleSize"]))
-        latitude = _first_numeric(market_df.get("MarketLatitude"))
-        longitude = _first_numeric(market_df.get("MarketLongitude"))
+        market_key = str(representative["_market_key"])
+        traders, latitude, longitude, metadata_findings = source_metadata["market_metadata"][market_key]
+        input_findings.extend(metadata_findings)
+        for metric in [*subsections, *drivers]:
+            if metric.validation_status in {"duplicate", "out_of_range", "formula_mismatch"} or (
+                metric.parsing_status in {"empty", "nonnumeric", "nonfinite"}
+                and metric.applicability not in {"not_applicable", "not_represented"}
+            ):
+                input_findings.append(InputFinding(
+                    code=f"evidence_{metric.validation_status if metric.validation_status != 'valid' else metric.parsing_status}",
+                    message=f"{market_name}: {metric.display_name} has invalid explanatory evidence ({metric.validation_status}; {metric.parsing_status}).",
+                    market_key=market_key, row_references=metric.source_rows,
+                    fields=["OutputValue", metric.variable_name],
+                ).model_dump())
         overall = official_scores["MFI"]
 
-        evidence_models[market_name] = {
+        evidence_models[market_key] = {
             "subsections": subsections,
             "drivers": drivers,
         }
         market_records.append(
             {
                 "market_name": market_name,
+                "market_key": market_key,
+                "identity": identities[market_key],
+                "source_market_name": identities[market_key]["source_market_name"],
                 "admin0": _clean_text(representative.get("Adm0Name")) or "",
                 "admin1": admin1,
                 "admin2": _clean_text(representative.get("Adm2Name")) or admin1,
@@ -182,15 +217,32 @@ def load_mfi_from_dataframe(
     _apply_assessment_coverage(evidence_models, len(market_records))
     metric_summaries = _build_metric_summaries(evidence_models, len(market_records))
     for market in market_records:
-        groups = evidence_models[market["market_name"]]
+        groups = evidence_models[market["market_key"]]
         market["subsections"] = _group_evidence_by_dimension(groups["subsections"])
         market["drivers"] = _group_evidence_by_dimension(groups["drivers"])
 
     regions = sorted({market["region"] for market in market_records if market["region"]})
     country = country_override or market_records[0]["admin0"]
     warnings = [warning.message for warning in methodology_warnings]
+    warnings.extend(item["message"] for item in input_findings if item["severity"] != "info")
+    validated = ValidatedAssessment(
+        input_fingerprint=fingerprint(df.astype(object).where(pd.notna(df), None).to_dict("records")),
+        country_identity=source_metadata["country_identity"], survey_id=source_metadata["survey_id"],
+        market_identities=identities, findings=input_findings,
+        included_market_keys=[m["market_key"] for m in market_records],
+        excluded_market_keys=[key for key, identity in identities.items() if identity["display_label"] not in included_markets],
+        official_scores={m["market_key"]: {"overall_mfi": m["overall_mfi"], "dimensions": m["dimension_scores"]} for m in market_records},
+        evidence_validity={m["market_key"]: {metric.metric_id: {"validation": metric.validation_status, "parsing": metric.parsing_status, "applicability": metric.applicability}
+            for group in evidence_models[m["market_key"]].values() for metric in group} for m in market_records},
+        metadata_provenance={"country_override": country_override, "start_date_override": start_date_override, "end_date_override": end_date_override},
+    ).model_dump()
+    known_traders = sum(m["traders_surveyed"] for m in market_records if m["traders_surveyed"] is not None)
+    known_count = sum(m["traders_surveyed"] is not None for m in market_records)
 
     return {
+        "workflow_revision": WORKFLOW_REVISION,
+        "validated_assessment": validated,
+        "input_findings": input_findings,
         "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
         "methodology_version": METHODOLOGY_VERSION,
         "score_authority": SCORE_AUTHORITY,
@@ -202,9 +254,9 @@ def load_mfi_from_dataframe(
         "survey_metadata": {
             "country": country,
             "collection_period": f"{start_date} to {end_date}",
-            "total_traders": sum(
-                market["traders_surveyed"] or 0 for market in market_records
-            ),
+            "total_traders": known_traders if known_count == len(market_records) else None,
+            "known_trader_subtotal": known_traders,
+            "trader_count_market_coverage": known_count,
             "total_markets": len(market_records),
             "included_full_mfi_markets": len(market_records),
             "excluded_market_records": len(excluded_records),
@@ -239,11 +291,13 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> dict[str, An
         )
 
     loaded: Optional[dict[str, Any]] = None
+    input_findings: list[dict] = []
     if not errors:
         try:
             loaded = load_mfi_from_dataframe(standardised)
         except ValueError as exc:
             errors.append(str(exc))
+            input_findings = getattr(exc, "findings", [])
 
     has_normalized = False
     if "LevelID" in standardised.columns:
@@ -263,19 +317,20 @@ def validate_csv_structure(file_content: Union[BinaryIO, bytes]) -> dict[str, An
         "warnings": loaded["warnings"] if loaded else [],
         "methodology_warnings": loaded["methodology_warnings"] if loaded else [],
         "excluded_market_records": loaded["excluded_market_records"] if loaded else [],
+        "input_findings": loaded.get("input_findings", []) if loaded else input_findings,
     }
 
 
 def _read_full_csv(file_content: CSVSource) -> pd.DataFrame:
     if isinstance(file_content, Path):
-        return pd.read_csv(file_content)
+        return pd.read_csv(file_content, dtype=str, keep_default_na=False)
     if isinstance(file_content, str):
-        return pd.read_csv(file_content)
+        return pd.read_csv(file_content, dtype=str, keep_default_na=False)
     if isinstance(file_content, bytes):
-        return pd.read_csv(io.BytesIO(file_content))
+        return pd.read_csv(io.BytesIO(file_content), dtype=str, keep_default_na=False)
     if hasattr(file_content, "seek"):
         file_content.seek(0)
-    return pd.read_csv(file_content)
+    return pd.read_csv(file_content, dtype=str, keep_default_na=False)
 
 
 def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -295,6 +350,11 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if column in prepared.columns:
             prepared[column] = prepared[column].astype("string").str.strip()
 
+    if prepared["MarketName"].isna().any() or (prepared["MarketName"] == "").any():
+        raise ValueError("MFI data contains rows without a MarketName.")
+    prepared = prepare_identities(prepared)
+    source_metadata = dict(prepared.attrs)
+    prepared.attrs.clear()
     prepared["LevelID"] = pd.to_numeric(prepared["LevelID"], errors="coerce")
     prepared["OutputValue"] = pd.to_numeric(prepared["OutputValue"], errors="coerce")
     prepared["TradersSampleSize"] = pd.to_numeric(
@@ -308,6 +368,7 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("MFI data contains rows without a MarketName.")
     if "Adm2Name" not in prepared.columns:
         prepared["Adm2Name"] = prepared["Adm1Name"]
+    prepared.attrs.update(source_metadata)
     return prepared
 
 
@@ -317,6 +378,7 @@ def _classify_market_records(
     included: list[str] = []
     excluded: list[MFIExcludedMarketRecord] = []
     failures: list[str] = []
+    findings: list[dict] = []
 
     for market_name in sorted(df["MarketName"].dropna().unique().tolist()):
         market_df = df[df["MarketName"] == market_name]
@@ -373,12 +435,18 @@ def _classify_market_records(
                 )
         if market_errors:
             failures.append(f"{market_name}: {', '.join(market_errors)}")
+            findings.append(InputFinding(
+                code="invalid_official_scores", severity="error", message=failures[-1],
+                market_key=str(market_df.iloc[0]["_market_key"]),
+                row_references=sorted({int(row) for rows in level_one["_source_rows"] for row in rows}),
+                fields=["LevelID", "DimensionName", "VariableName", "OutputValue"],
+            ).model_dump())
         else:
             included.append(market_name)
 
     if failures:
-        raise ValueError(
-            "Invalid or incomplete Full MFI Level-1 record(s): " + "; ".join(failures)
+        raise MFIInputError(
+            "Invalid or incomplete Full MFI Level-1 record(s): " + "; ".join(failures), findings
         )
     if not included:
         if excluded:
@@ -429,15 +497,30 @@ def _extract_evidence_group(
         validation = "valid"
         normalized: Optional[float] = None
 
-        if count == 0 or raw_value is None:
+        parse_status = str(rows["_output_state"].iloc[0]) if count and "_output_state" in rows else "valid" if raw_value is not None else "absent"
+        if count == 0 or raw_value is None or not math.isfinite(raw_value):
             validation = "missing"
-            applicability = _missing_applicability(definition)
+            applicability = "missing"
+            raw_value = None
         elif count > 1:
             validation = "duplicate"
         elif not definition.raw_min <= raw_value <= definition.raw_max:
             validation = "out_of_range"
         else:
             normalized = definition.normalize(raw_value)
+
+        explicit = {clean(v).casefold() for v in rows.get("MetricApplicability", []) if clean(v)}
+        semantic_applicability = "applicable" if validation == "valid" else "unknown"
+        basis = "observed" if semantic_applicability == "applicable" else "unknown"
+        if len(explicit) == 1 and next(iter(explicit)) in {"applicable", "not_applicable", "not_represented"}:
+            semantic_applicability = next(iter(explicit))
+            basis = "explicit_source_column"
+            if semantic_applicability != "applicable":
+                applicability = "not_applicable"
+                normalized = None
+        elif len(explicit) > 1:
+            validation = "duplicate"
+            normalized = None
 
         metric = MFIMetric(
             metric_id=definition.metric_id,
@@ -455,11 +538,16 @@ def _extract_evidence_group(
             unit=definition.unit,
             evidence_scope=definition.evidence_scope,
             observed_raw_values=[
-                float(value) if pd.notna(value) else None
+                float(value) if pd.notna(value) and math.isfinite(float(value)) else None
                 for value in rows["OutputValue"].tolist()
             ],
             applicability_status=applicability,
+            applicability=semantic_applicability,
             validation_status=validation,
+            parsing_status=parse_status,
+            applicability_basis=basis,
+            source_rows=sorted({int(n) for ns in rows.get("_source_rows", []) for n in ns}),
+            source_values=[v for group in rows.get("_source_values", []) for v in group],
             methodology_note=definition.methodology_note,
             product_group=definition.product_group,
             question_group=definition.question_group,
@@ -485,7 +573,7 @@ def _extract_evidence_group(
                     count,
                 )
             )
-        elif validation in {"duplicate", "out_of_range"}:
+        elif validation in {"duplicate", "out_of_range"} or parse_status in {"nonnumeric", "nonfinite", "empty"}:
             warnings.append(
                 _evidence_warning(
                     market_name,
@@ -499,10 +587,6 @@ def _extract_evidence_group(
 
 
 def _missing_applicability(definition: MetricDefinition) -> str:
-    if definition.applicability_rule == "quality_applicability":
-        return "not_applicable"
-    if definition.applicability_rule in {"optional_item", "optional_product_group"}:
-        return "not_represented"
     return "missing"
 
 
@@ -723,6 +807,7 @@ def _build_metric_summaries(
             available_market_count=denominator,
             total_assessed_market_count=total_markets,
             missing_count=missing_count,
+            applicability_counts={state: sum(metric.applicability == state for metric in metrics) for state in ("applicable", "not_applicable", "not_represented", "unknown")},
             unit=reference.unit,
             orientation=reference.orientation,
             evidence_scope=reference.evidence_scope,
@@ -798,11 +883,9 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 def _first_date(df: pd.DataFrame, column: str) -> str:
     if column not in df.columns or df[column].dropna().empty:
         return "Unknown"
-    for value in df[column].dropna().tolist():
-        formatted = _format_date(value)
-        if formatted != "Unknown":
-            return formatted
-    return "Unknown"
+    values = [_format_date(row.get(column)) for row in df.attrs.get("source_intervals", [])] if df.attrs.get("source_intervals") else [_format_date(v) for v in df[column].dropna().tolist()]
+    valid = [v for v in values if v != "Unknown"]
+    return (max(valid) if column == "EndDate" else min(valid)) if valid else "Unknown"
 
 
 def _required_collection_date(
@@ -822,12 +905,7 @@ def _required_collection_date(
 
 
 def _format_date(value: Any) -> str:
-    if value in (None, ""):
-        return "Unknown"
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return "Unknown"
-    return parsed.strftime("%Y-%m-%d")
+    return parse_collection_date(value)
 
 
 def _clean_text(value: Any) -> Optional[str]:
@@ -844,7 +922,11 @@ def _first_non_null(values: pd.Series) -> Any:
 def _nullable_int(value: Any) -> Optional[int]:
     if value is None or pd.isna(value):
         return None
-    return int(value)
+    try:
+        number = float(value)
+        return int(number) if math.isfinite(number) and number >= 0 and number.is_integer() else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _first_numeric(values: Optional[pd.Series]) -> Optional[float]:

@@ -231,11 +231,11 @@ def test_partial_optional_items_are_marked_as_represented(partial_profile) -> No
     entries = [
         entry
         for entry in _ledgers(partial_profile).values()
-        if entry["representation_basis"] == "represented_assessed_markets"
+        if entry["representation_basis"] == "incomplete_assessed_markets"
     ]
 
     assert entries
-    assert any("was represented" in entry["permitted_subject_phrase"] for entry in entries)
+    assert any("usable evidence" in entry["permitted_subject_phrase"] for entry in entries)
 
 
 def test_food_quality_applicability_is_distinguished(partial_profile) -> None:
@@ -243,11 +243,11 @@ def test_food_quality_applicability_is_distinguished(partial_profile) -> None:
     entries = [
         entry
         for entry in _ledgers(partial_profile).values()
-        if entry["representation_basis"] == "applicable_assessed_markets"
+        if entry["representation_basis"] == "incomplete_assessed_markets"
     ]
 
     assert entries
-    assert any("was applicable" in entry["permitted_subject_phrase"] for entry in entries)
+    assert any("usable evidence" in entry["permitted_subject_phrase"] for entry in entries)
 
 
 def test_required_evidence_failure_is_distinguished() -> None:
@@ -317,7 +317,7 @@ def test_catalog_formatting_is_unchanged_by_r2(complete_profile) -> None:
         assert entry["formatted_value"] == expected
         assert entry["allowed_renderings"] == _allowed_renderings(
             entry["numeric_value"], entry["unit"], entry["statistic"]
-        )
+        ) + ([entry["fact"]["rendered_text"]] if entry.get("fact") else [])
 
 
 def test_representation_counts_are_available_as_integers(partial_profile) -> None:
@@ -327,7 +327,7 @@ def test_representation_counts_are_available_as_integers(partial_profile) -> Non
     partial = [
         entry
         for entry in catalog.values()
-        if entry["representation_basis"] == "represented_assessed_markets"
+        if entry["representation_basis"] == "incomplete_assessed_markets"
         and entry["represented_market_count"] is not None
     ]
     assert partial

@@ -978,6 +978,7 @@ def run_async_and_poll(
     start_files: Optional[dict] = None,
     poll_interval_seconds: float = 2.0,
     timeout_seconds: int = 1800,
+    on_started: Any = None,
 ) -> Tuple[str, Any, Any]:
     start_resp = request_json(
         start_method,
@@ -992,6 +993,8 @@ def run_async_and_poll(
         raise RuntimeError(f"Unexpected start response: {start_resp}")
 
     run_id = str(start_resp.get("run_id"))
+    if on_started is not None:
+        on_started(run_id)
 
     status_placeholder = st.empty()
     started = time.time()

@@ -1188,6 +1188,9 @@ def build_mfi_report_blocks(
     catalog = result.get("claim_catalog") or {}
     context_evidence = result.get("context_evidence") or []
     dimension_narratives = result.get("dimension_narratives") or {}
+    if profile.get("workflow_revision"):
+        from app.services.mfi_drafter.coverage import body_projection
+        dimension_narratives = body_projection(dimension_narratives)
     market_narratives = result.get("market_narratives") or {}
     executive = result.get("executive_summary_narrative") or {}
     context_status = result.get("context_status") or {}
@@ -1476,11 +1479,15 @@ def build_mfi_report_blocks(
                 )
 
     blocks.append(
-        ReportBlock(type="heading", text="Expanded priority-dimension evidence", level=2)
+        ReportBlock(type="heading", text="Subsection discussion" if profile.get("workflow_revision") else "Expanded priority-dimension evidence", level=2)
     )
-    priority_dimensions = profile.get("priority_dimension_names", []) or []
+    priority_dimensions = list(_MFI_DIMENSIONS) if profile.get("workflow_revision") else (profile.get("priority_dimension_names", []) or [])
+    if profile.get("workflow_revision") and not any(n.get("subdimension_analysis") for n in dimension_narratives.values()):
+        blocks.append(ReportBlock(type="paragraph", text="Complete subsection evidence is presented in the analytical annex."))
     for dimension in priority_dimensions:
         narrative = dimension_narratives.get(dimension) or {}
+        if profile.get("workflow_revision") and not narrative.get("subdimension_analysis"):
+            continue
         blocks.append(
             ReportBlock(
                 type="heading",
@@ -1511,6 +1518,8 @@ def build_mfi_report_blocks(
             ("mfi.ranked_driver.v1", "Ranked explanatory evidence"),
             ("mfi.relevant_item.v1", "Relevant item evidence"),
         ):
+            if profile.get("workflow_revision"):
+                continue
             if dimension == "Food Quality" and spec_id == "mfi.official_subsection.v1":
                 continue
             table = _mfi_table_block(
@@ -1726,6 +1735,9 @@ def build_mfi_report_blocks(
                 meta={"qa_review": qa_review},
             )
         )
+    if profile.get("workflow_revision"):
+        from app.services.mfi_drafter.coverage import annex_blocks
+        blocks.extend(annex_blocks(result))
     return _apply_mfi_layout_contract(
         blocks,
         country=country,

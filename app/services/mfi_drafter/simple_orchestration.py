@@ -149,6 +149,8 @@ def build_dimension_draft_batches(
 ) -> List[Dict[str, Any]]:
     """Return one batch per priority dimension and one non-priority batch."""
     profiles = ordered_dimension_profiles(assessment_profile)
+    if assessment_profile.get("workflow_revision") == "mfi-reliable-v1":
+        return [{"batch_id": f"dimension-{normalized_slug(p['dimension'])}", "batch_kind": "complete_dimension", "artifact_ids": [p["dimension"]], "profiles": [p]} for p in profiles]
     priorities = [item for item in profiles if bool(item.get("is_priority"))]
     non_priorities = [item for item in profiles if not bool(item.get("is_priority"))]
     batches: List[Dict[str, Any]] = []
@@ -267,9 +269,7 @@ def _primary_local_ledger_id(
     role: str,
 ) -> str | None:
     if role in {"category_driver", "question_driver", "item_driver"}:
-        return statistics.get("derived_market_unfavorable_rate") or statistics.get(
-            "market_explanatory_normalized_value"
-        )
+        return statistics.get("derived_market_unfavorable_rate")
     return statistics.get("market_explanatory_normalized_value") or statistics.get(
         "market_explanatory_raw_value"
     )
@@ -285,6 +285,7 @@ def _market_projection_entry(
         "source_metric_id": source_metric_id,
         "ledger_metric_id": ledger_id,
         "role": definition.role,
+        "parent_subsection_id": definition.parent_subsection_id,
         "product_group": definition.product_group,
         "question_group": definition.question_group,
         "item_name": definition.item_name,
@@ -463,6 +464,7 @@ def build_market_prompt_projection(
     return {
         "projection_version": MARKET_PROMPT_PROJECTION_VERSION,
         "market_name": market_name,
+        "market_key": market_profile.get("market_key"),
         "region": market_profile.get("region"),
         "overall_mfi": market_profile.get("overall_mfi"),
         "score_rank": market_profile.get("score_rank"),
@@ -587,6 +589,8 @@ def build_budgeted_market_draft_batches(
         raise ValueError("maximum_batch_size must be positive")
     if maximum_prompt_characters < 1:
         raise ValueError("maximum_prompt_characters must be positive")
+    if assessment_profile.get("workflow_revision"):
+        maximum_prompt_characters = min(maximum_prompt_characters, 140_000)
     projections = [
         build_market_prompt_projection(assessment_profile, profile)
         for profile in ordered_priority_market_profiles(assessment_profile)
@@ -719,11 +723,14 @@ def validate_market_draft_batch(
         ):
             raise ValueError("Each market batch row requires a narrative object")
         market = str(row["market_name"])
+        from .facts import render_payload
         result[market] = parse_market_narrative(
-            row["narrative"],
+            render_payload(row["narrative"], batch.get("claim_catalog", {})),
             market_profile=profiles[market],
             strict=True,
         )
+        if profiles[market].get("market_key"):
+            result[market]["market_key"] = profiles[market]["market_key"]
     return result
 
 
@@ -805,6 +812,23 @@ def _compact_ranked_metric(metric: Mapping[str, Any]) -> Dict[str, Any]:
 def dimension_prompt_profile(profile: Mapping[str, Any]) -> Dict[str, Any]:
     """Keep only evidence that the bounded R8 prose can actually consume."""
     priority = bool(profile.get("is_priority"))
+    if profile.get("workflow_revision") == "mfi-reliable-v1":
+        result = deepcopy(dict(profile))
+        result["subsections"] = [_compact_ranked_metric(m) for m in profile.get("subsections", [])]
+        result["drivers"] = [_compact_ranked_metric(m) for m in profile.get("drivers", []) if m.get("role") != "item_driver" or m.get("item_relevant")]
+        # Match the complete regional mean/denominator table used in drafting.
+        # Other referenced regional statistics are authorized explicitly from
+        # the affected claims/findings by the correction package builder.
+        result["regional_summaries"] = [
+            {"region": region["region"], "statistics": {
+                "mean": region["statistics"]["mean"],
+                "denominator": region["statistics"]["denominator"]},
+             "ledger_metric_ids": [key for key in region.get("ledger_metric_ids", []) if key.endswith(".mean")]}
+            for region in profile.get("regional_summaries", [])
+        ]
+        localized = result.get("localized_patterns") or {}
+        localized["markets_where_dimension_is_weakest_within_market"] = localized.pop("markets_where_lowest", [])
+        return result
     result: Dict[str, Any] = {
         key: deepcopy(profile.get(key))
         for key in (
@@ -893,6 +917,9 @@ def _add_claim(
             "field_name": field_name,
             "position": position,
             "text": str(claim.get("text") or ""),
+            "segments": deepcopy(claim.get("segments", [])),
+            "fact_ids": list(claim.get("fact_ids", [])),
+            "source_passages": deepcopy(claim.get("source_passages", [])),
             "scope": claim.get("scope"),
             "polarity": claim.get("polarity"),
             "metric_ids": [str(item) for item in claim.get("metric_ids", []) or []],
@@ -1168,6 +1195,8 @@ def _dimension_review_facts(
                     "dimension": profile.get("dimension"),
                     "statistics": profile.get("statistics"),
                     "coverage": profile.get("coverage"),
+                    "regional_summaries": profile.get("regional_summaries", []),
+                    "analytical_facts": profile.get("analytical_facts", {}),
                     "profile_rank": profile.get("profile_rank"),
                     "selection_order": profile.get("selection_order"),
                     "is_priority": profile.get("is_priority"),
@@ -1178,6 +1207,7 @@ def _dimension_review_facts(
                             "regions_where_bottom_one",
                             "regions_where_bottom_two",
                             "markets_where_lowest",
+                            "ordered_markets",
                             "score_range",
                             "iqr",
                         )
@@ -1342,6 +1372,12 @@ def validate_semantic_review_response(
         if claim_id is not None and claim_id not in claim_rows:
             raise ValueError("Semantic review references a claim outside its section")
         row = claim_rows.get(claim_id or "")
+        if review.get("package", {}).get("contract_version") == "mfi-reliable-review-v1":
+            from .review import reconcile_numerical_finding
+            if row is None:
+                raise ValueError("Reliable semantic findings must identify the affected claim")
+            if not reconcile_numerical_finding(raw, review, row):
+                continue
         artifact_type = str(row["artifact_type"]) if row else "global"
         artifact_id = str(row["artifact_id"]) if row else None
         field_name = str(row["field_name"]) if row else None
@@ -1606,6 +1642,18 @@ def consolidated_correction_prompt_payload(
     }
 
 
+def _iter_patch_claims(value):
+    if isinstance(value, dict):
+        if "text" in value:
+            yield value
+        else:
+            for child in value.values():
+                yield from _iter_patch_claims(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_patch_claims(child)
+
+
 def apply_consolidated_patches(
     *,
     targets: Sequence[Mapping[str, Any]],
@@ -1623,6 +1671,20 @@ def apply_consolidated_patches(
         "context_evidence": deepcopy(list(context_evidence)),
     }
     for target in targets:
+        if target.get("expected_field_hash"):
+            from .reliable_contracts import fingerprint
+            kind, identifier = target["artifact_type"], target.get("artifact_id")
+            if kind == "dimension":
+                artifact = state["dimension_narratives"][identifier]
+            elif kind == "market":
+                artifact = state["market_narratives"][identifier]
+            elif kind == "context":
+                artifact = next(item for item in state["context_evidence"] if item["statement_id"] == identifier)
+            else:
+                artifact = state["executive_summary_narrative"]
+            if fingerprint(project_correction_transport(artifact.get(target["field_name"]))) != target["expected_field_hash"]:
+                raise ValueError("Correction target field revision is stale")
+        previous_revision = max((int(claim.get("revision", 1)) for claim in _iter_patch_claims(artifact.get(target["field_name"])))) if target.get("expected_field_hash") and list(_iter_patch_claims(artifact.get(target["field_name"]))) else 1
         state = apply_field_patch(
             task=target,
             replacement=replacements[str(target["task_id"])],
@@ -1632,6 +1694,10 @@ def apply_consolidated_patches(
             context_evidence=state["context_evidence"],
             assessment_profile=assessment_profile,
         )
+        if target.get("expected_field_hash") and kind != "context":
+            updated = state["dimension_narratives"][identifier] if kind == "dimension" else state["market_narratives"][identifier] if kind == "market" else state["executive_summary_narrative"]
+            for claim in _iter_patch_claims(updated.get(target["field_name"])):
+                claim["revision"] = previous_revision + 1
     return state
 
 

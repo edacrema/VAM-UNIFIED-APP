@@ -585,6 +585,8 @@ class LLMTraceSession:
                 error_type=type(exc).__name__,
                 error_message=_sanitize_error(exc),
             )
+            if getattr(self.sink, "requires_persistence", False):
+                raise
 
     def record_skip(
         self,

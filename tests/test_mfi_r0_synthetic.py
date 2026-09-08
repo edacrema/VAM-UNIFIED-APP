@@ -119,7 +119,7 @@ def test_partial_item_coverage_is_classified_not_warned() -> None:
         metric
         for dimension in profile["dimensions"]
         for metric in dimension["drivers"]
-        if (metric.get("availability") or {}).get("classification") == "partial_optional"
+        if (metric.get("availability") or {}).get("classification") == "unknown_applicability"
     ]
     assert partial, "partial optional coverage must still be classified"
     assert all(not metric["availability"]["warrants_warning"] for metric in partial)

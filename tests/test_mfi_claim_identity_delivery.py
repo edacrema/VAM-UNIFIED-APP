@@ -76,7 +76,7 @@ def _market_profile(name: str = "Café") -> dict:
 
 def test_identity_builders_cover_every_canonical_artifact_location() -> None:
     assert CLAIM_IDENTITY_AUTHORITY == "application"
-    assert CLAIM_IDENTITY_VERSION == "mfi-claim-id-v1"
+    assert CLAIM_IDENTITY_VERSION == "mfi-claim-id-v2"
     assert dimension_claim_id("Food Quality", "summary", 1) == (
         "dimension.food_quality.summary.1"
     )
@@ -373,9 +373,12 @@ def test_resolver_prefers_persisted_validated_blocks(monkeypatch) -> None:
 
 
 class _RepeatedIdModel:
+    def bind(self, **kwargs):
+        return self
+
     def invoke(self, messages):
         prompt = str(messages[0].content)
-        if "Check one section of an MFI report" in prompt or "Check only the corrected" in prompt:
+        if "Check one section of an MFI report" in prompt or "Check only the corrected" in prompt or "Review MFI evidence consistency" in prompt:
             return type("Response", (), {"content": '{"flags": []}'})()
         metric_match = re.search(r'"metric_id":\s*"([^"]+)"', prompt)
         metric_ids = [metric_match.group(1)] if metric_match else []
@@ -442,6 +445,8 @@ class _RepeatedIdModel:
                     for name in names
                 ]
             }
+            if "Analyse this MFI dimension" in prompt:
+                payload = narrative
         return type("Response", (), {"content": json.dumps(payload)})()
 
 
@@ -524,7 +529,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
     assert result["generation_diagnostics"]["red_team_status"] == "completed"
     assert any(
-        str(call["operation"]).startswith("mfi.semantic_review.")
+        str(call["operation"]).startswith(("mfi.semantic_review.", "mfi.reliable_review."))
         for call in result["llm_diagnostics"]["calls"]
     )
     assert result["correction_attempts"] == 0

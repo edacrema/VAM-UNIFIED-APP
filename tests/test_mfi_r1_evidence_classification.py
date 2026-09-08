@@ -81,32 +81,32 @@ def test_partial_required_evidence_warns() -> None:
 def test_partial_optional_item_does_not_warn() -> None:
     availability = _classify(OPTIONAL_ITEM_METRIC, available=4)
 
-    assert availability.classification == "partial_optional"
+    assert availability.classification == "unknown_applicability"
     assert availability.warrants_warning is False
     assert availability.represented_market_count == 4
     assert availability.total_assessed_market_count == ASSESSED
 
 
 def test_absent_optional_item_does_not_warn() -> None:
-    """An item traded nowhere is not evidence that failed; it is simply not sold."""
+    """Absent evidence does not establish whether the item was traded."""
     availability = _classify(OPTIONAL_ITEM_METRIC, available=0, raw=None)
 
-    assert availability.classification == "partial_optional"
+    assert availability.classification == "unknown_applicability"
     assert availability.warrants_warning is False
 
 
 def test_optional_product_group_follows_the_optional_policy() -> None:
     availability = _classify(OPTIONAL_GROUP_METRIC, available=3)
 
-    assert availability.classification == "partial_optional"
+    assert availability.classification == "unknown_applicability"
     assert availability.warrants_warning is False
 
 
 def test_quality_applicability_is_not_applicable_rather_than_missing() -> None:
-    """Food Quality applicability is decided per market by the assessment itself."""
+    """Partial quality evidence alone cannot establish source applicability."""
     availability = _classify(QUALITY_METRIC, available=6)
 
-    assert availability.classification == "not_applicable"
+    assert availability.classification == "unknown_applicability"
     assert availability.warrants_warning is False
 
 

@@ -1647,6 +1647,8 @@ def test_full_fake_graph_uses_one_correction_and_three_semantic_reviews(
     monkeypatch,
 ) -> None:
     loaded = build_loaded(SyntheticSpec(market_count=15, region_count=3))
+    # Pin the historical contract; reliable workflows have separate bounded-review tests.
+    loaded.pop("workflow_revision", None)
     model = _GranularWorkflowModel()
     monkeypatch.setattr(graph, "get_model", lambda **_kwargs: model)
     monkeypatch.setattr(

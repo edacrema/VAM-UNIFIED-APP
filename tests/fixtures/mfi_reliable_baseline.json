@@ -1,0 +1,3930 @@
+{
+  "Benin": {
+    "count": 53,
+    "excluded": 0,
+    "mean": 5.557562855054748,
+    "priorities": [
+      "Service",
+      "Infrastructure",
+      "Food Quality"
+    ],
+    "selected": [
+      "Sékou",
+      "Ouègbo",
+      "Dangbo",
+      "Banikoara",
+      "Savalou",
+      "Dogbo",
+      "Hozin",
+      "Djidja",
+      "Sèdjè-Dénou",
+      "Péhunco",
+      "Kérou",
+      "Sinendé",
+      "Sehoue",
+      "Dasso",
+      "Zinvié"
+    ],
+    "markets": {
+      "Abomey": {
+        "overall_mfi": 6.13532829284668,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 8.571428298950195,
+          "Service": 3.3333332538604736,
+          "Food Quality": 7.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Affamè": {
+        "overall_mfi": 5.227770805358887,
+        "dimension_scores": {
+          "Assortment": 3.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 6.666666507720947,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Ahidahomè (Porto-Novo)": {
+        "overall_mfi": 5.702334403991699,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 8.571428298950195,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Azovè": {
+        "overall_mfi": 5.876704692840576,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 8.333333015441895,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 7.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Azowlissè": {
+        "overall_mfi": 5.512818813323975,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 5.0,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 6.428571224212647,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Banikoara": {
+        "overall_mfi": 4.453098297119141,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.833333492279053,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Bassila": {
+        "overall_mfi": 5.318742275238037,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Bembèrèkè": {
+        "overall_mfi": 5.621258735656738,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 9.166666984558104,
+          "Resilience": 8.75,
+          "Competition": 6.666666507720947,
+          "Infrastructure": 2.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Bohicon": {
+        "overall_mfi": 5.251912593841553,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 9.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Cobly": {
+        "overall_mfi": 5.144428253173828,
+        "dimension_scores": {
+          "Assortment": 3.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 3.3333332538604736,
+          "Infrastructure": 7.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Covè": {
+        "overall_mfi": 6.666258335113525,
+        "dimension_scores": {
+          "Assortment": 6.0,
+          "Availability": 10.0,
+          "Price": 9.166666984558104,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 5.0,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Dangbo": {
+        "overall_mfi": 4.429453372955322,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Dantokpa": {
+        "overall_mfi": 6.786263942718506,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 6.666666507720947,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Dassa-Zoumè": {
+        "overall_mfi": 5.428395748138428,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 3.3333332538604736,
+          "Food Quality": 7.5,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 13
+      },
+      "Dasso": {
+        "overall_mfi": 4.828378200531006,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Djidja": {
+        "overall_mfi": 4.6015305519104,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.5,
+          "Competition": 5.833333492279053,
+          "Infrastructure": 4.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Djougou": {
+        "overall_mfi": 5.971810817718506,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Dogbo": {
+        "overall_mfi": 4.47597074508667,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 9.583333015441896,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Glazoué": {
+        "overall_mfi": 6.051588535308838,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 8.333333015441895,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 8.571428298950195,
+          "Service": 3.3333332538604736,
+          "Food Quality": 7.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 25
+      },
+      "Hozin": {
+        "overall_mfi": 4.5490546226501465,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Ikpenlè": {
+        "overall_mfi": 5.244121551513672,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.5,
+          "Competition": 7.5,
+          "Infrastructure": 2.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Kalalé": {
+        "overall_mfi": 5.788875102996826,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 8.333333015441895,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Karimama": {
+        "overall_mfi": 6.479290008544922,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 8.571428298950195,
+          "Service": 5.0,
+          "Food Quality": 5.0,
+          "Access & Protection": 5.0
+        },
+        "traders_surveyed": 12
+      },
+      "Kassoua-Allah": {
+        "overall_mfi": 6.025663375854492,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 7.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Klouékanmè": {
+        "overall_mfi": 5.947871685028076,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Kpedekpo": {
+        "overall_mfi": 5.770970344543457,
+        "dimension_scores": {
+          "Assortment": 6.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 7.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Kérou": {
+        "overall_mfi": 4.631418228149414,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.083333969116211,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 1.6666666269302368,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Kétou": {
+        "overall_mfi": 6.738693714141846,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.75,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Malanville (CBM)": {
+        "overall_mfi": 7.038997650146484,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 5.0,
+          "Food Quality": 8.75,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Matéri": {
+        "overall_mfi": 5.287744045257568,
+        "dimension_scores": {
+          "Assortment": 3.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 5.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 7.142857074737549,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "N'Dali": {
+        "overall_mfi": 6.141308784484863,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 3.3333332538604736,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Natitingou": {
+        "overall_mfi": 6.970207691192627,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 9.285714149475098,
+          "Service": 5.0,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 25
+      },
+      "Nikki": {
+        "overall_mfi": 6.141308784484863,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 3.3333332538604736,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Ouando": {
+        "overall_mfi": 5.888678550720215,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 9.583333015441896,
+          "Competition": 10.0,
+          "Infrastructure": 8.571428298950195,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Ouesse": {
+        "overall_mfi": 5.686352729797363,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 8.333333015441895,
+          "Price": 10.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Ouègbo": {
+        "overall_mfi": 3.827937841415405,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 0.0,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Parakou": {
+        "overall_mfi": 8.037912368774414,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 10.0,
+          "Service": 6.666666507720947,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Pobè": {
+        "overall_mfi": 5.067758083343506,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 9.583333015441896,
+          "Competition": 8.333333015441895,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Péhunco": {
+        "overall_mfi": 4.624776840209961,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.833333492279053,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Savalou": {
+        "overall_mfi": 4.458402633666992,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 12
+      },
+      "Sehoue": {
+        "overall_mfi": 4.721729278564453,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 1.6666666269302368,
+          "Food Quality": 4.285714149475098,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Sinendé": {
+        "overall_mfi": 4.704009056091309,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 4.166666507720947,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 8.571428298950195,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "So-Ava": {
+        "overall_mfi": 5.2895097732543945,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 8.333333015441895,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 5.833333492279053
+        },
+        "traders_surveyed": 12
+      },
+      "Sèdjè-Dénou": {
+        "overall_mfi": 4.612157821655273,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Ségbana": {
+        "overall_mfi": 7.00227165222168,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 7.5,
+          "Infrastructure": 7.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 7.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Sékou": {
+        "overall_mfi": 3.806228876113892,
+        "dimension_scores": {
+          "Assortment": 6.0,
+          "Availability": 5.0,
+          "Price": 6.666666507720947,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.4285714626312256,
+          "Access & Protection": 6.666666507720947
+        },
+        "traders_surveyed": 12
+      },
+      "Tanguiéta": {
+        "overall_mfi": 6.12536096572876,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 7.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 11
+      },
+      "Tatonnoukon": {
+        "overall_mfi": 6.308020114898682,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 5.0,
+          "Food Quality": 5.0,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 12
+      },
+      "Tchaourou": {
+        "overall_mfi": 6.057570934295654,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 6.428571224212647,
+          "Service": 3.3333332538604736,
+          "Food Quality": 8.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Yoko": {
+        "overall_mfi": 5.802850723266602,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 8.333333015441895,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Zinvié": {
+        "overall_mfi": 4.979264736175537,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 6.666666507720947,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 1.6666666269302368,
+          "Food Quality": 10.0,
+          "Access & Protection": 6.666666507720947
+        },
+        "traders_surveyed": 12
+      },
+      "Zogbodomey": {
+        "overall_mfi": 6.137979030609131,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 6.666666507720947,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 6.666666507720947,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 12
+      },
+      "Zè": {
+        "overall_mfi": 5.172486305236816,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 5.833333492279053
+        },
+        "traders_surveyed": 12
+      }
+    },
+    "metrics": {
+      "assortment.breadth": {
+        "mean_raw_value": 6.69811320754717,
+        "mean_normalized_value": 8.140161725067387,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.cereal_food": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.communication": {
+        "mean_raw_value": 0.9056603773584906,
+        "mean_normalized_value": 9.056603773584905,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.education": {
+        "mean_raw_value": 0.8490566037735849,
+        "mean_normalized_value": 8.49056603773585,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.health": {
+        "mean_raw_value": 0.22641509433962265,
+        "mean_normalized_value": 2.2641509433962264,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.household_items": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.other_food": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.shelter": {
+        "mean_raw_value": 0.7547169811320755,
+        "mean_normalized_value": 7.547169811320755,
+        "aggregation_denominator": 53
+      },
+      "assortment.category.wash": {
+        "mean_raw_value": 0.9622641509433962,
+        "mean_normalized_value": 9.622641509433961,
+        "aggregation_denominator": 53
+      },
+      "assortment.depth": {
+        "mean_raw_value": 3.056603773584906,
+        "mean_normalized_value": 6.855345911949685,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.barley": {
+        "mean_raw_value": 0.0047169811320754715,
+        "mean_normalized_value": 0.04716981132075472,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.bread": {
+        "mean_raw_value": 0.02830188679245283,
+        "mean_normalized_value": 0.2830188679245283,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.cassava": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.flour": {
+        "mean_raw_value": 0.29009433962264153,
+        "mean_normalized_value": 2.900943396226415,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.maize": {
+        "mean_raw_value": 0.7613207551668275,
+        "mean_normalized_value": 7.613207551668275,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.millet": {
+        "mean_raw_value": 0.3265723276813075,
+        "mean_normalized_value": 3.265723276813075,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.other": {
+        "mean_raw_value": 0.02358490566037736,
+        "mean_normalized_value": 0.2358490566037736,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.pasta": {
+        "mean_raw_value": 0.13584905666000438,
+        "mean_normalized_value": 1.3584905666000437,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.rice": {
+        "mean_raw_value": 0.5655660377639644,
+        "mean_normalized_value": 5.655660377639644,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.5223270446624396,
+        "mean_normalized_value": 5.2232704466243955,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.cereal_food.wheat": {
+        "mean_raw_value": 0.17452830188679244,
+        "mean_normalized_value": 1.7452830188679245,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.4272237206405064,
+        "mean_normalized_value": 4.272237206405064,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.dairy": {
+        "mean_raw_value": 0.29642857189448374,
+        "mean_normalized_value": 2.9642857189448373,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.20853549017096465,
+        "mean_normalized_value": 2.0853549017096467,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.24845013528499962,
+        "mean_normalized_value": 2.484501352849996,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.13461365705391146,
+        "mean_normalized_value": 1.3461365705391146,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.oils_fats": {
+        "mean_raw_value": 0.36886792475322505,
+        "mean_normalized_value": 3.6886792475322507,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.other": {
+        "mean_raw_value": 0.103571429005209,
+        "mean_normalized_value": 1.0357142900520901,
+        "aggregation_denominator": 53
+      },
+      "assortment.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.17877358507435276,
+        "mean_normalized_value": 1.7877358507435277,
+        "aggregation_denominator": 53
+      },
+      "assortment.sku_class.1_50": {
+        "mean_raw_value": 0.24528301886792453,
+        "mean_normalized_value": 2.452830188679245,
+        "aggregation_denominator": 53
+      },
+      "assortment.sku_class.201_1000": {
+        "mean_raw_value": 0.22641509433962265,
+        "mean_normalized_value": 2.2641509433962264,
+        "aggregation_denominator": 53
+      },
+      "assortment.sku_class.51_200": {
+        "mean_raw_value": 0.41509433962264153,
+        "mean_normalized_value": 4.150943396226415,
+        "aggregation_denominator": 53
+      },
+      "assortment.sku_class.more_than_1000": {
+        "mean_raw_value": 0.11320754716981132,
+        "mean_normalized_value": 1.1320754716981132,
+        "aggregation_denominator": 53
+      },
+      "availability.runout": {
+        "mean_raw_value": 5.867924528301887,
+        "mean_normalized_value": 9.779874213836479,
+        "aggregation_denominator": 53
+      },
+      "availability.runout.category.cereal_food": {
+        "mean_raw_value": 0.9205974846516015,
+        "mean_normalized_value": 9.205974846516016,
+        "aggregation_denominator": 53
+      },
+      "availability.runout.category.nfi": {
+        "mean_raw_value": 0.9528301886792453,
+        "mean_normalized_value": 9.528301886792454,
+        "aggregation_denominator": 53
+      },
+      "availability.runout.category.other_food": {
+        "mean_raw_value": 0.8951033246967027,
+        "mean_normalized_value": 8.951033246967027,
+        "aggregation_denominator": 53
+      },
+      "availability.runout.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 1
+      },
+      "availability.runout.item.cereal_food.bread": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "availability.runout.item.cereal_food.flour": {
+        "mean_raw_value": 0.007352941176470588,
+        "mean_normalized_value": 0.07352941176470588,
+        "aggregation_denominator": 34
+      },
+      "availability.runout.item.cereal_food.maize": {
+        "mean_raw_value": 0.042452830750987214,
+        "mean_normalized_value": 0.42452830750987214,
+        "aggregation_denominator": 53
+      },
+      "availability.runout.item.cereal_food.millet": {
+        "mean_raw_value": 0.02991453042397132,
+        "mean_normalized_value": 0.29914530423971325,
+        "aggregation_denominator": 39
+      },
+      "availability.runout.item.cereal_food.other": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 5
+      },
+      "availability.runout.item.cereal_food.pasta": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 16
+      },
+      "availability.runout.item.cereal_food.rice": {
+        "mean_raw_value": 0.04251700700545798,
+        "mean_normalized_value": 0.42517007005457974,
+        "aggregation_denominator": 49
+      },
+      "availability.runout.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.06028368878871836,
+        "mean_normalized_value": 0.6028368878871837,
+        "aggregation_denominator": 47
+      },
+      "availability.runout.item.cereal_food.wheat": {
+        "mean_raw_value": 0.08695652173913043,
+        "mean_normalized_value": 0.8695652173913043,
+        "aggregation_denominator": 23
+      },
+      "availability.runout.item.nfi.communication": {
+        "mean_raw_value": 0.058823529411764705,
+        "mean_normalized_value": 0.5882352941176471,
+        "aggregation_denominator": 17
+      },
+      "availability.runout.item.nfi.education": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 14
+      },
+      "availability.runout.item.nfi.health": {
+        "mean_raw_value": 0.3333333333333333,
+        "mean_normalized_value": 3.3333333333333335,
+        "aggregation_denominator": 3
+      },
+      "availability.runout.item.nfi.household_items": {
+        "mean_raw_value": 0.004807692307692308,
+        "mean_normalized_value": 0.04807692307692308,
+        "aggregation_denominator": 52
+      },
+      "availability.runout.item.nfi.shelter": {
+        "mean_raw_value": 0.029411764705882353,
+        "mean_normalized_value": 0.29411764705882354,
+        "aggregation_denominator": 17
+      },
+      "availability.runout.item.nfi.wash": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 40
+      },
+      "availability.runout.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.06382978723404255,
+        "mean_normalized_value": 0.6382978723404256,
+        "aggregation_denominator": 47
+      },
+      "availability.runout.item.other_food.dairy": {
+        "mean_raw_value": 0.03125,
+        "mean_normalized_value": 0.3125,
+        "aggregation_denominator": 32
+      },
+      "availability.runout.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.0625,
+        "mean_normalized_value": 0.625,
+        "aggregation_denominator": 32
+      },
+      "availability.runout.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.006944444444444444,
+        "mean_normalized_value": 0.06944444444444445,
+        "aggregation_denominator": 36
+      },
+      "availability.runout.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.038461538461538464,
+        "mean_normalized_value": 0.38461538461538464,
+        "aggregation_denominator": 26
+      },
+      "availability.runout.item.other_food.oils_fats": {
+        "mean_raw_value": 0.0090090092774984,
+        "mean_normalized_value": 0.090090092774984,
+        "aggregation_denominator": 37
+      },
+      "availability.runout.item.other_food.other": {
+        "mean_raw_value": 0.14285714285714285,
+        "mean_normalized_value": 1.4285714285714286,
+        "aggregation_denominator": 14
+      },
+      "availability.runout.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.018518518518518517,
+        "mean_normalized_value": 0.18518518518518517,
+        "aggregation_denominator": 27
+      },
+      "availability.scarcity": {
+        "mean_raw_value": 5.90566037735849,
+        "mean_normalized_value": 9.842767295597483,
+        "aggregation_denominator": 53
+      },
+      "availability.scarcity.category.cereal_food": {
+        "mean_raw_value": 0.9371069186138656,
+        "mean_normalized_value": 9.371069186138657,
+        "aggregation_denominator": 53
+      },
+      "availability.scarcity.category.nfi": {
+        "mean_raw_value": 0.9512578620100921,
+        "mean_normalized_value": 9.512578620100921,
+        "aggregation_denominator": 53
+      },
+      "availability.scarcity.category.other_food": {
+        "mean_raw_value": 0.9309748422424748,
+        "mean_normalized_value": 9.309748422424748,
+        "aggregation_denominator": 53
+      },
+      "availability.scarcity.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 1
+      },
+      "availability.scarcity.item.cereal_food.bread": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "availability.scarcity.item.cereal_food.flour": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 34
+      },
+      "availability.scarcity.item.cereal_food.maize": {
+        "mean_raw_value": 0.014150943396226415,
+        "mean_normalized_value": 0.14150943396226415,
+        "aggregation_denominator": 53
+      },
+      "availability.scarcity.item.cereal_food.millet": {
+        "mean_raw_value": 0.034188034442754894,
+        "mean_normalized_value": 0.34188034442754894,
+        "aggregation_denominator": 39
+      },
+      "availability.scarcity.item.cereal_food.other": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 5
+      },
+      "availability.scarcity.item.cereal_food.pasta": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 16
+      },
+      "availability.scarcity.item.cereal_food.rice": {
+        "mean_raw_value": 0.015306122448979591,
+        "mean_normalized_value": 0.15306122448979592,
+        "aggregation_denominator": 49
+      },
+      "availability.scarcity.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.02836879517169709,
+        "mean_normalized_value": 0.28368795171697087,
+        "aggregation_denominator": 47
+      },
+      "availability.scarcity.item.cereal_food.wheat": {
+        "mean_raw_value": 0.10869565217391304,
+        "mean_normalized_value": 1.0869565217391304,
+        "aggregation_denominator": 23
+      },
+      "availability.scarcity.item.nfi.communication": {
+        "mean_raw_value": 0.11764705882352941,
+        "mean_normalized_value": 1.1764705882352942,
+        "aggregation_denominator": 17
+      },
+      "availability.scarcity.item.nfi.education": {
+        "mean_raw_value": 0.07142857142857142,
+        "mean_normalized_value": 0.7142857142857143,
+        "aggregation_denominator": 14
+      },
+      "availability.scarcity.item.nfi.health": {
+        "mean_raw_value": 0.3333333333333333,
+        "mean_normalized_value": 3.3333333333333335,
+        "aggregation_denominator": 3
+      },
+      "availability.scarcity.item.nfi.household_items": {
+        "mean_raw_value": 0.014423076923076924,
+        "mean_normalized_value": 0.14423076923076922,
+        "aggregation_denominator": 52
+      },
+      "availability.scarcity.item.nfi.shelter": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 17
+      },
+      "availability.scarcity.item.nfi.wash": {
+        "mean_raw_value": 0.025,
+        "mean_normalized_value": 0.25,
+        "aggregation_denominator": 40
+      },
+      "availability.scarcity.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.02127659574468085,
+        "mean_normalized_value": 0.2127659574468085,
+        "aggregation_denominator": 47
+      },
+      "availability.scarcity.item.other_food.dairy": {
+        "mean_raw_value": 0.03125,
+        "mean_normalized_value": 0.3125,
+        "aggregation_denominator": 32
+      },
+      "availability.scarcity.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 32
+      },
+      "availability.scarcity.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.027777777777777776,
+        "mean_normalized_value": 0.2777777777777778,
+        "aggregation_denominator": 36
+      },
+      "availability.scarcity.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 26
+      },
+      "availability.scarcity.item.other_food.oils_fats": {
+        "mean_raw_value": 0.014414414763450623,
+        "mean_normalized_value": 0.14414414763450623,
+        "aggregation_denominator": 37
+      },
+      "availability.scarcity.item.other_food.other": {
+        "mean_raw_value": 0.08928571428571429,
+        "mean_normalized_value": 0.8928571428571429,
+        "aggregation_denominator": 14
+      },
+      "availability.scarcity.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 27
+      },
+      "price.increase": {
+        "mean_raw_value": 5.849056603773585,
+        "mean_normalized_value": 9.748427672955975,
+        "aggregation_denominator": 53
+      },
+      "price.increase.category.cereal_food": {
+        "mean_raw_value": 0.9339622641509434,
+        "mean_normalized_value": 9.339622641509434,
+        "aggregation_denominator": 53
+      },
+      "price.increase.category.nfi": {
+        "mean_raw_value": 0.9245283018867925,
+        "mean_normalized_value": 9.245283018867925,
+        "aggregation_denominator": 53
+      },
+      "price.increase.category.other_food": {
+        "mean_raw_value": 0.9023135686820408,
+        "mean_normalized_value": 9.023135686820408,
+        "aggregation_denominator": 53
+      },
+      "price.increase.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 1
+      },
+      "price.increase.item.cereal_food.bread": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "price.increase.item.cereal_food.flour": {
+        "mean_raw_value": 0.029411764705882353,
+        "mean_normalized_value": 0.29411764705882354,
+        "aggregation_denominator": 34
+      },
+      "price.increase.item.cereal_food.maize": {
+        "mean_raw_value": 0.02830188679245283,
+        "mean_normalized_value": 0.2830188679245283,
+        "aggregation_denominator": 53
+      },
+      "price.increase.item.cereal_food.millet": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 39
+      },
+      "price.increase.item.cereal_food.other": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 5
+      },
+      "price.increase.item.cereal_food.pasta": {
+        "mean_raw_value": 0.02083333395421505,
+        "mean_normalized_value": 0.2083333395421505,
+        "aggregation_denominator": 16
+      },
+      "price.increase.item.cereal_food.rice": {
+        "mean_raw_value": 0.03741496618913145,
+        "mean_normalized_value": 0.37414966189131443,
+        "aggregation_denominator": 49
+      },
+      "price.increase.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.021276596378772817,
+        "mean_normalized_value": 0.21276596378772816,
+        "aggregation_denominator": 47
+      },
+      "price.increase.item.cereal_food.wheat": {
+        "mean_raw_value": 0.08695652173913043,
+        "mean_normalized_value": 0.8695652173913043,
+        "aggregation_denominator": 23
+      },
+      "price.increase.item.nfi.communication": {
+        "mean_raw_value": 0.058823529411764705,
+        "mean_normalized_value": 0.5882352941176471,
+        "aggregation_denominator": 17
+      },
+      "price.increase.item.nfi.education": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 14
+      },
+      "price.increase.item.nfi.health": {
+        "mean_raw_value": 0.3333333333333333,
+        "mean_normalized_value": 3.3333333333333335,
+        "aggregation_denominator": 3
+      },
+      "price.increase.item.nfi.household_items": {
+        "mean_raw_value": 0.05833333358168602,
+        "mean_normalized_value": 0.5833333358168602,
+        "aggregation_denominator": 52
+      },
+      "price.increase.item.nfi.shelter": {
+        "mean_raw_value": 0.058823529411764705,
+        "mean_normalized_value": 0.5882352941176471,
+        "aggregation_denominator": 17
+      },
+      "price.increase.item.nfi.wash": {
+        "mean_raw_value": 0.05,
+        "mean_normalized_value": 0.5,
+        "aggregation_denominator": 40
+      },
+      "price.increase.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.06382978723404255,
+        "mean_normalized_value": 0.6382978723404256,
+        "aggregation_denominator": 47
+      },
+      "price.increase.item.other_food.dairy": {
+        "mean_raw_value": 0.03125,
+        "mean_normalized_value": 0.3125,
+        "aggregation_denominator": 32
+      },
+      "price.increase.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.125,
+        "mean_normalized_value": 1.25,
+        "aggregation_denominator": 32
+      },
+      "price.increase.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.027777777777777776,
+        "mean_normalized_value": 0.2777777777777778,
+        "aggregation_denominator": 36
+      },
+      "price.increase.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.038461538461538464,
+        "mean_normalized_value": 0.38461538461538464,
+        "aggregation_denominator": 26
+      },
+      "price.increase.item.other_food.oils_fats": {
+        "mean_raw_value": 0.03828828882526707,
+        "mean_normalized_value": 0.3828828882526707,
+        "aggregation_denominator": 37
+      },
+      "price.increase.item.other_food.other": {
+        "mean_raw_value": 0.05000000021287373,
+        "mean_normalized_value": 0.5000000021287373,
+        "aggregation_denominator": 14
+      },
+      "price.increase.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.07407407407407407,
+        "mean_normalized_value": 0.7407407407407407,
+        "aggregation_denominator": 27
+      },
+      "price.stability": {
+        "mean_raw_value": 3.7547169811320753,
+        "mean_normalized_value": 6.257861635220126,
+        "aggregation_denominator": 53
+      },
+      "price.stability.category.cereal_food": {
+        "mean_raw_value": 0.6086477991544975,
+        "mean_normalized_value": 6.086477991544975,
+        "aggregation_denominator": 53
+      },
+      "price.stability.category.nfi": {
+        "mean_raw_value": 0.5920859541533128,
+        "mean_normalized_value": 5.920859541533129,
+        "aggregation_denominator": 53
+      },
+      "price.stability.category.other_food": {
+        "mean_raw_value": 0.5660377366925186,
+        "mean_normalized_value": 5.660377366925186,
+        "aggregation_denominator": 53
+      },
+      "price.stability.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 1
+      },
+      "price.stability.item.cereal_food.bread": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "price.stability.item.cereal_food.flour": {
+        "mean_raw_value": 0.375,
+        "mean_normalized_value": 3.75,
+        "aggregation_denominator": 34
+      },
+      "price.stability.item.cereal_food.maize": {
+        "mean_raw_value": 0.35000000078723115,
+        "mean_normalized_value": 3.5000000078723117,
+        "aggregation_denominator": 53
+      },
+      "price.stability.item.cereal_food.millet": {
+        "mean_raw_value": 0.31623931802236116,
+        "mean_normalized_value": 3.162393180223612,
+        "aggregation_denominator": 39
+      },
+      "price.stability.item.cereal_food.other": {
+        "mean_raw_value": 0.2,
+        "mean_normalized_value": 2.0,
+        "aggregation_denominator": 5
+      },
+      "price.stability.item.cereal_food.pasta": {
+        "mean_raw_value": 0.30208333395421505,
+        "mean_normalized_value": 3.0208333395421505,
+        "aggregation_denominator": 16
+      },
+      "price.stability.item.cereal_food.rice": {
+        "mean_raw_value": 0.281827017360804,
+        "mean_normalized_value": 2.8182701736080404,
+        "aggregation_denominator": 49
+      },
+      "price.stability.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.30319149126397804,
+        "mean_normalized_value": 3.03191491263978,
+        "aggregation_denominator": 47
+      },
+      "price.stability.item.cereal_food.wheat": {
+        "mean_raw_value": 0.31159420376238617,
+        "mean_normalized_value": 3.1159420376238613,
+        "aggregation_denominator": 23
+      },
+      "price.stability.item.nfi.communication": {
+        "mean_raw_value": 0.058823529411764705,
+        "mean_normalized_value": 0.5882352941176471,
+        "aggregation_denominator": 17
+      },
+      "price.stability.item.nfi.education": {
+        "mean_raw_value": 0.21428571428571427,
+        "mean_normalized_value": 2.142857142857143,
+        "aggregation_denominator": 14
+      },
+      "price.stability.item.nfi.health": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "price.stability.item.nfi.household_items": {
+        "mean_raw_value": 0.4012820531542485,
+        "mean_normalized_value": 4.012820531542484,
+        "aggregation_denominator": 52
+      },
+      "price.stability.item.nfi.shelter": {
+        "mean_raw_value": 0.2647058823529412,
+        "mean_normalized_value": 2.6470588235294117,
+        "aggregation_denominator": 17
+      },
+      "price.stability.item.nfi.wash": {
+        "mean_raw_value": 0.35291666723787785,
+        "mean_normalized_value": 3.5291666723787785,
+        "aggregation_denominator": 40
+      },
+      "price.stability.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.42021276595744683,
+        "mean_normalized_value": 4.202127659574468,
+        "aggregation_denominator": 47
+      },
+      "price.stability.item.other_food.dairy": {
+        "mean_raw_value": 0.32552083395421505,
+        "mean_normalized_value": 3.2552083395421505,
+        "aggregation_denominator": 32
+      },
+      "price.stability.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.375,
+        "mean_normalized_value": 3.75,
+        "aggregation_denominator": 32
+      },
+      "price.stability.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.3472222222222222,
+        "mean_normalized_value": 3.4722222222222223,
+        "aggregation_denominator": 36
+      },
+      "price.stability.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.2371794879436493,
+        "mean_normalized_value": 2.371794879436493,
+        "aggregation_denominator": 26
+      },
+      "price.stability.item.other_food.oils_fats": {
+        "mean_raw_value": 0.31936937167837814,
+        "mean_normalized_value": 3.1936937167837813,
+        "aggregation_denominator": 37
+      },
+      "price.stability.item.other_food.other": {
+        "mean_raw_value": 0.15357142899717605,
+        "mean_normalized_value": 1.5357142899717604,
+        "aggregation_denominator": 14
+      },
+      "price.stability.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.37037037037037035,
+        "mean_normalized_value": 3.7037037037037037,
+        "aggregation_denominator": 27
+      },
+      "resilience.responsiveness": {
+        "mean_raw_value": 1.9811320754716981,
+        "mean_normalized_value": 9.90566037735849,
+        "aggregation_denominator": 53
+      },
+      "resilience.responsiveness.current_stock": {
+        "mean_raw_value": 0.9049685538377402,
+        "mean_normalized_value": 9.049685538377402,
+        "aggregation_denominator": 53
+      },
+      "resilience.responsiveness.lead_time": {
+        "mean_raw_value": 0.9583333337082053,
+        "mean_normalized_value": 9.583333337082053,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability": {
+        "mean_raw_value": 4.9056603998508095,
+        "mean_normalized_value": 8.176100666418016,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.complexity.cereal_food": {
+        "mean_raw_value": 0.9221698113207547,
+        "mean_normalized_value": 9.221698113207546,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.complexity.nfi": {
+        "mean_raw_value": 0.9108490567162352,
+        "mean_normalized_value": 9.108490567162352,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.complexity.other_food": {
+        "mean_raw_value": 0.9257861645716541,
+        "mean_normalized_value": 9.257861645716542,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.criticality.cereal_food": {
+        "mean_raw_value": 0.8875786167270733,
+        "mean_normalized_value": 8.875786167270732,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.criticality.nfi": {
+        "mean_raw_value": 0.9476415098838087,
+        "mean_normalized_value": 9.476415098838086,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.criticality.other_food": {
+        "mean_raw_value": 0.9292452830188679,
+        "mean_normalized_value": 9.29245283018868,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.density.cereal_food": {
+        "mean_raw_value": 0.362264150999627,
+        "mean_normalized_value": 3.6226415099962703,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.density.nfi": {
+        "mean_raw_value": 0.6302410901155112,
+        "mean_normalized_value": 6.3024109011551115,
+        "aggregation_denominator": 53
+      },
+      "resilience.vulnerability.density.other_food": {
+        "mean_raw_value": 0.48358041469780905,
+        "mean_normalized_value": 4.835804146978091,
+        "aggregation_denominator": 53
+      },
+      "competition.concentration": {
+        "mean_raw_value": 5.39622641509434,
+        "mean_normalized_value": 8.9937106918239,
+        "aggregation_denominator": 53
+      },
+      "competition.concentration.cereal_food": {
+        "mean_raw_value": 0.9423076923076923,
+        "mean_normalized_value": 9.423076923076923,
+        "aggregation_denominator": 52
+      },
+      "competition.concentration.nfi": {
+        "mean_raw_value": 0.9215686274509803,
+        "mean_normalized_value": 9.215686274509803,
+        "aggregation_denominator": 51
+      },
+      "competition.concentration.other_food": {
+        "mean_raw_value": 0.8846153846153846,
+        "mean_normalized_value": 8.846153846153847,
+        "aggregation_denominator": 52
+      },
+      "competition.monopoly": {
+        "mean_raw_value": 5.735849056603773,
+        "mean_normalized_value": 9.559748427672956,
+        "aggregation_denominator": 53
+      },
+      "competition.monopoly.cereal_food": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 52
+      },
+      "competition.monopoly.nfi": {
+        "mean_raw_value": 0.9803921568627451,
+        "mean_normalized_value": 9.803921568627452,
+        "aggregation_denominator": 51
+      },
+      "competition.monopoly.other_food": {
+        "mean_raw_value": 0.9423076923076923,
+        "mean_normalized_value": 9.423076923076923,
+        "aggregation_denominator": 52
+      },
+      "infrastructure.condition": {
+        "mean_raw_value": 3.5660377358490565,
+        "mean_normalized_value": 5.943396226415095,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.condition.good": {
+        "mean_raw_value": 0.5660377358490566,
+        "mean_normalized_value": 5.660377358490566,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.condition.medium": {
+        "mean_raw_value": 0.660377358490566,
+        "mean_normalized_value": 6.60377358490566,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.condition.poor": {
+        "mean_raw_value": 0.2830188679245283,
+        "mean_normalized_value": 2.830188679245283,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.closed_sewage": {
+        "mean_raw_value": 0.2641509433962264,
+        "mean_normalized_value": 2.641509433962264,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.communication_network": {
+        "mean_raw_value": 0.8490566037735849,
+        "mean_normalized_value": 8.49056603773585,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.electricity": {
+        "mean_raw_value": 0.5660377358490566,
+        "mean_normalized_value": 5.660377358490566,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.shelter": {
+        "mean_raw_value": 0.8301886792452831,
+        "mean_normalized_value": 8.30188679245283,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.toilets": {
+        "mean_raw_value": 0.7358490566037735,
+        "mean_normalized_value": 7.3584905660377355,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.walkways_exits": {
+        "mean_raw_value": 0.11320754716981132,
+        "mean_normalized_value": 1.1320754716981132,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.waste_collection": {
+        "mean_raw_value": 0.6415094339622641,
+        "mean_normalized_value": 6.415094339622642,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.feature.water": {
+        "mean_raw_value": 0.5094339622641509,
+        "mean_normalized_value": 5.09433962264151,
+        "aggregation_denominator": 53
+      },
+      "infrastructure.features": {
+        "mean_raw_value": 4.509433962264151,
+        "mean_normalized_value": 5.636792452830188,
+        "aggregation_denominator": 53
+      },
+      "service.checkout": {
+        "mean_raw_value": 1.0566037735849056,
+        "mean_normalized_value": 3.522012578616352,
+        "aggregation_denominator": 53
+      },
+      "service.checkout.automatic_receipt": {
+        "mean_raw_value": 0.0007861635454420773,
+        "mean_normalized_value": 0.007861635454420774,
+        "aggregation_denominator": 53
+      },
+      "service.checkout.multiple_payments": {
+        "mean_raw_value": 0.4443492965315873,
+        "mean_normalized_value": 4.443492965315873,
+        "aggregation_denominator": 53
+      },
+      "service.checkout.short_wait": {
+        "mean_raw_value": 0.5652867594979843,
+        "mean_normalized_value": 5.652867594979844,
+        "aggregation_denominator": 53
+      },
+      "service.shopping": {
+        "mean_raw_value": 1.0754716981132075,
+        "mean_normalized_value": 3.584905660377358,
+        "aggregation_denominator": 53
+      },
+      "service.shopping.display": {
+        "mean_raw_value": 0.9564894240982128,
+        "mean_normalized_value": 9.564894240982127,
+        "aggregation_denominator": 53
+      },
+      "service.shopping.remote_purchase": {
+        "mean_raw_value": 0.06868210505202131,
+        "mean_normalized_value": 0.6868210505202131,
+        "aggregation_denominator": 53
+      },
+      "service.shopping.visible_prices": {
+        "mean_raw_value": 0.06210691903559667,
+        "mean_normalized_value": 0.6210691903559666,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.continuous_refrigeration": {
+        "mean_raw_value": 0.37735849056603776,
+        "mean_normalized_value": 3.7735849056603774,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.expiry": {
+        "mean_raw_value": 0.05660377358490566,
+        "mean_normalized_value": 0.5660377358490566,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.food_protection": {
+        "mean_raw_value": 0.9433962264150944,
+        "mean_normalized_value": 9.433962264150944,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.no_spoilage": {
+        "mean_raw_value": 0.4716981132075472,
+        "mean_normalized_value": 4.716981132075472,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.packaging": {
+        "mean_raw_value": 0.8490566037735849,
+        "mean_normalized_value": 8.49056603773585,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.prepackaged": {
+        "mean_raw_value": 0.8653846153846154,
+        "mean_normalized_value": 8.653846153846153,
+        "aggregation_denominator": 52
+      },
+      "quality.condition.refrigeration": {
+        "mean_raw_value": 0.4339622641509434,
+        "mean_normalized_value": 4.339622641509434,
+        "aggregation_denominator": 53
+      },
+      "quality.condition.separation": {
+        "mean_raw_value": 0.94,
+        "mean_normalized_value": 9.4,
+        "aggregation_denominator": 50
+      },
+      "quality.maximum": {
+        "mean_raw_value": 7.9245283018867925,
+        "mean_normalized_value": null,
+        "aggregation_denominator": 53
+      },
+      "quality.measure": {
+        "mean_raw_value": 4.867924528301887,
+        "mean_normalized_value": 6.13544474393531,
+        "aggregation_denominator": 53
+      },
+      "access_protection.access": {
+        "mean_raw_value": 5.509433962264151,
+        "mean_normalized_value": 9.182389937106919,
+        "aggregation_denominator": 53
+      },
+      "access_protection.access.disaster": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 53
+      },
+      "access_protection.access.road": {
+        "mean_raw_value": 0.9245283018867925,
+        "mean_normalized_value": 9.245283018867925,
+        "aggregation_denominator": 53
+      },
+      "access_protection.access.seasonal": {
+        "mean_raw_value": 0.7924528301886793,
+        "mean_normalized_value": 7.9245283018867925,
+        "aggregation_denominator": 53
+      },
+      "access_protection.protection": {
+        "mean_raw_value": 5.716981132075472,
+        "mean_normalized_value": 9.528301886792454,
+        "aggregation_denominator": 53
+      },
+      "access_protection.protection.physical": {
+        "mean_raw_value": 0.9245283018867925,
+        "mean_normalized_value": 9.245283018867925,
+        "aggregation_denominator": 53
+      },
+      "access_protection.protection.security": {
+        "mean_raw_value": 0.9622641509433962,
+        "mean_normalized_value": 9.622641509433961,
+        "aggregation_denominator": 53
+      },
+      "access_protection.protection.social": {
+        "mean_raw_value": 0.9811320754716981,
+        "mean_normalized_value": 9.81132075471698,
+        "aggregation_denominator": 53
+      }
+    }
+  },
+  "Haiti": {
+    "count": 68,
+    "excluded": 6,
+    "mean": 4.291547305443707,
+    "priorities": [
+      "Food Quality",
+      "Infrastructure",
+      "Service",
+      "Price"
+    ],
+    "selected": [
+      "Gressier",
+      "Boucan Carré",
+      "Petit-Goâve",
+      "Croix des bossales",
+      "L'Estère",
+      "Chatuley",
+      "Grand-Goave",
+      "Verrettes",
+      "Plassac",
+      "Maissade",
+      "Marigot",
+      "Anse Rouge",
+      "Ennery",
+      "Corail",
+      "Saint-Michel"
+    ],
+    "markets": {
+      "Acul Du Nord": {
+        "overall_mfi": 4.210038185119629,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 2.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.6666666269302368,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 18
+      },
+      "Anglais": {
+        "overall_mfi": 5.065322399139404,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Anse Rouge": {
+        "overall_mfi": 3.4313597679138184,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 10.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 0.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Anse d'Hainault": {
+        "overall_mfi": 3.760716676712036,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 0.8333333134651184,
+          "Resilience": 7.5,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 0.7142857313156128,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Anse-a-Veau": {
+        "overall_mfi": 4.102492332458496,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 9.583333015441896,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Arcahaie": {
+        "overall_mfi": 4.575709819793701,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 8.333333015441895,
+          "Infrastructure": 5.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 5.0
+        },
+        "traders_surveyed": 36
+      },
+      "Arnaud": {
+        "overall_mfi": 4.56511926651001,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 5.833333492279053,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Asile": {
+        "overall_mfi": 4.962862491607666,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Bainet": {
+        "overall_mfi": 4.789742469787598,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.083333969116211,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 37
+      },
+      "Baraderes": {
+        "overall_mfi": 4.263124942779541,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Bassin Bleu": {
+        "overall_mfi": 5.4250593185424805,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 6.666666507720947,
+          "Price": 8.333333015441895,
+          "Resilience": 7.083333969116211,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 70
+      },
+      "Beaumont": {
+        "overall_mfi": 3.7768869400024414,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 5.0,
+          "Food Quality": 0.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Boucan Carré": {
+        "overall_mfi": 2.625843048095703,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 8.333333015441895,
+          "Infrastructure": 0.0,
+          "Service": 1.6666666269302368,
+          "Food Quality": 1.25,
+          "Access & Protection": 0.0
+        },
+        "traders_surveyed": 28
+      },
+      "Camp-Perrin": {
+        "overall_mfi": 4.276511192321777,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 7.5,
+          "Price": 7.5,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Carrefour": {
+        "overall_mfi": 4.211368560791016,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 6.25,
+          "Competition": 5.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 1.6666666269302368,
+          "Food Quality": 3.75,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 37
+      },
+      "Casse": {
+        "overall_mfi": 5.492434024810791,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 3.3333332538604736,
+          "Food Quality": 6.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 24
+      },
+      "Cavaillon": {
+        "overall_mfi": 4.2306904792785645,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 7.5,
+          "Price": 7.5,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Chambellan": {
+        "overall_mfi": 4.239987850189209,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 2.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 33
+      },
+      "Chansolme": {
+        "overall_mfi": 5.937876224517822,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 4.285714149475098,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Chatuley": {
+        "overall_mfi": 2.943498373031616,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 3.3333332538604736,
+          "Price": 5.0,
+          "Resilience": 5.833333969116211,
+          "Competition": 0.0,
+          "Infrastructure": 7.857142925262451,
+          "Service": 6.666666507720947,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 33
+      },
+      "Cité Soleil": {
+        "overall_mfi": 3.907759428024292,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 6.666666507720947,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 5.833333492279053
+        },
+        "traders_surveyed": 45
+      },
+      "Cluny": {
+        "overall_mfi": 4.658287048339844,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 4.166666507720947,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Corail": {
+        "overall_mfi": 3.451924562454224,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 2.142857074737549,
+          "Service": 5.0,
+          "Food Quality": 0.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Cornillon / Grand-Bois": {
+        "overall_mfi": 3.946586847305298,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 0.7142857313156128,
+          "Service": 1.6666666269302368,
+          "Food Quality": 3.75,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 36
+      },
+      "Croix des bossales": {
+        "overall_mfi": 2.7475006580352783,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 6.25,
+          "Competition": 5.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 3.3333332538604736,
+          "Food Quality": 0.0,
+          "Access & Protection": 4.166666507720947
+        },
+        "traders_surveyed": 33
+      },
+      "Croix-des-Bouquets": {
+        "overall_mfi": 4.214694499969482,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 1.6666666269302368,
+          "Food Quality": 2.5,
+          "Access & Protection": 5.833333492279053
+        },
+        "traders_surveyed": 38
+      },
+      "Dame Marie": {
+        "overall_mfi": 4.20678186416626,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 3.3333332538604736,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 31
+      },
+      "Dessalines": {
+        "overall_mfi": 4.869001388549805,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 7.5
+        },
+        "traders_surveyed": 35
+      },
+      "Dumarsais Estime": {
+        "overall_mfi": 5.518439769744873,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Ennery": {
+        "overall_mfi": 3.4413106441497803,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 8.333333015441895,
+          "Price": 5.833333492279053,
+          "Resilience": 8.75,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 4.285714149475098,
+          "Service": 0.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 38
+      },
+      "Fonds des Nègres": {
+        "overall_mfi": 5.220914363861084,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 5.0,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Fonds-Verrettes": {
+        "overall_mfi": 3.573971509933472,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 0.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 37
+      },
+      "Fort-Liberté": {
+        "overall_mfi": 5.621258735656738,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Ganthier": {
+        "overall_mfi": 4.807265281677246,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Grand-Goave": {
+        "overall_mfi": 2.9667441844940186,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 7.083333969116211,
+          "Competition": 1.6666666269302368,
+          "Infrastructure": 7.857142925262451,
+          "Service": 0.0,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Grande Riviere du Nord": {
+        "overall_mfi": 6.8980207443237305,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 10.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 15
+      },
+      "Gressier": {
+        "overall_mfi": 2.2584266662597656,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 4.166666507720947,
+          "Price": 5.0,
+          "Resilience": 5.416666030883789,
+          "Competition": 4.166666507720947,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 0.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 7.5
+        },
+        "traders_surveyed": 36
+      },
+      "Gros Morne": {
+        "overall_mfi": 4.133716106414795,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 8.333333015441895,
+          "Price": 8.333333015441895,
+          "Resilience": 7.5,
+          "Competition": 7.5,
+          "Infrastructure": 4.285714149475098,
+          "Service": 1.6666666269302368,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Jean Rabel": {
+        "overall_mfi": 5.951773643493652,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 6.666666507720947,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "L'Estère": {
+        "overall_mfi": 2.926893472671509,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 0.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 6.666666507720947
+        },
+        "traders_surveyed": 22
+      },
+      "Lascahobas": {
+        "overall_mfi": 4.574586391448975,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Les Cayes": {
+        "overall_mfi": 5.064657688140869,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 5.0,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Les Irois": {
+        "overall_mfi": 3.983916521072388,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 6.666666507720947,
+          "Price": 2.5,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 29
+      },
+      "Maissade": {
+        "overall_mfi": 3.093570709228516,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 5.0,
+          "Infrastructure": 0.7142857313156128,
+          "Service": 3.3333332538604736,
+          "Food Quality": 0.0,
+          "Access & Protection": 8.333333015441895
+        },
+        "traders_surveyed": 18
+      },
+      "Marche de Aquin": {
+        "overall_mfi": 3.6867098808288574,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 7.5,
+          "Resilience": 8.333333015441895,
+          "Competition": 10.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 0.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Marche de Jeremie": {
+        "overall_mfi": 4.197483539581299,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Marche de Port De Paix": {
+        "overall_mfi": 5.611749649047852,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 6.666666507720947,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 37
+      },
+      "Marché Marche Lacoupe": {
+        "overall_mfi": 4.557025909423828,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Marché de Gonaives": {
+        "overall_mfi": 4.498892307281494,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 8.333333015441895,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 35
+      },
+      "Marigot": {
+        "overall_mfi": 3.3729777336120605,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 0.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Miragoâne": {
+        "overall_mfi": 3.981549024581909,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 2.142857074737549,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Mombin Crochu": {
+        "overall_mfi": 4.239869117736816,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 8.333333015441895,
+          "Price": 5.833333492279053,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Môle Saint Nicolas": {
+        "overall_mfi": 4.677904605865479,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 10.0,
+          "Resilience": 9.166666984558104,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 1.6666666269302368,
+          "Food Quality": 2.5,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 37
+      },
+      "Pestel": {
+        "overall_mfi": 4.048672676086426,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 5.0,
+          "Food Quality": 1.25,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 36
+      },
+      "Petit-Goâve": {
+        "overall_mfi": 2.740854263305664,
+        "dimension_scores": {
+          "Assortment": 5.0,
+          "Availability": 2.5,
+          "Price": 4.166666507720947,
+          "Resilience": 6.25,
+          "Competition": 0.0,
+          "Infrastructure": 7.142857074737549,
+          "Service": 5.0,
+          "Food Quality": 7.5,
+          "Access & Protection": 7.5
+        },
+        "traders_surveyed": 38
+      },
+      "Petite Rivière de l'Artibonite": {
+        "overall_mfi": 4.820038318634033,
+        "dimension_scores": {
+          "Assortment": 8.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 6.666666507720947,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 4.166666507720947
+        },
+        "traders_surveyed": 14
+      },
+      "Pignon": {
+        "overall_mfi": 5.509105205535889,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.833333492279053,
+          "Resilience": 7.5,
+          "Competition": 10.0,
+          "Infrastructure": 4.285714149475098,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Plaisance": {
+        "overall_mfi": 5.479095935821533,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.333333015441895,
+          "Competition": 10.0,
+          "Infrastructure": 5.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 34
+      },
+      "Plassac": {
+        "overall_mfi": 3.0697429180145264,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 3.3333332538604736,
+          "Price": 5.0,
+          "Resilience": 6.25,
+          "Competition": 4.166666507720947,
+          "Infrastructure": 2.857142925262451,
+          "Service": 3.3333332538604736,
+          "Food Quality": 1.25,
+          "Access & Protection": 6.666666507720947
+        },
+        "traders_surveyed": 11
+      },
+      "Saint-Louis du Nord": {
+        "overall_mfi": 3.7729086875915527,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 10.0,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 5.0,
+          "Food Quality": 0.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 72
+      },
+      "Saint-Marc": {
+        "overall_mfi": 4.373491764068604,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 3.3333332538604736,
+          "Price": 5.0,
+          "Resilience": 6.25,
+          "Competition": 5.0,
+          "Infrastructure": 2.857142925262451,
+          "Service": 5.0,
+          "Food Quality": 5.0,
+          "Access & Protection": 7.5
+        },
+        "traders_surveyed": 26
+      },
+      "Saint-Michel": {
+        "overall_mfi": 3.491757392883301,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 0.8333333134651184,
+          "Infrastructure": 5.0,
+          "Service": 3.3333332538604736,
+          "Food Quality": 2.5,
+          "Access & Protection": 7.5
+        },
+        "traders_surveyed": 39
+      },
+      "Saint-Raphaël": {
+        "overall_mfi": 5.5471062660217285,
+        "dimension_scores": {
+          "Assortment": 7.0,
+          "Availability": 10.0,
+          "Price": 5.833333492279053,
+          "Resilience": 8.75,
+          "Competition": 10.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 31
+      },
+      "Seradotte": {
+        "overall_mfi": 4.14682674407959,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 2.5,
+          "Resilience": 10.0,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 1.4285714626312256,
+          "Service": 1.6666666269302368,
+          "Food Quality": 3.75,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Tabarre": {
+        "overall_mfi": 4.524473667144775,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 7.9166669845581055,
+          "Competition": 10.0,
+          "Infrastructure": 3.5714285373687744,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 10.0
+        },
+        "traders_surveyed": 36
+      },
+      "Thomazeau": {
+        "overall_mfi": 3.9001271724700928,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 8.75,
+          "Competition": 9.166666984558104,
+          "Infrastructure": 0.7142857313156128,
+          "Service": 1.6666666269302368,
+          "Food Quality": 5.0,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 36
+      },
+      "Valieres": {
+        "overall_mfi": 5.612415790557861,
+        "dimension_scores": {
+          "Assortment": 9.0,
+          "Availability": 10.0,
+          "Price": 5.0,
+          "Resilience": 9.583333015441896,
+          "Competition": 10.0,
+          "Infrastructure": 5.714285850524902,
+          "Service": 3.3333332538604736,
+          "Food Quality": 5.0,
+          "Access & Protection": 9.166666984558104
+        },
+        "traders_surveyed": 20
+      },
+      "Verrettes": {
+        "overall_mfi": 3.0397911071777344,
+        "dimension_scores": {
+          "Assortment": 10.0,
+          "Availability": 7.5,
+          "Price": 5.0,
+          "Resilience": 7.5,
+          "Competition": 0.0,
+          "Infrastructure": 5.0,
+          "Service": 5.0,
+          "Food Quality": 3.75,
+          "Access & Protection": 6.666666507720947
+        },
+        "traders_surveyed": 26
+      }
+    },
+    "metrics": {
+      "assortment.breadth": {
+        "mean_raw_value": 7.5588235294117645,
+        "mean_normalized_value": 9.369747899159663,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.cereal_food": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.communication": {
+        "mean_raw_value": 0.8970588235294118,
+        "mean_normalized_value": 8.970588235294118,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.education": {
+        "mean_raw_value": 0.9264705882352942,
+        "mean_normalized_value": 9.264705882352942,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.health": {
+        "mean_raw_value": 0.9264705882352942,
+        "mean_normalized_value": 9.264705882352942,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.household_items": {
+        "mean_raw_value": 0.9411764705882353,
+        "mean_normalized_value": 9.411764705882353,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.other_food": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.shelter": {
+        "mean_raw_value": 0.8676470588235294,
+        "mean_normalized_value": 8.676470588235293,
+        "aggregation_denominator": 68
+      },
+      "assortment.category.wash": {
+        "mean_raw_value": 1.0,
+        "mean_normalized_value": 10.0,
+        "aggregation_denominator": 68
+      },
+      "assortment.depth": {
+        "mean_raw_value": 3.3970588235294117,
+        "mean_normalized_value": 7.9901960784313735,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.barley": {
+        "mean_raw_value": 0.0032609482021892754,
+        "mean_normalized_value": 0.032609482021892754,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.bread": {
+        "mean_raw_value": 0.1257409092915409,
+        "mean_normalized_value": 1.2574090929154087,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.cassava": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.flour": {
+        "mean_raw_value": 0.9556020007413977,
+        "mean_normalized_value": 9.556020007413977,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.maize": {
+        "mean_raw_value": 0.9266691295539632,
+        "mean_normalized_value": 9.266691295539632,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.millet": {
+        "mean_raw_value": 0.04327708006124286,
+        "mean_normalized_value": 0.4327708006124286,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.other": {
+        "mean_raw_value": 0.0619162127156468,
+        "mean_normalized_value": 0.6191621271564679,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.pasta": {
+        "mean_raw_value": 0.8117365933516446,
+        "mean_normalized_value": 8.117365933516446,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.rice": {
+        "mean_raw_value": 0.979806619531968,
+        "mean_normalized_value": 9.79806619531968,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.23309269399546526,
+        "mean_normalized_value": 2.3309269399546526,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.cereal_food.wheat": {
+        "mean_raw_value": 0.6970538530937013,
+        "mean_normalized_value": 6.970538530937013,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.5508754529497203,
+        "mean_normalized_value": 5.508754529497203,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.dairy": {
+        "mean_raw_value": 0.6790482558529166,
+        "mean_normalized_value": 6.790482558529167,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.20398745592683554,
+        "mean_normalized_value": 2.0398745592683554,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.4659767234150101,
+        "mean_normalized_value": 4.6597672341501015,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.35973176464219303,
+        "mean_normalized_value": 3.5973176464219305,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.oils_fats": {
+        "mean_raw_value": 0.7336176103528809,
+        "mean_normalized_value": 7.336176103528808,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.other": {
+        "mean_raw_value": 0.06020269970245221,
+        "mean_normalized_value": 0.6020269970245221,
+        "aggregation_denominator": 68
+      },
+      "assortment.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.18292092827751355,
+        "mean_normalized_value": 1.8292092827751354,
+        "aggregation_denominator": 68
+      },
+      "assortment.sku_class.1_50": {
+        "mean_raw_value": 0.029411764705882353,
+        "mean_normalized_value": 0.29411764705882354,
+        "aggregation_denominator": 68
+      },
+      "assortment.sku_class.201_1000": {
+        "mean_raw_value": 0.3382352941176471,
+        "mean_normalized_value": 3.3823529411764706,
+        "aggregation_denominator": 68
+      },
+      "assortment.sku_class.51_200": {
+        "mean_raw_value": 0.39705882352941174,
+        "mean_normalized_value": 3.9705882352941178,
+        "aggregation_denominator": 68
+      },
+      "assortment.sku_class.more_than_1000": {
+        "mean_raw_value": 0.23529411764705882,
+        "mean_normalized_value": 2.3529411764705883,
+        "aggregation_denominator": 68
+      },
+      "availability.runout": {
+        "mean_raw_value": 5.264705882352941,
+        "mean_normalized_value": 8.774509803921568,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.category.cereal_food": {
+        "mean_raw_value": 0.7017291907549781,
+        "mean_normalized_value": 7.017291907549781,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.category.nfi": {
+        "mean_raw_value": 0.8234468906679574,
+        "mean_normalized_value": 8.234468906679574,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.category.other_food": {
+        "mean_raw_value": 0.7687244082198423,
+        "mean_normalized_value": 7.687244082198424,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "availability.runout.item.cereal_food.bread": {
+        "mean_raw_value": 0.15452898679567234,
+        "mean_normalized_value": 1.5452898679567235,
+        "aggregation_denominator": 28
+      },
+      "availability.runout.item.cereal_food.flour": {
+        "mean_raw_value": 0.1796222745495684,
+        "mean_normalized_value": 1.796222745495684,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.cereal_food.maize": {
+        "mean_raw_value": 0.12795158919385252,
+        "mean_normalized_value": 1.279515891938525,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.cereal_food.millet": {
+        "mean_raw_value": 0.14015151839703321,
+        "mean_normalized_value": 1.4015151839703321,
+        "aggregation_denominator": 8
+      },
+      "availability.runout.item.cereal_food.other": {
+        "mean_raw_value": 0.030753968490494624,
+        "mean_normalized_value": 0.3075396849049462,
+        "aggregation_denominator": 18
+      },
+      "availability.runout.item.cereal_food.pasta": {
+        "mean_raw_value": 0.14611716603394598,
+        "mean_normalized_value": 1.4611716603394598,
+        "aggregation_denominator": 64
+      },
+      "availability.runout.item.cereal_food.rice": {
+        "mean_raw_value": 0.19699394231771722,
+        "mean_normalized_value": 1.969939423177172,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.1301625613488403,
+        "mean_normalized_value": 1.301625613488403,
+        "aggregation_denominator": 51
+      },
+      "availability.runout.item.cereal_food.wheat": {
+        "mean_raw_value": 0.15923277442069614,
+        "mean_normalized_value": 1.5923277442069614,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.nfi.communication": {
+        "mean_raw_value": 0.06589147309924281,
+        "mean_normalized_value": 0.6589147309924281,
+        "aggregation_denominator": 43
+      },
+      "availability.runout.item.nfi.education": {
+        "mean_raw_value": 0.008523809760808944,
+        "mean_normalized_value": 0.08523809760808945,
+        "aggregation_denominator": 50
+      },
+      "availability.runout.item.nfi.health": {
+        "mean_raw_value": 0.10510204154617932,
+        "mean_normalized_value": 1.0510204154617933,
+        "aggregation_denominator": 49
+      },
+      "availability.runout.item.nfi.household_items": {
+        "mean_raw_value": 0.04481374093937495,
+        "mean_normalized_value": 0.4481374093937495,
+        "aggregation_denominator": 63
+      },
+      "availability.runout.item.nfi.shelter": {
+        "mean_raw_value": 0.05498866275662467,
+        "mean_normalized_value": 0.5498866275662467,
+        "aggregation_denominator": 42
+      },
+      "availability.runout.item.nfi.wash": {
+        "mean_raw_value": 0.06625313136507482,
+        "mean_normalized_value": 0.6625313136507484,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.08908897858451713,
+        "mean_normalized_value": 0.8908897858451713,
+        "aggregation_denominator": 66
+      },
+      "availability.runout.item.other_food.dairy": {
+        "mean_raw_value": 0.0776511146061456,
+        "mean_normalized_value": 0.7765111460614559,
+        "aggregation_denominator": 67
+      },
+      "availability.runout.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.11149611992054972,
+        "mean_normalized_value": 1.1149611992054973,
+        "aggregation_denominator": 58
+      },
+      "availability.runout.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.1383049181031604,
+        "mean_normalized_value": 1.383049181031604,
+        "aggregation_denominator": 62
+      },
+      "availability.runout.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.11946754692302596,
+        "mean_normalized_value": 1.1946754692302597,
+        "aggregation_denominator": 62
+      },
+      "availability.runout.item.other_food.oils_fats": {
+        "mean_raw_value": 0.08562317019438043,
+        "mean_normalized_value": 0.8562317019438043,
+        "aggregation_denominator": 68
+      },
+      "availability.runout.item.other_food.other": {
+        "mean_raw_value": 0.035087720343941135,
+        "mean_normalized_value": 0.35087720343941137,
+        "aggregation_denominator": 19
+      },
+      "availability.runout.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.15222505759447813,
+        "mean_normalized_value": 1.5222505759447813,
+        "aggregation_denominator": 56
+      },
+      "availability.scarcity": {
+        "mean_raw_value": 5.455882352941177,
+        "mean_normalized_value": 9.093137254901961,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.category.cereal_food": {
+        "mean_raw_value": 0.7781224475406548,
+        "mean_normalized_value": 7.781224475406549,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.category.nfi": {
+        "mean_raw_value": 0.8029300903572756,
+        "mean_normalized_value": 8.029300903572755,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.category.other_food": {
+        "mean_raw_value": 0.78512962688418,
+        "mean_normalized_value": 7.8512962688418,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "availability.scarcity.item.cereal_food.bread": {
+        "mean_raw_value": 0.05588336887636354,
+        "mean_normalized_value": 0.5588336887636355,
+        "aggregation_denominator": 28
+      },
+      "availability.scarcity.item.cereal_food.flour": {
+        "mean_raw_value": 0.08065593532998772,
+        "mean_normalized_value": 0.8065593532998772,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.cereal_food.maize": {
+        "mean_raw_value": 0.07949203548624235,
+        "mean_normalized_value": 0.7949203548624235,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.cereal_food.millet": {
+        "mean_raw_value": 0.14772727340459824,
+        "mean_normalized_value": 1.4772727340459824,
+        "aggregation_denominator": 8
+      },
+      "availability.scarcity.item.cereal_food.other": {
+        "mean_raw_value": 0.04464285737938351,
+        "mean_normalized_value": 0.4464285737938351,
+        "aggregation_denominator": 18
+      },
+      "availability.scarcity.item.cereal_food.pasta": {
+        "mean_raw_value": 0.05044970841845497,
+        "mean_normalized_value": 0.5044970841845496,
+        "aggregation_denominator": 64
+      },
+      "availability.scarcity.item.cereal_food.rice": {
+        "mean_raw_value": 0.07855205895269617,
+        "mean_normalized_value": 0.7855205895269617,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.20954454105858708,
+        "mean_normalized_value": 2.095445410585871,
+        "aggregation_denominator": 51
+      },
+      "availability.scarcity.item.cereal_food.wheat": {
+        "mean_raw_value": 0.18734552766032078,
+        "mean_normalized_value": 1.8734552766032078,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.nfi.communication": {
+        "mean_raw_value": 0.05232558139534884,
+        "mean_normalized_value": 0.5232558139534884,
+        "aggregation_denominator": 43
+      },
+      "availability.scarcity.item.nfi.education": {
+        "mean_raw_value": 0.04866666689515114,
+        "mean_normalized_value": 0.4866666689515114,
+        "aggregation_denominator": 50
+      },
+      "availability.scarcity.item.nfi.health": {
+        "mean_raw_value": 0.15274538495102707,
+        "mean_normalized_value": 1.5274538495102707,
+        "aggregation_denominator": 49
+      },
+      "availability.scarcity.item.nfi.household_items": {
+        "mean_raw_value": 0.06291023854698453,
+        "mean_normalized_value": 0.6291023854698453,
+        "aggregation_denominator": 63
+      },
+      "availability.scarcity.item.nfi.shelter": {
+        "mean_raw_value": 0.0881519289243789,
+        "mean_normalized_value": 0.881519289243789,
+        "aggregation_denominator": 42
+      },
+      "availability.scarcity.item.nfi.wash": {
+        "mean_raw_value": 0.07664194571621277,
+        "mean_normalized_value": 0.7664194571621278,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.07456897763591824,
+        "mean_normalized_value": 0.7456897763591823,
+        "aggregation_denominator": 66
+      },
+      "availability.scarcity.item.other_food.dairy": {
+        "mean_raw_value": 0.08918704359389062,
+        "mean_normalized_value": 0.8918704359389064,
+        "aggregation_denominator": 67
+      },
+      "availability.scarcity.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.13835087418556213,
+        "mean_normalized_value": 1.3835087418556213,
+        "aggregation_denominator": 58
+      },
+      "availability.scarcity.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.1097862496972084,
+        "mean_normalized_value": 1.097862496972084,
+        "aggregation_denominator": 62
+      },
+      "availability.scarcity.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.10514343091316762,
+        "mean_normalized_value": 1.0514343091316762,
+        "aggregation_denominator": 62
+      },
+      "availability.scarcity.item.other_food.oils_fats": {
+        "mean_raw_value": 0.0575939305126667,
+        "mean_normalized_value": 0.575939305126667,
+        "aggregation_denominator": 68
+      },
+      "availability.scarcity.item.other_food.other": {
+        "mean_raw_value": 0.06666666818292517,
+        "mean_normalized_value": 0.6666666818292517,
+        "aggregation_denominator": 19
+      },
+      "availability.scarcity.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.12678571537669217,
+        "mean_normalized_value": 1.2678571537669217,
+        "aggregation_denominator": 56
+      },
+      "price.increase": {
+        "mean_raw_value": 5.544117647058823,
+        "mean_normalized_value": 9.240196078431373,
+        "aggregation_denominator": 68
+      },
+      "price.increase.category.cereal_food": {
+        "mean_raw_value": 0.8048858844729907,
+        "mean_normalized_value": 8.048858844729907,
+        "aggregation_denominator": 68
+      },
+      "price.increase.category.nfi": {
+        "mean_raw_value": 0.8294671177864075,
+        "mean_normalized_value": 8.294671177864075,
+        "aggregation_denominator": 68
+      },
+      "price.increase.category.other_food": {
+        "mean_raw_value": 0.8323930955546743,
+        "mean_normalized_value": 8.323930955546743,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.cereal_food.barley": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 3
+      },
+      "price.increase.item.cereal_food.bread": {
+        "mean_raw_value": 0.10476190596818924,
+        "mean_normalized_value": 1.0476190596818924,
+        "aggregation_denominator": 28
+      },
+      "price.increase.item.cereal_food.flour": {
+        "mean_raw_value": 0.06313811973942553,
+        "mean_normalized_value": 0.6313811973942554,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.cereal_food.maize": {
+        "mean_raw_value": 0.08216238208115101,
+        "mean_normalized_value": 0.8216238208115101,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.cereal_food.millet": {
+        "mean_raw_value": 0.0,
+        "mean_normalized_value": 0.0,
+        "aggregation_denominator": 8
+      },
+      "price.increase.item.cereal_food.other": {
+        "mean_raw_value": 0.037698412934939064,
+        "mean_normalized_value": 0.3769841293493907,
+        "aggregation_denominator": 18
+      },
+      "price.increase.item.cereal_food.pasta": {
+        "mean_raw_value": 0.04346634523244575,
+        "mean_normalized_value": 0.4346634523244574,
+        "aggregation_denominator": 64
+      },
+      "price.increase.item.cereal_food.rice": {
+        "mean_raw_value": 0.11478956098503926,
+        "mean_normalized_value": 1.1478956098503925,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.0947964559583103,
+        "mean_normalized_value": 0.947964559583103,
+        "aggregation_denominator": 51
+      },
+      "price.increase.item.cereal_food.wheat": {
+        "mean_raw_value": 0.10012330892769729,
+        "mean_normalized_value": 1.001233089276973,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.nfi.communication": {
+        "mean_raw_value": 0.17441860534424006,
+        "mean_normalized_value": 1.7441860534424005,
+        "aggregation_denominator": 43
+      },
+      "price.increase.item.nfi.education": {
+        "mean_raw_value": 0.006666666716337204,
+        "mean_normalized_value": 0.06666666716337204,
+        "aggregation_denominator": 50
+      },
+      "price.increase.item.nfi.health": {
+        "mean_raw_value": 0.11547619104385376,
+        "mean_normalized_value": 1.1547619104385376,
+        "aggregation_denominator": 49
+      },
+      "price.increase.item.nfi.household_items": {
+        "mean_raw_value": 0.1190448458942156,
+        "mean_normalized_value": 1.190448458942156,
+        "aggregation_denominator": 63
+      },
+      "price.increase.item.nfi.shelter": {
+        "mean_raw_value": 0.16609977434078851,
+        "mean_normalized_value": 1.6609977434078853,
+        "aggregation_denominator": 42
+      },
+      "price.increase.item.nfi.wash": {
+        "mean_raw_value": 0.09086346801589518,
+        "mean_normalized_value": 0.9086346801589517,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.052736237701593025,
+        "mean_normalized_value": 0.5273623770159303,
+        "aggregation_denominator": 66
+      },
+      "price.increase.item.other_food.dairy": {
+        "mean_raw_value": 0.08307734860190705,
+        "mean_normalized_value": 0.8307734860190704,
+        "aggregation_denominator": 67
+      },
+      "price.increase.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.07526869712204769,
+        "mean_normalized_value": 0.7526869712204769,
+        "aggregation_denominator": 58
+      },
+      "price.increase.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.08040951048174212,
+        "mean_normalized_value": 0.8040951048174212,
+        "aggregation_denominator": 62
+      },
+      "price.increase.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.07737746221884605,
+        "mean_normalized_value": 0.7737746221884605,
+        "aggregation_denominator": 62
+      },
+      "price.increase.item.other_food.oils_fats": {
+        "mean_raw_value": 0.049716024330871945,
+        "mean_normalized_value": 0.49716024330871944,
+        "aggregation_denominator": 68
+      },
+      "price.increase.item.other_food.other": {
+        "mean_raw_value": 0.02807017611829858,
+        "mean_normalized_value": 0.2807017611829858,
+        "aggregation_denominator": 19
+      },
+      "price.increase.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.10274943376758269,
+        "mean_normalized_value": 1.027494337675827,
+        "aggregation_denominator": 56
+      },
+      "price.stability": {
+        "mean_raw_value": 1.0147058823529411,
+        "mean_normalized_value": 1.6911764705882353,
+        "aggregation_denominator": 68
+      },
+      "price.stability.category.cereal_food": {
+        "mean_raw_value": 0.2842135519227561,
+        "mean_normalized_value": 2.842135519227561,
+        "aggregation_denominator": 68
+      },
+      "price.stability.category.nfi": {
+        "mean_raw_value": 0.19062858792569706,
+        "mean_normalized_value": 1.9062858792569708,
+        "aggregation_denominator": 68
+      },
+      "price.stability.category.other_food": {
+        "mean_raw_value": 0.21376976967953584,
+        "mean_normalized_value": 2.1376976967953585,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.cereal_food.barley": {
+        "mean_raw_value": 0.3333333333333333,
+        "mean_normalized_value": 3.3333333333333335,
+        "aggregation_denominator": 3
+      },
+      "price.stability.item.cereal_food.bread": {
+        "mean_raw_value": 0.4078553414770535,
+        "mean_normalized_value": 4.078553414770535,
+        "aggregation_denominator": 28
+      },
+      "price.stability.item.cereal_food.flour": {
+        "mean_raw_value": 0.6633941906175631,
+        "mean_normalized_value": 6.633941906175631,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.cereal_food.maize": {
+        "mean_raw_value": 0.6721571058801868,
+        "mean_normalized_value": 6.721571058801868,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.cereal_food.millet": {
+        "mean_raw_value": 0.375,
+        "mean_normalized_value": 3.75,
+        "aggregation_denominator": 8
+      },
+      "price.stability.item.cereal_food.other": {
+        "mean_raw_value": 0.4871693137619231,
+        "mean_normalized_value": 4.87169313761923,
+        "aggregation_denominator": 18
+      },
+      "price.stability.item.cereal_food.pasta": {
+        "mean_raw_value": 0.6376501432969235,
+        "mean_normalized_value": 6.376501432969235,
+        "aggregation_denominator": 64
+      },
+      "price.stability.item.cereal_food.rice": {
+        "mean_raw_value": 0.6811350567047211,
+        "mean_normalized_value": 6.81135056704721,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.cereal_food.sorghum": {
+        "mean_raw_value": 0.6292100060804218,
+        "mean_normalized_value": 6.292100060804217,
+        "aggregation_denominator": 51
+      },
+      "price.stability.item.cereal_food.wheat": {
+        "mean_raw_value": 0.6660279238815693,
+        "mean_normalized_value": 6.6602792388156935,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.nfi.communication": {
+        "mean_raw_value": 0.8023255820884261,
+        "mean_normalized_value": 8.02325582088426,
+        "aggregation_denominator": 43
+      },
+      "price.stability.item.nfi.education": {
+        "mean_raw_value": 0.7566666674613952,
+        "mean_normalized_value": 7.566666674613953,
+        "aggregation_denominator": 50
+      },
+      "price.stability.item.nfi.health": {
+        "mean_raw_value": 0.8384353755688181,
+        "mean_normalized_value": 8.384353755688181,
+        "aggregation_denominator": 49
+      },
+      "price.stability.item.nfi.household_items": {
+        "mean_raw_value": 0.7970091667440202,
+        "mean_normalized_value": 7.970091667440203,
+        "aggregation_denominator": 63
+      },
+      "price.stability.item.nfi.shelter": {
+        "mean_raw_value": 0.8452380966572535,
+        "mean_normalized_value": 8.452380966572534,
+        "aggregation_denominator": 42
+      },
+      "price.stability.item.nfi.wash": {
+        "mean_raw_value": 0.7687449632760357,
+        "mean_normalized_value": 7.687449632760356,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.other_food.condiments_spices": {
+        "mean_raw_value": 0.7056016657840122,
+        "mean_normalized_value": 7.0560166578401216,
+        "aggregation_denominator": 66
+      },
+      "price.stability.item.other_food.dairy": {
+        "mean_raw_value": 0.7559579396203383,
+        "mean_normalized_value": 7.559579396203382,
+        "aggregation_denominator": 67
+      },
+      "price.stability.item.other_food.fruit_vegetables": {
+        "mean_raw_value": 0.6346880141003378,
+        "mean_normalized_value": 6.346880141003378,
+        "aggregation_denominator": 58
+      },
+      "price.stability.item.other_food.legumes_nuts_seeds": {
+        "mean_raw_value": 0.7078324251117245,
+        "mean_normalized_value": 7.078324251117245,
+        "aggregation_denominator": 62
+      },
+      "price.stability.item.other_food.meat_fish_eggs": {
+        "mean_raw_value": 0.7420903284463191,
+        "mean_normalized_value": 7.42090328446319,
+        "aggregation_denominator": 62
+      },
+      "price.stability.item.other_food.oils_fats": {
+        "mean_raw_value": 0.7160839016604073,
+        "mean_normalized_value": 7.160839016604073,
+        "aggregation_denominator": 68
+      },
+      "price.stability.item.other_food.other": {
+        "mean_raw_value": 0.4640350898629741,
+        "mean_normalized_value": 4.640350898629741,
+        "aggregation_denominator": 19
+      },
+      "price.stability.item.other_food.roots_tubers": {
+        "mean_raw_value": 0.6198554424835103,
+        "mean_normalized_value": 6.198554424835103,
+        "aggregation_denominator": 56
+      },
+      "resilience.responsiveness": {
+        "mean_raw_value": 1.9558823529411764,
+        "mean_normalized_value": 9.779411764705882,
+        "aggregation_denominator": 68
+      },
+      "resilience.responsiveness.current_stock": {
+        "mean_raw_value": 0.9106929030488519,
+        "mean_normalized_value": 9.10692903048852,
+        "aggregation_denominator": 68
+      },
+      "resilience.responsiveness.lead_time": {
+        "mean_raw_value": 0.8974332537721185,
+        "mean_normalized_value": 8.974332537721185,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability": {
+        "mean_raw_value": 4.598039230879615,
+        "mean_normalized_value": 7.663398718132692,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.complexity.cereal_food": {
+        "mean_raw_value": 0.8806921120952157,
+        "mean_normalized_value": 8.806921120952158,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.complexity.nfi": {
+        "mean_raw_value": 0.8487893704544095,
+        "mean_normalized_value": 8.487893704544096,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.complexity.other_food": {
+        "mean_raw_value": 0.8920982547980898,
+        "mean_normalized_value": 8.920982547980898,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.criticality.cereal_food": {
+        "mean_raw_value": 0.787627807681394,
+        "mean_normalized_value": 7.876278076813939,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.criticality.nfi": {
+        "mean_raw_value": 0.8896907440879765,
+        "mean_normalized_value": 8.896907440879765,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.criticality.other_food": {
+        "mean_raw_value": 0.8922310296226951,
+        "mean_normalized_value": 8.92231029622695,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.density.cereal_food": {
+        "mean_raw_value": 0.3555465156267233,
+        "mean_normalized_value": 3.555465156267233,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.density.nfi": {
+        "mean_raw_value": 0.5271740201860666,
+        "mean_normalized_value": 5.271740201860666,
+        "aggregation_denominator": 68
+      },
+      "resilience.vulnerability.density.other_food": {
+        "mean_raw_value": 0.45801067713867216,
+        "mean_normalized_value": 4.580106771386721,
+        "aggregation_denominator": 68
+      },
+      "competition.concentration": {
+        "mean_raw_value": 4.705882352941177,
+        "mean_normalized_value": 7.843137254901961,
+        "aggregation_denominator": 68
+      },
+      "competition.concentration.cereal_food": {
+        "mean_raw_value": 0.8059701492537313,
+        "mean_normalized_value": 8.059701492537313,
+        "aggregation_denominator": 67
+      },
+      "competition.concentration.nfi": {
+        "mean_raw_value": 0.71875,
+        "mean_normalized_value": 7.1875,
+        "aggregation_denominator": 64
+      },
+      "competition.concentration.other_food": {
+        "mean_raw_value": 0.8484848484848485,
+        "mean_normalized_value": 8.484848484848484,
+        "aggregation_denominator": 66
+      },
+      "competition.monopoly": {
+        "mean_raw_value": 5.426470588235294,
+        "mean_normalized_value": 9.044117647058824,
+        "aggregation_denominator": 68
+      },
+      "competition.monopoly.cereal_food": {
+        "mean_raw_value": 0.9253731343283582,
+        "mean_normalized_value": 9.253731343283581,
+        "aggregation_denominator": 67
+      },
+      "competition.monopoly.nfi": {
+        "mean_raw_value": 0.890625,
+        "mean_normalized_value": 8.90625,
+        "aggregation_denominator": 64
+      },
+      "competition.monopoly.other_food": {
+        "mean_raw_value": 0.9545454545454546,
+        "mean_normalized_value": 9.545454545454545,
+        "aggregation_denominator": 66
+      },
+      "infrastructure.condition": {
+        "mean_raw_value": 1.7794117647058822,
+        "mean_normalized_value": 2.9656862745098036,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.condition.good": {
+        "mean_raw_value": 0.23529411764705882,
+        "mean_normalized_value": 2.3529411764705883,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.condition.medium": {
+        "mean_raw_value": 0.6323529411764706,
+        "mean_normalized_value": 6.323529411764706,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.condition.poor": {
+        "mean_raw_value": 0.6470588235294118,
+        "mean_normalized_value": 6.470588235294118,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.closed_sewage": {
+        "mean_raw_value": 0.17647058823529413,
+        "mean_normalized_value": 1.7647058823529411,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.communication_network": {
+        "mean_raw_value": 0.7647058823529411,
+        "mean_normalized_value": 7.647058823529412,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.electricity": {
+        "mean_raw_value": 0.08823529411764706,
+        "mean_normalized_value": 0.8823529411764706,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.shelter": {
+        "mean_raw_value": 0.36764705882352944,
+        "mean_normalized_value": 3.676470588235294,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.toilets": {
+        "mean_raw_value": 0.5882352941176471,
+        "mean_normalized_value": 5.882352941176471,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.walkways_exits": {
+        "mean_raw_value": 0.19117647058823528,
+        "mean_normalized_value": 1.911764705882353,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.waste_collection": {
+        "mean_raw_value": 0.35294117647058826,
+        "mean_normalized_value": 3.5294117647058822,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.feature.water": {
+        "mean_raw_value": 0.3235294117647059,
+        "mean_normalized_value": 3.235294117647059,
+        "aggregation_denominator": 68
+      },
+      "infrastructure.features": {
+        "mean_raw_value": 2.8529411764705883,
+        "mean_normalized_value": 3.5661764705882355,
+        "aggregation_denominator": 68
+      },
+      "service.checkout": {
+        "mean_raw_value": 1.1323529411764706,
+        "mean_normalized_value": 3.774509803921568,
+        "aggregation_denominator": 68
+      },
+      "service.checkout.automatic_receipt": {
+        "mean_raw_value": 0.03578762888141414,
+        "mean_normalized_value": 0.35787628881414135,
+        "aggregation_denominator": 68
+      },
+      "service.checkout.multiple_payments": {
+        "mean_raw_value": 0.5395298224380788,
+        "mean_normalized_value": 5.395298224380788,
+        "aggregation_denominator": 68
+      },
+      "service.checkout.short_wait": {
+        "mean_raw_value": 0.5479384903960368,
+        "mean_normalized_value": 5.479384903960368,
+        "aggregation_denominator": 68
+      },
+      "service.shopping": {
+        "mean_raw_value": 0.9558823529411765,
+        "mean_normalized_value": 3.1862745098039214,
+        "aggregation_denominator": 68
+      },
+      "service.shopping.display": {
+        "mean_raw_value": 0.8896468667423024,
+        "mean_normalized_value": 8.896468667423024,
+        "aggregation_denominator": 68
+      },
+      "service.shopping.remote_purchase": {
+        "mean_raw_value": 0.028130148674416183,
+        "mean_normalized_value": 0.28130148674416183,
+        "aggregation_denominator": 68
+      },
+      "service.shopping.visible_prices": {
+        "mean_raw_value": 0.0387422052102492,
+        "mean_normalized_value": 0.38742205210249203,
+        "aggregation_denominator": 68
+      },
+      "quality.condition.continuous_refrigeration": {
+        "mean_raw_value": 0.014925373134328358,
+        "mean_normalized_value": 0.14925373134328357,
+        "aggregation_denominator": 67
+      },
+      "quality.condition.expiry": {
+        "mean_raw_value": 0.04411764705882353,
+        "mean_normalized_value": 0.4411764705882353,
+        "aggregation_denominator": 68
+      },
+      "quality.condition.food_protection": {
+        "mean_raw_value": 0.4264705882352941,
+        "mean_normalized_value": 4.264705882352941,
+        "aggregation_denominator": 68
+      },
+      "quality.condition.no_spoilage": {
+        "mean_raw_value": 0.36764705882352944,
+        "mean_normalized_value": 3.676470588235294,
+        "aggregation_denominator": 68
+      },
+      "quality.condition.packaging": {
+        "mean_raw_value": 0.35384615384615387,
+        "mean_normalized_value": 3.5384615384615383,
+        "aggregation_denominator": 65
+      },
+      "quality.condition.prepackaged": {
+        "mean_raw_value": 0.36923076923076925,
+        "mean_normalized_value": 3.6923076923076925,
+        "aggregation_denominator": 65
+      },
+      "quality.condition.refrigeration": {
+        "mean_raw_value": 0.07462686567164178,
+        "mean_normalized_value": 0.746268656716418,
+        "aggregation_denominator": 67
+      },
+      "quality.condition.separation": {
+        "mean_raw_value": 0.6307692307692307,
+        "mean_normalized_value": 6.3076923076923075,
+        "aggregation_denominator": 65
+      },
+      "quality.maximum": {
+        "mean_raw_value": 7.838235294117647,
+        "mean_normalized_value": null,
+        "aggregation_denominator": 68
+      },
+      "quality.measure": {
+        "mean_raw_value": 2.2205882352941178,
+        "mean_normalized_value": 2.8816526610644257,
+        "aggregation_denominator": 68
+      },
+      "access_protection.access": {
+        "mean_raw_value": 5.514705882352941,
+        "mean_normalized_value": 9.191176470588236,
+        "aggregation_denominator": 68
+      },
+      "access_protection.access.disaster": {
+        "mean_raw_value": 0.9411764705882353,
+        "mean_normalized_value": 9.411764705882353,
+        "aggregation_denominator": 68
+      },
+      "access_protection.access.road": {
+        "mean_raw_value": 0.8088235294117647,
+        "mean_normalized_value": 8.088235294117647,
+        "aggregation_denominator": 68
+      },
+      "access_protection.access.seasonal": {
+        "mean_raw_value": 0.9411764705882353,
+        "mean_normalized_value": 9.411764705882353,
+        "aggregation_denominator": 68
+      },
+      "access_protection.protection": {
+        "mean_raw_value": 5.352941176470588,
+        "mean_normalized_value": 8.92156862745098,
+        "aggregation_denominator": 68
+      },
+      "access_protection.protection.physical": {
+        "mean_raw_value": 0.9558823529411765,
+        "mean_normalized_value": 9.558823529411764,
+        "aggregation_denominator": 68
+      },
+      "access_protection.protection.security": {
+        "mean_raw_value": 0.8235294117647058,
+        "mean_normalized_value": 8.235294117647058,
+        "aggregation_denominator": 68
+      },
+      "access_protection.protection.social": {
+        "mean_raw_value": 0.9705882352941176,
+        "mean_normalized_value": 9.705882352941176,
+        "aggregation_denominator": 68
+      }
+    }
+  }
+}

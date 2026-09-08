@@ -124,6 +124,7 @@ def test_graph_data_node_propagates_typed_methodology_fields_and_warnings():
     update = graph.node_mfi_data_agent(state)
 
     assert update["score_authority"] == "databridge_level_1"
+    # Historical payloads retain their recorded schema instead of being rewritten.
     assert update["analysis_schema_version"] == "2.0"
     assert update["methodology_warnings"][0]["code"] == "mfir_records_excluded"
     assert update["excluded_market_records"][0]["market_name"] == "MFIr Market"
@@ -137,7 +138,7 @@ def test_mock_data_is_typed_and_cannot_masquerade_as_databridge():
     )
 
     assert result["score_authority"] == "synthetic_mock"
-    assert result["analysis_schema_version"] == "2.0"
+    assert result["analysis_schema_version"] == "2.1"
     assert result["markets_data"][0]["subsections"]
     assert result["markets_data"][0]["drivers"]
     assert "sub_scores" not in result["markets_data"][0]

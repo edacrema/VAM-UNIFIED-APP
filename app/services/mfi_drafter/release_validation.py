@@ -757,6 +757,7 @@ def _regression_case_checks(
         block.text
         for block in blocks
         if block.type == "heading" and block.text
+        and (block.meta or {}).get("section") != "analytical_annex"
     )
     dimensions_once = all(
         heading_counts.get(dimension, 0) == 1
@@ -776,9 +777,17 @@ def _regression_case_checks(
         _check(
             "report_hierarchy",
             dimensions_once,
-            f"{case_id}: all nine dimension sections appear exactly once",
+            f"{case_id}: all nine main-body dimension sections appear exactly once",
         )
     )
+    if profile.get("workflow_revision"):
+        from .coverage import evaluate_coverage
+        coverage = evaluate_coverage(profile, blocks, result.get("dimension_narratives", {}))
+        checks.append(_check(
+            "analytical_coverage", coverage["complete"],
+            f"{case_id}: every dimension requirement is visible in the report or annex",
+            evidence=coverage,
+        ))
     visualizations = result.get("visualizations") or {}
     readable_images = True
     for value in visualizations.values():

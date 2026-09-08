@@ -268,7 +268,15 @@ def run_deterministic_report(
     if render_figures:
         started = perf_counter()
         config = InspectorConfig()
-        if capture_titles:
+        if profile.get("workflow_revision"):
+            with _optional_forbid_llm(forbid_llm_calls):
+                rendered = graph.node_mfi_graph_designer(result)
+            visualizations = rendered.get("visualizations", {})
+            result["figure_metadata"] = rendered.get("figure_metadata", {})
+            if capture_titles:
+                chart_titles = tuple(_parse_chart_title(meta["title"], figure_id, config)
+                    for figure_id, meta in result["figure_metadata"].items())
+        elif capture_titles:
             with capture_chart_titles() as captured:
                 with _optional_forbid_llm(forbid_llm_calls):
                     visualizations = graph.node_mfi_graph_designer(result).get(

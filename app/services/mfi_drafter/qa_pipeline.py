@@ -102,6 +102,7 @@ _SINGLE_CLAIM_FIELDS = {"summary", "motivation", "scope_statement"}
 APPLICATION_OWNED_CLAIM_FIELDS = frozenset(
     {
         "claim_id",
+        "revision",
         "validation_status",
         "validation_flags",
         "validation_flag_ids",
@@ -188,6 +189,8 @@ def correction_field_patch_contract(
     artifact_type = str(task["artifact_type"])
     field_name = str(task["field_name"])
     if artifact_type == "context":
+        if field_name == "withdrawn":
+            return {"field": field_name, "replacement_shape": "true: withdraw this context statement; retain its audit tombstone", "example": {"replacement": True}, "nullable": False}
         examples: Dict[str, Any] = {
             "text": {"replacement": "Revised source-supported statement."},
             "classification": {"replacement": "corroborating"},
@@ -225,6 +228,8 @@ def correction_field_patch_contract(
             if bool(artifact.get("is_priority"))
             else 0
         )
+        if assessment_profile.get("workflow_revision"):
+            maximum_items = None
         return {
             "field": field_name,
             "replacement_shape": "array of subdimension objects",
@@ -294,6 +299,8 @@ def correction_field_patch_contract(
             "recommendations": NARRATIVE_DENSITY_POLICY.executive_recommendations,
             "limitations": NARRATIVE_DENSITY_POLICY.executive_limitations,
         }[field_name]
+    if artifact_type == "dimension" and assessment_profile.get("workflow_revision") and field_name != "recommendations":
+        maximum_items = None
     return {
         "field": field_name,
         "replacement_shape": "array of claim objects",
@@ -459,6 +466,9 @@ def validate_field_patch_payload(
     if artifact_type == "context":
         if field_name == "text":
             return MFIContextTextFieldPatch.model_validate(payload).replacement.strip()
+        if field_name == "withdrawn":
+            from .schemas import MFIContextWithdrawalPatch
+            return MFIContextWithdrawalPatch.model_validate(payload).replacement
         if field_name == "classification":
             return MFIContextClassificationFieldPatch.model_validate(
                 payload
@@ -553,6 +563,8 @@ def apply_field_patch(
         for statement in context:
             if str(statement.get("statement_id") or "") == artifact_id:
                 statement[field_name] = replacement
+                if field_name == "withdrawn" and replacement is True:
+                    statement["classification"] = "unrelated"
                 matched = True
                 break
         if not matched:

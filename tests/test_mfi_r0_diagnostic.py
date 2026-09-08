@@ -193,7 +193,7 @@ def test_partial_optional_coverage_remains_visible(diagnostic_run) -> None:
             metric
             for metric in dimension["drivers"]
             if (metric.get("availability") or {}).get("classification")
-            == "partial_optional"
+            == "unknown_applicability"
         ]
         if partial:
             classified[dimension["dimension"]] = len(partial)
