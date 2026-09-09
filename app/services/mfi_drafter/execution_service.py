@@ -182,6 +182,9 @@ def get_mfi_run(run_id):
     manifest = reconcile_expiry(store, run_id)
     if not manifest:
         return run
+    if manifest.get("workflow_revision") == "mfi-light-v1":
+        from .light_service import get_light_run
+        return get_light_run(run_id, manifest, store, run)
     run = deepcopy(run) if run is not None else RunRecord(metadata={"workflow_revision": WORKFLOW_REVISION})
     run.metadata = dict(run.metadata or {})
     diagnostics = dict(run.metadata.get("generation_diagnostics") or {})

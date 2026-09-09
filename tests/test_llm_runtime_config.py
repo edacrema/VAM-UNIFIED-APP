@@ -72,13 +72,13 @@ def test_invalid_llm_runtime_configuration_fails_closed(
     assert status["error_code"] == "llm_runtime_configuration_invalid"
 
 
-def test_mfi_router_rejects_invalid_runtime_before_generation(monkeypatch) -> None:
+def test_light_mfi_profile_is_independent_of_legacy_model_timeouts(monkeypatch) -> None:
     monkeypatch.setenv("MFI_DRAFTER_ANALYSIS_VERSION", "2")
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "invalid")
-    with pytest.raises(HTTPException) as caught:
-        router._require_enabled_release_control()
-    assert caught.value.status_code == 503
-    assert caught.value.detail["code"] == "llm_runtime_configuration_invalid"
+    assert router._require_enabled_release_control().enabled
+    assert router.light_runtime_status()["timeout"] == 600
+    assert router.light_runtime_status()["sdk_retries"] == 0
+    assert llm.llm_runtime_status().configuration_status == "invalid"
 
 
 def test_vertex_clients_are_cached_by_effective_settings(monkeypatch) -> None:

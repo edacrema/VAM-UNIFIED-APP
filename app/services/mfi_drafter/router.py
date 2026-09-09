@@ -14,8 +14,8 @@ from .graph import (
     reconcile_correction_history_for_failure,
     reconcile_generation_diagnostics_for_blocked_failure,
     reconcile_generation_diagnostics_for_llm_failure,
-    run_mfi_report_generation,
 )
+from .light_service import run_mfi_report_generation, runtime_status as light_runtime_status
 from .errors import MFIGenerationBlockedError
 from .data_loader import load_mfi_from_csv, validate_csv_structure
 from .compatibility import canonical_and_legacy_response_fields
@@ -28,6 +28,7 @@ from .features import (
 from .schemas import (
     GenerateMFIReportInput,
     GenerateMFIReportOutput,
+    LightMFIReportOutput,
     MFIReportStatusOutput,
     MFI_DIMENSIONS,
 )
@@ -165,10 +166,6 @@ def _require_enabled_release_control():
         control = require_mfi_analysis_v2()
     except MFIAnalysisVersionDisabled as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_dict())
-    try:
-        require_llm_runtime_config()
-    except LLMRuntimeConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=exc.to_public_dict()) from exc
     return control
 
 def _build_mfi_output(
@@ -178,6 +175,9 @@ def _build_mfi_output(
     data_collection_start: str,
     data_collection_end: str,
 ) -> GenerateMFIReportOutput:
+    if result.get("workflow_revision") == "mfi-light-v1":
+        from .light_report import public_output
+        return LightMFIReportOutput.model_validate(public_output(result))
     response_fields = canonical_and_legacy_response_fields(result)
 
     return GenerateMFIReportOutput(
@@ -263,7 +263,7 @@ def _run_mfi_from_structured_data(
         data_collection_end=data_collection_end,
     )
 
-@router.post("/generate", response_model=GenerateMFIReportOutput)
+@router.post("/generate", response_model=GenerateMFIReportOutput | LightMFIReportOutput)
 async def generate_mfi_report(input_data: GenerateMFIReportInput):
     """
     Generates a full MFI report.
@@ -315,7 +315,7 @@ async def generate_mfi_report(input_data: GenerateMFIReportInput):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/generate-from-csv", response_model=GenerateMFIReportOutput)
+@router.post("/generate-from-csv", response_model=GenerateMFIReportOutput | LightMFIReportOutput)
 async def generate_mfi_report_from_csv(
     file: UploadFile = File(..., description="Processed MFI CSV file"),
     country_override: Optional[str] = Form(None, description="Override country name"),
@@ -409,7 +409,7 @@ async def generate_mfi_report_from_csv_async(
 
     run_id = f"mfi_{uuid_module.uuid4().hex[:8]}"
     create_run(run_id)
-    from app.services.mfi_drafter.execution_service import prepare_submission
+    from app.services.mfi_drafter.light_service import prepare_submission
     from app.services.mfi_drafter.execution import RecoveryError
     try:
         reservation = prepare_submission(run_id, csv_data)
@@ -418,7 +418,7 @@ async def generate_mfi_report_from_csv_async(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     update_run(
         run_id,
-        metadata={"release_control": release_control.model_dump(), "workflow_revision": csv_data.get("workflow_revision")},
+        metadata={"release_control": release_control.model_dump(), "workflow_revision": "mfi-light-v1"},
     )
 
     progress_map = {
@@ -447,7 +447,7 @@ async def generate_mfi_report_from_csv_async(
                 update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             def on_step(node_name: str, _state: dict):
-                progress = progress_map.get(node_name)
+                progress = (_state.get("generation_diagnostics") or {}).get("progress_pct", progress_map.get(node_name))
                 if progress is not None:
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
@@ -603,7 +603,7 @@ async def generate_mfi_report_async(
                 update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             def on_step(node_name: str, _state: dict):
-                progress = progress_map.get(node_name)
+                progress = (_state.get("generation_diagnostics") or {}).get("progress_pct", progress_map.get(node_name))
                 if progress is not None:
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
@@ -662,7 +662,7 @@ async def get_report_status(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run ID not found: {run_id}")
 
-    from .execution_service import effective_contract
+    from .light_service import effective_contract
     return MFIReportStatusOutput(
         **execution_status(run_id, runtime=effective_contract()),
         run_id=run_id,
@@ -687,7 +687,7 @@ class DraftMFIOptions(BaseModel):
 
 @router.post("/resume/{run_id}", status_code=202)
 async def resume_mfi(run_id: str, request: ResumeMFIInput, background_tasks: BackgroundTasks):
-    from .execution_service import schedule_resume
+    from .light_service import schedule_resume
     if not request.idempotency_key.strip():
         raise HTTPException(status_code=422, detail="idempotency_key is required")
     try:
@@ -731,7 +731,7 @@ async def export_mfi_draft_docx(run_id: str, options: DraftMFIOptions = Body(def
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.get("/result/{run_id}", response_model=GenerateMFIReportOutput)
+@router.get("/result/{run_id}", response_model=GenerateMFIReportOutput | LightMFIReportOutput)
 async def get_report_result(run_id: str):
     """Retrieves the result of a completed report."""
     run = get_run(run_id)
@@ -822,7 +822,7 @@ def get_service_info():
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
         "llm_observability": trace_config.model_dump(),
-        "llm_runtime": llm_runtime_status().model_dump(),
+        "llm_runtime": light_runtime_status(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {
@@ -913,7 +913,7 @@ def health_check():
         "generation_enabled": release_control.enabled,
         "release_control": release_control.model_dump(),
         "llm_observability": trace_config.model_dump(),
-        "llm_runtime": llm_runtime_status().model_dump(),
+        "llm_runtime": light_runtime_status(),
     }
 
 

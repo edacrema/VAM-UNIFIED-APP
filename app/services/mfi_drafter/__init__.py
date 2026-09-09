@@ -43,6 +43,8 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "run_mfi_report_generation":
+        return getattr(import_module(".light_service", __name__), name)
     if name == "router":
         from .router import router
 

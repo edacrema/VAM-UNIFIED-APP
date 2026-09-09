@@ -23,6 +23,10 @@ def snapshot(run_id, revision=None, *, store=None):
 
 
 def draft_payload(run_id, revision=None, *, store=None):
+    from .execution import recovery_store, RecoveryError
+    selected_store = store or recovery_store()
+    if (selected_store.read(run_id) or {}).get("workflow_revision") == "mfi-light-v1":
+        raise RecoveryError("Lightweight MFI reports are available only after completion; draft export is disabled", 409)
     from app.shared.report_blocks import ReportBlock, _apply_mfi_layout_contract
     revision, state = snapshot(run_id, revision, store=store)
     generated = datetime.now(timezone.utc).isoformat()
@@ -105,6 +109,8 @@ def analysis_payload(run_id):
     manifest = store.read(run_id)
     if not manifest or not manifest.get("analysis_available"):
         raise RecoveryError("Validated analysis is not yet available", 409)
+    if manifest.get("workflow_revision") == "mfi-light-v1" and manifest.get("execution_state") != "completed":
+        raise RecoveryError("Lightweight MFI downloads are available after report completion", 409)
     state = load_snapshot(store, manifest["snapshot_ref"])
     return {"run_id": run_id, "assessment_profile": state["assessment_profile"],
             "input_findings": (state.get("csv_data") or {}).get("input_findings", []), "is_final_report": False}

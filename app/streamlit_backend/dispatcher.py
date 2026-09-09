@@ -64,8 +64,8 @@ from app.services.mfi_drafter.graph import (
     reconcile_correction_history_for_failure,
     reconcile_generation_diagnostics_for_blocked_failure,
     reconcile_generation_diagnostics_for_llm_failure,
-    run_mfi_report_generation,
 )
+from app.services.mfi_drafter.light_service import run_mfi_report_generation, runtime_status as light_runtime_status
 from app.services.mfi_drafter.errors import MFIGenerationBlockedError
 from app.services.mfi_drafter.schemas import MFI_DIMENSIONS
 from app.services.price_validator.graph import run_troubleshooting as run_price_troubleshooting
@@ -450,10 +450,6 @@ def _require_enabled_mfi_release_control():
         control = require_mfi_analysis_v2()
     except MFIAnalysisVersionDisabled as exc:
         raise LocalHTTPException(exc.status_code, exc.to_dict()) from exc
-    try:
-        require_llm_runtime_config()
-    except LLMRuntimeConfigurationError as exc:
-        raise LocalHTTPException(503, exc.to_public_dict()) from exc
     return control
 
 
@@ -465,6 +461,9 @@ def _build_mfi_report_output(
     data_collection_start: str,
     data_collection_end: str,
 ) -> Dict[str, Any]:
+    if result.get("workflow_revision") == "mfi-light-v1":
+        from app.services.mfi_drafter.light_report import public_output
+        return public_output(result)
     response_fields = canonical_and_legacy_response_fields(result)
 
     result_for_blocks = dict(result)
@@ -1142,7 +1141,8 @@ def _dispatch_mfi_drafter(
     params: Dict[str, Any],
 ) -> LocalResponse:
     if len(parts) == 2 and parts[0] in {"resume", "draft", "analysis", "export-draft-docx"}:
-        from app.services.mfi_drafter.execution_service import schedule_resume, get_mfi_run
+        from app.services.mfi_drafter.execution_service import get_mfi_run
+        from app.services.mfi_drafter.light_service import schedule_resume
         from app.services.mfi_drafter.execution import RecoveryError
         from app.services.mfi_drafter.drafts import draft_payload, analysis_payload, export_draft
         try:
@@ -1194,7 +1194,7 @@ def _dispatch_mfi_drafter(
                 "generation_enabled": control.enabled,
                 "release_control": control.model_dump(),
                 "llm_observability": observability_config().model_dump(),
-                "llm_runtime": llm_runtime_status().model_dump(),
+                "llm_runtime": light_runtime_status(),
             }
         )
     if method == "GET" and parts == ["dimensions"]:
@@ -1357,7 +1357,7 @@ def _mfi_drafter_generate_from_csv_async(
 
     run_id = f"mfi_{uuid.uuid4().hex[:8]}"
     create_run(run_id)
-    from app.services.mfi_drafter.execution_service import prepare_submission
+    from app.services.mfi_drafter.light_service import prepare_submission
     from app.services.mfi_drafter.execution import RecoveryError
     try:
         reservation = prepare_submission(run_id, csv_data)
@@ -1366,7 +1366,7 @@ def _mfi_drafter_generate_from_csv_async(
         raise LocalHTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     update_run(
         run_id,
-        metadata={"release_control": release_control.model_dump(), "workflow_revision": csv_data.get("workflow_revision")},
+        metadata={"release_control": release_control.model_dump(), "workflow_revision": "mfi-light-v1"},
     )
 
     progress_map = {
@@ -1395,7 +1395,7 @@ def _mfi_drafter_generate_from_csv_async(
                 update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             def on_step(node_name: str, _state: dict) -> None:
-                progress = progress_map.get(node_name)
+                progress = (_state.get("generation_diagnostics") or {}).get("progress_pct", progress_map.get(node_name))
                 if progress is not None:
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
@@ -1536,7 +1536,7 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
                 update_run(run_id, metadata={"llm_diagnostics": diagnostics})
 
             def on_step(node_name: str, _state: dict) -> None:
-                progress = progress_map.get(node_name)
+                progress = (_state.get("generation_diagnostics") or {}).get("progress_pct", progress_map.get(node_name))
                 if progress is not None:
                     update_run_progress(run_id, current_node=node_name, progress_pct=progress)
                 else:
@@ -1633,7 +1633,8 @@ def _mfi_drafter_generate_async(*, json_body: Any) -> LocalResponse:
 
 
 def _mfi_drafter_status(run_id: str) -> LocalResponse:
-    from app.services.mfi_drafter.execution_service import get_mfi_run as get_run, effective_contract
+    from app.services.mfi_drafter.execution_service import get_mfi_run as get_run
+    from app.services.mfi_drafter.light_service import effective_contract
     from app.services.mfi_drafter.execution import execution_status
     run = get_run(run_id)
     if run is None:
@@ -1739,7 +1740,7 @@ def _mfi_drafter_info() -> Dict[str, Any]:
         "release_control": release_control.model_dump(),
         "generation_enabled": release_control.enabled,
         "llm_observability": observability_config().model_dump(),
-        "llm_runtime": llm_runtime_status().model_dump(),
+        "llm_runtime": light_runtime_status(),
         "supports_csv_upload": True,
         "data_source": "Uploaded processed MFI CSV",
         "csv_upload": {

@@ -169,7 +169,7 @@ def create_checkpoint(store, run_id, inputs, runtime):
             if old["input_fingerprint"] != fingerprint(inputs):
                 raise RecoveryError("Input changes require a new run", 409)
             return old
-        return dict(workflow_revision=WORKFLOW_REVISION, contract_bundle=CONTRACT_BUNDLE,
+        return dict(workflow_revision=runtime.get("workflow", WORKFLOW_REVISION), contract_bundle=runtime.get("bundle", CONTRACT_BUNDLE),
                     runtime_fingerprint=fingerprint(runtime), runtime=runtime,
                     input_fingerprint=fingerprint(inputs), input_ref=input_ref, run_id=run_id,
                     run_revision=0, epoch=0, fence=0, owner=None, lease_until=0,
@@ -201,7 +201,7 @@ def reserve_execution(store, run_id, *, expected_revision=None, idempotency_key=
         if request_key and request_key in value["requests"]:
             reservation.update(value["requests"][request_key], scheduled=False)
             return value
-        if value["contract_bundle"] != CONTRACT_BUNDLE or (runtime is not None and value["runtime_fingerprint"] != fingerprint(runtime)):
+        if value["contract_bundle"] != (runtime or {}).get("bundle", CONTRACT_BUNDLE) or (runtime is not None and value["runtime_fingerprint"] != fingerprint(runtime)):
             raise RecoveryError("Recorded workflow or effective configuration is incompatible with this worker", 409)
         if expected_revision is not None and expected_revision != value["run_revision"]:
             raise RecoveryError("Run revision conflict", 409)
@@ -285,7 +285,7 @@ class Execution:
 
     def execute_once(self, task_id, dependencies, action, *, kind="work", epoch_scoped=False):
         manifest = self.store.read(self.run_id)
-        dep = fingerprint([manifest["input_fingerprint"], CONTRACT_BUNDLE, dependencies,
+        dep = fingerprint([manifest["input_fingerprint"], manifest["contract_bundle"], dependencies,
                            self.reservation["epoch"] if epoch_scoped else None])
         key = fingerprint([task_id, dep])
         record = manifest["tasks"].get(key)
@@ -360,7 +360,7 @@ def execution_status(run_id, store=None, *, runtime=None):
         return dict(workflow_revision=None, run_revision=0, resumable=False,
                     resume_block_reason="This historical run has no recovery checkpoint", draft_available=False,
                     draft_revision=None, analysis_available=False, execution_state="legacy")
-    if value["contract_bundle"] != CONTRACT_BUNDLE or (
+    if value["contract_bundle"] != (runtime or {}).get("bundle", CONTRACT_BUNDLE) or (
         runtime is not None and value["runtime_fingerprint"] != fingerprint(runtime)
     ):
         value["resumable"] = False
@@ -374,6 +374,15 @@ def execution_status(run_id, store=None, *, runtime=None):
     qa_counts = value.get("unresolved_counts")
     from .response_runtime import public_journal
     response = public_journal(value) if value.get("response_work") else {}
+    if value.get("workflow_revision") == "mfi-light-v1":
+        from .light_runtime import public_diagnostics
+        light = public_diagnostics(value)
+        return {**{key: value.get(key) for key in ("workflow_revision", "run_revision", "execution_state", "resumable", "resume_block_reason", "analysis_available", "active_task", "last_error")},
+            "draft_available": False, "draft_revision": None, "response_contract_bundle": value["contract_bundle"],
+            "recovery_storage": "durable" if store.durable else "process_local",
+            "recovery_limitation": None if store.durable else "Resume requires the same server process; restart recovery is unavailable.",
+            "qa_evaluation_status": "reviewed" if value["execution_state"] == "completed" else "not_completed",
+            "unresolved_counts": None, "work_totals": light["work_totals"], "light_progress": light}
     return {**{key: value.get(key) for key in ("workflow_revision", "run_revision", "execution_state",
             "resumable", "resume_block_reason", "draft_revision", "analysis_available", "active_task", "last_error")},
             "draft_available": value.get("draft_revision") is not None,

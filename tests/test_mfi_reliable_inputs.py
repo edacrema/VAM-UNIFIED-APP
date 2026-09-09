@@ -44,7 +44,15 @@ def test_authoritative_benchmark_unchanged(country, survey, monkeypatch):
         assert {k:market[k] for k in ["overall_mfi","dimension_scores","traders_surveyed"]} == expected["markets"][market["market_name"]]
     for metrics in data["metric_summaries"].values():
         for metric in metrics:
-            assert {k:metric[k] for k in ["mean_raw_value","mean_normalized_value","aggregation_denominator"]} == expected["metrics"][metric["metric_id"]]
+            reference = expected["metrics"][metric["metric_id"]]
+            assert metric["aggregation_denominator"] == reference["aggregation_denominator"]
+            # Python 3.12 changed float summation. Allow only machine-roundoff
+            # across Windows 3.12 / container 3.11, far below MFI's 1e-6 tolerance.
+            for field in ("mean_raw_value", "mean_normalized_value"):
+                if reference[field] is None:
+                    assert metric[field] is None
+                else:
+                    assert metric[field] == pytest.approx(reference[field], rel=0, abs=1e-12)
 
     # Exercise the actual outgoing dimension/review builders against both full inputs.
     from app.services.mfi_drafter import graph

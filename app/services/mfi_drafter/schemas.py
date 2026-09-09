@@ -1383,6 +1383,22 @@ class GenerateMFIReportFromCSVInput(BaseModel):
     data_collection_end_override: Optional[str] = Field(None, description="Override end date")
 
 
+class LightMFIReportOutput(BaseModel):
+    """Section-level reports do not claim legacy per-claim QA certification."""
+    model_config = ConfigDict(extra="allow")
+    run_id: str
+    workflow_revision: Literal["mfi-light-v1"]
+    narrative_schema_version: Literal["3.0"]
+    analysis_schema_version: Literal["2.1"]
+    country: str
+    light_narrative: Dict[str, Any]
+    review_reports: Dict[str, Any]
+    report_blocks: List[ReportBlock]
+    generation_diagnostics: Dict[str, Any]
+    llm_diagnostics: LLMRunDiagnostics
+    success: bool = True
+
+
 class GenerateMFIReportOutput(BaseModel):
     workflow_revision: Optional[str] = None
     """Output of MFI report generation."""
@@ -1481,6 +1497,7 @@ class GenerateMFIReportOutput(BaseModel):
 class MFIReportStatusOutput(BaseModel):
     """Status of an in-progress report."""
     run_id: str
+    light_progress: Optional[Dict[str, Any]] = None
     workflow_revision: Optional[str] = None
     run_revision: int = 0
     execution_state: Optional[str] = None
