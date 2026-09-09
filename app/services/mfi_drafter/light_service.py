@@ -34,6 +34,12 @@ def inputs_for(**kwargs):
 
 
 def prepare_submission(run_id, csv_data):
+    from .map_basemap import preflight_maps, MFICartographyError
+    try:
+        preflight_maps(csv_data)
+    except MFICartographyError as exc:
+        # Existing HTTP/Streamlit handlers preserve this explicit configuration cause.
+        raise RecoveryError(str(exc), 503) from exc
     inputs = inputs_for(country=csv_data["country"], data_collection_start=csv_data["data_collection_start"],
         data_collection_end=csv_data["data_collection_end"], markets=csv_data["markets"], csv_data=csv_data, run_id=run_id)
     store = recovery_store()
@@ -45,7 +51,9 @@ def run_mfi_report_generation(country, data_collection_start, data_collection_en
         on_step=None, release_control=None, run_id=None, llm_trace_sink=None, execution_reservation=None, *, client=None):
     from .features import require_mfi_analysis_v2
     from .light_graph import build_graph
+    from .map_basemap import preflight_maps
     control = require_mfi_analysis_v2(release_control)
+    preflight_maps(csv_data)
     run_id = run_id or "mfi_"+uuid.uuid4().hex[:8]
     inputs = inputs_for(country=country, data_collection_start=data_collection_start, data_collection_end=data_collection_end,
         markets=markets, csv_data=csv_data, run_id=run_id)

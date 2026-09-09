@@ -94,6 +94,62 @@ def test_resume_reuses_successful_work(setup):
     assert result["success"]
 
 
+def test_map_revision_only_invalidates_map_and_assembly(setup, monkeypatch):
+    from app.services.mfi_drafter import render_worker, map_basemap, light_report
+    from app.services.mfi_drafter.reliable_contracts import fingerprint
+    store, args = setup
+    rendered = Counter()
+    def figures(base, execution):
+        images, metadata = {}, {}
+        for job in render_worker.figure_jobs(base):
+            def action(job=job):
+                rendered[job['figure_id']] += 1
+                return {'image': fingerprint(job), 'metadata': {'renderer_version': map_basemap.MAP_RENDERER_VERSION}}
+            result = execution.execute_once('figure:' + job['figure_id'], job, action, kind='figure')
+            images[job['figure_id']], metadata[job['figure_id']] = result['image'], result['metadata']
+        return {'visualizations': images, 'figure_metadata': metadata}
+    monkeypatch.setattr(light_graph, 'render_figures', figures)
+    original = light_report.build_blocks
+    monkeypatch.setattr(light_report, 'build_blocks', lambda result: (_ for _ in ()).throw(RuntimeError('assembly interruption')))
+    client = Client()
+    with pytest.raises(RuntimeError, match='assembly interruption'):
+        light_service.run_mfi_report_generation(**args, client=client)
+    before = dict(client.calls)
+    assert sum(before.values()) == 5 and rendered['geographic_map'] == 1
+    monkeypatch.setattr(light_report, 'build_blocks', original)
+    monkeypatch.setattr(map_basemap, 'MAP_RENDERER_VERSION', 'mfi-map-test-next')
+    status = execution_status(args['run_id'], store, runtime=light_service.effective_contract())
+    reservation = reserve_execution(store, args['run_id'], expected_revision=status['run_revision'],
+                                    idempotency_key='updated-map', runtime=light_service.effective_contract())
+    result = light_service.run_mfi_report_generation(**args, client=client, execution_reservation=reservation)
+    assert result['success'] and dict(client.calls) == before
+    assert rendered['geographic_map'] == 2
+    assert all(n == 1 for key, n in rendered.items() if key != 'geographic_map')
+    assert result['figure_metadata']['geographic_map']['renderer_version'] == 'mfi-map-test-next'
+    assert len([b for b in result['report_blocks'] if b.get('figure_id') == 'geographic_map']) == 1
+
+
+def test_map_preflight_reports_same_configuration_error_in_api_and_streamlit(setup, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.services.mfi_drafter import router, map_basemap
+    from app.streamlit_backend import dispatcher
+    from app.shared import async_runs
+    _, args = setup
+    monkeypatch.setenv('MFI_DRAFTER_ANALYSIS_VERSION', '2')
+    monkeypatch.setattr(async_runs, '_BACKEND', 'memory')
+    monkeypatch.setattr(router, 'load_mfi_from_csv', lambda **kw: args['csv_data'])
+    monkeypatch.setattr(dispatcher, 'load_mfi_from_csv', lambda **kw: args['csv_data'])
+    monkeypatch.setattr(map_basemap, 'verified_manifest', lambda: (_ for _ in ()).throw(map_basemap.MFICartographyError('MFI offline cartography is corrupt')))
+    app = FastAPI(); app.include_router(router.router, prefix='/mfi-drafter')
+    reply = TestClient(app).post('/mfi-drafter/generate-from-csv-async', files={'file': ('input.csv', b'placeholder', 'text/csv')})
+    assert reply.status_code == 503 and 'cartography' in reply.json()['detail']
+    monkeypatch.setattr(dispatcher, '_extract_file', lambda *a: SimpleNamespace(filename='input.csv',content=b'placeholder'))
+    with pytest.raises(dispatcher.LocalHTTPException) as error:
+        dispatcher._mfi_drafter_generate_from_csv_async(data={}, files={}, params={})
+    assert error.value.status_code == 503 and 'cartography' in error.value.detail
+
+
 def test_corrections_start_without_waiting_for_other_review_or_charts(setup, monkeypatch):
     _, args = setup
     corrected = threading.Event()

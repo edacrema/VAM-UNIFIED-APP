@@ -175,7 +175,9 @@ def build_graph(execution, *, client=None, on_step=None, trace_sink=None):
     graph = StateGraph(State)
     graph.add_node("prepare_analysis", stage("prepare_analysis", lambda s: {"base": prepare_analysis(s["base"])}, lambda s: s["base"]))
     graph.add_node("context_retrieval", stage("context_retrieval", lambda s: {"context": retrieve_context(s["base"])}, lambda s: {k:s["base"][k] for k in ("country", "data_collection_start", "data_collection_end")}))
-    graph.add_node("charts", stage("charts", lambda s: {"figures": render_figures(s["base"], execution)}, lambda s: s["base"]))
+    from .map_basemap import chart_dependencies
+    graph.add_node("charts", stage("charts", lambda s: {"figures": render_figures(s["base"], execution)},
+        lambda s: chart_dependencies(s["base"])))
     for family in ("dimensions", "markets"):
         draft, review, correct = "draft_"+family, "review_"+family, "correct_"+family
         graph.add_node(draft, stage(draft, lambda s, f=family, n=draft: {n: generate_family(s,f,n)}, lambda s: {"base":s["base"], "context":s["context"]}))

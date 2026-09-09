@@ -38,6 +38,17 @@ def build_blocks(result):
     def figure(figure_id):
         if figure_id in result.get("visualizations", {}) and figure_id not in used:
             used.add(figure_id)
+            if figure_id == "geographic_map":
+                from .map_rendering import MAP_WIDTH
+                meta = result.get('figure_metadata', {}).get(figure_id, {})
+                coverage = (f" Coordinates available for {meta['located_market_count']}/{meta['total_market_count']} assessed markets."
+                            if 'located_market_count' in meta else '')
+                caption = ('Stored assessed-market MFI scores in the assessed area. Colours show scores on the 0–10 scale; '
+                           'numbered callouts identify selected markets in selection order and match the side legend.' + coverage)
+                caption += ' ' + ' '.join(v for v in meta.get('limitations', []) if not v.startswith('Coordinates available for'))
+                blocks.append(ReportBlock(type='figure', figure_id=figure_id, width=MAP_WIDTH,
+                    caption=caption.strip(), alt_text=caption.strip()))
+                return
             blocks.append(ReportBlock(type="figure", figure_id=figure_id,
                 caption=figure_id.replace("_", " "), alt_text="Chart computed from the assessed market data"))
     for key in ("mfi_radar", "market_score_ranking", "geographic_map", "overview_table"):

@@ -1,0 +1,13 @@
+{
+  "source": "Natural Earth Admin 0 Countries",
+  "version": "5.1.1",
+  "scale": "1:10m",
+  "source_url": "https://naturalearth.s3.amazonaws.com/5.1.1/10m_cultural/ne_10m_admin_0_countries.zip",
+  "license_url": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "source_sha256": "ce1ac7036499a0edd641fbc093cd209a98f96a49d2eca8480aaacad35138a7f6",
+  "asset_sha256": "2b5f18f7516793e50afab262ae68eb8a705781b393f7ccbcc0e0f5734d2e32bf",
+  "feature_count": 258,
+  "conversion": "scripts/build_mfi_basemap.py",
+  "conversion_pyshp_version": "3.0.3",
+  "coordinates": "WGS84 longitude/latitude; source geometry retained without simplification"
+}

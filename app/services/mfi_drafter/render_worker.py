@@ -53,8 +53,10 @@ def figure_jobs(state):
                     "title": f"{name}: {'ranked explanatory' if kind == 'drivers' else 'relevant item'} evidence",
                     "unit": "Unfavorable rate (%)", "limit": 100, "color": "#F68B1F" if kind == "drivers" else "#8A2BE2"})
     located = [m for m in markets if m.get("latitude") is not None and m.get("longitude") is not None]
-    if located:
-        add("geographic_map", "map", {"markets": located, "selected": profile.get("priority_market_names", [])})
+    from .map_basemap import valid_location
+    if any(valid_location(m) for m in located):
+        from .map_rendering import map_data
+        add("geographic_map", "map", map_data(state))
     return jobs
 
 
@@ -73,7 +75,8 @@ def render(job):
         height = max(4, len(data["rows"]) * .5)
     fig = Figure(figsize=(12 if kind == "matrix" else 10, height))
     FigureCanvasAgg(fig)
-    ax = fig.add_subplot(111, projection="polar" if kind == "radar" else None)
+    ax = fig.add_subplot(111, projection="polar" if kind == "radar" else None) if kind != "map" else None
+    metadata = None
     try:
         if kind == "radar":
             names, values = data["names"], data["values"]
@@ -98,17 +101,8 @@ def render(job):
             fig.colorbar(im, ax=ax, shrink=.5).set_label("MFI Score (0-10)")
             ax.set_title("Assessed-market MFI profile by dimension")
         elif kind == "map":
-            names = [m["market_name"] for m in data["markets"]]
-            values = [m["overall_mfi"] for m in data["markets"]]
-            im = ax.scatter([m["longitude"] for m in data["markets"]], [m["latitude"] for m in data["markets"]],
-                            c=values, cmap="Blues", vmin=0, vmax=10, edgecolors="black", s=65)
-            for index, name in enumerate(data["selected"], start=1):
-                if name in names:
-                    market = data["markets"][names.index(name)]
-                    ax.annotate(f"{index}. {name}", (market["longitude"], market["latitude"]), xytext=(5, 5), textcoords="offset points", fontsize=7)
-            fig.colorbar(im, ax=ax).set_label("Stored MFI score (0-10)")
-            ax.set(xlabel="Longitude", ylabel="Latitude", title="Stored assessed-market MFI scores by location")
-            ax.grid(alpha=.2)
+            from .map_rendering import draw_map
+            metadata = draw_map(fig, data)
         else:
             if kind == "bars":
                 names, values = map(list, zip(*data["rows"]))
@@ -141,12 +135,13 @@ def render(job):
                     ax.text(value + .1, index, f"{value:.2f}", va="center", fontsize=7)
             ax.set_yticks(range(len(names)), names, fontsize=8)
             ax.grid(axis="x", alpha=.2)
-        fig.tight_layout()
+        if kind != "map":
+            fig.tight_layout()
         buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+        fig.savefig(buffer, format="png", dpi=150, bbox_inches=None if kind == "map" else "tight")
         return {key: job[key] for key in ("run_id", "figure_id", "analytical_fingerprint")} | {
             "image": base64.b64encode(buffer.getvalue()).decode("ascii"),
-            "metadata": {"labels": names, "values": values, "title": ax.get_title()}}
+            "metadata": metadata if metadata is not None else {"labels": names, "values": values, "title": ax.get_title()}}
     finally:
         fig.clear()
 

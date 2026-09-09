@@ -52,6 +52,7 @@ class MFIMapLabelInput:
     latitude: float
     selection_order: int
     score_rank: int
+    market_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class MFIMapCalloutPlacement:
     offset_points: tuple[float, float]
     bbox_pixels: tuple[float, float, float, float]
     used_edge_lane: bool = False
+    market_key: str | None = None
 
 
 def validate_dimension_chart_coverage(
@@ -173,6 +175,7 @@ def place_map_callouts(
     values: Sequence[MFIMapLabelInput],
     *,
     maximum: int = MAP_LABEL_MAX,
+    use_selection_numbers: bool = False,
 ) -> tuple[MFIMapCalloutPlacement, ...]:
     """Place small numbered callouts without moving the underlying market points.
 
@@ -194,6 +197,8 @@ def place_map_callouts(
     placements: list[MFIMapCalloutPlacement] = []
 
     for number, item in enumerate(selected, start=1):
+        if use_selection_numbers:
+            number = int(item.selection_order)
         anchor_x, anchor_y = ax.transData.transform(
             (float(item.longitude), float(item.latitude))
         )
@@ -255,6 +260,7 @@ def place_map_callouts(
                 offset_points=(offset_x, offset_y),
                 bbox_pixels=box,
                 used_edge_lane=used_edge_lane,
+                market_key=item.market_key,
             )
         )
 
