@@ -1480,6 +1480,7 @@ class MFIReportStatusOutput(BaseModel):
     active_task: Optional[str] = None
     last_error: Optional[str] = None
     recovery_storage: Optional[str] = None
+    recovery_limitation: Optional[str] = None
     resumable: bool = False
     resume_block_reason: Optional[str] = None
     draft_available: bool = False

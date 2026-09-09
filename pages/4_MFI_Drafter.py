@@ -150,6 +150,8 @@ def _recovery_panel(active_run):
         return
     try:
         status = request_json("GET", f"/mfi-drafter/status/{active_run}", timeout=30)
+        if status.get("recovery_limitation"):
+            st.caption(status["recovery_limitation"])
         if status.get("status") == "completed":
             if st.session_state.get("mfi_last_result") is None:
                 st.session_state["mfi_last_result"] = request_json("GET", f"/mfi-drafter/result/{active_run}", timeout=120)

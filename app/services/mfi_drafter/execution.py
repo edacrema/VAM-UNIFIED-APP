@@ -1,4 +1,4 @@
-"""MFI-only durable execution journal, ownership fencing and resumable work.
+"""MFI execution journal on the application's existing run storage backend.
 
 Objects are committed before their references. Firestore transactions contain
 only manifests; no model, network upload or report calculation runs in them.
@@ -9,7 +9,6 @@ import copy
 import contextvars
 import hashlib
 import json
-import os
 import threading
 import time
 import uuid
@@ -27,7 +26,7 @@ class RecoveryError(RuntimeError):
 
 
 class MemoryRecoveryStore:
-    """Explicit process-local test/development backend, never restart-durable."""
+    """Process-local backend for existing memory deployments and local tests."""
     durable = False
 
     def __init__(self):
@@ -147,11 +146,15 @@ _current: contextvars.ContextVar[Any] = contextvars.ContextVar("mfi_execution", 
 
 
 def recovery_store():
+    """Reuse the existing backend selection without requiring cloud resources.
+
+    Memory checkpoints live only in this process, including on Cloud Run.
+    Once durable storage is selected, its errors propagate instead of creating
+    a separate memory journal that other workers could not recover.
+    """
     from app.shared.async_runs import _use_durable_store
-    if _use_durable_store() or (os.getenv("RUNS_GCS_URI", "").startswith("gs://") and os.getenv("RUNS_BACKEND") != "memory"):
+    if _use_durable_store():
         return CloudRecoveryStore()
-    if os.getenv("K_SERVICE"):
-        raise RecoveryError("Cloud MFI execution requires the durable Firestore/GCS backend")
     return _memory
 
 
@@ -356,5 +359,8 @@ def execution_status(run_id, store=None, *, runtime=None):
             "resumable", "resume_block_reason", "draft_revision", "analysis_available", "active_task", "last_error")},
             "draft_available": value.get("draft_revision") is not None,
             "recovery_storage": "durable" if store.durable else "process_local",
+            "recovery_limitation": None if store.durable else (
+                "Saved progress and Resume are available only in the same server process. "
+                "A server restart or a request routed to another instance cannot recover this run."),
             "qa_evaluation_status": "evaluated" if reviewed else "not_evaluated", "unresolved_counts": qa_counts,
             "work_totals": {"planned": len(latest), "pending": totals["planned"], **{key: totals[key] for key in ("running", "succeeded", "failed")}}}

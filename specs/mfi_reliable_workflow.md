@@ -15,13 +15,15 @@ Rendering launches a dedicated Python module, so it cannot re-execute Streamlit'
 
 Stored scores, formula tolerances, unweighted means, the exact 15-market selection rule, Haiti's six MFIr exclusions, recommendation restrictions and the existing final unverified-number delivery policy remain in force.
 
-## Storage and deployment prerequisites
+## Storage and deployment compatibility
 
-Cloud execution requires the existing Firestore/GCS backend: `RUNS_BACKEND=firestore_gcs` and `RUNS_GCS_URI=gs://<existing-bucket>/<prefix>`. Retain the configured `RUNS_FIRESTORE_DATABASE` and `RUNS_FIRESTORE_COLLECTION`. The execution identity needs read/write access to the existing run collection and the GCS prefix. Checkpoints are stored under each run's `mfi/checkpoint` subdocument; immutable objects use the `mfi-recovery` prefix. Failed durable writes block progress. Full-prompt capture is not enabled.
+MFI uses the application's existing async-run backend selection on both local hosts and Cloud Run. Existing memory deployments need no new environment variables or services. The original reliable-workflow release introduced a cloud-only durable-storage requirement; that restriction has been removed to preserve the previous deployment configuration. No deployment resource, billing or shared-service backend behavior is changed.
 
-The local memory backend explicitly reports `process_local`; it supports same-process recovery tests, not recovery after a process restart. No new run should be submitted in a cloud deployment lacking durable storage.
+With no run-storage configuration, or with `RUNS_BACKEND=memory`, checkpoints use memory. Status reports `recovery_storage=process_local` and a `recovery_limitation` displayed beside the run in Streamlit. Completed work and incomplete drafts can be reused while the same server process remains available; recovery after a process restart or on another instance is unavailable. A run URL identifies the run but does not make its storage persistent. An in-process model failure can still be resumed manually without repeating committed work.
 
-Cloud Run background execution requires instance-based billing with CPU available outside requests. Verify that setting before testing. Google documents this requirement in its [background activity guidance](https://docs.cloud.google.com/run/docs/tips/general#background_activity). Instance termination can still occur; expired leases become interrupted runs and require manual Resume. Status polling never schedules work.
+Already configured Firestore/GCS deployments continue using their existing `RUNS_BACKEND`, `RUNS_GCS_URI`, `RUNS_FIRESTORE_DATABASE` and `RUNS_FIRESTORE_COLLECTION` settings. Backend aliases, URI autodetection and configuration normalization remain those of the shared async-run service. The execution identity needs read/write access to the existing run collection and GCS prefix. Checkpoints are stored under each run's `mfi/checkpoint` subdocument; immutable objects use the `mfi-recovery` prefix. Once the durable backend is selected, failed durable operations block progress rather than diverting that run to memory. Full-prompt capture is not enabled.
+
+Background execution remains subject to the existing Cloud Run CPU and instance lifecycle settings. Google's [background activity guidance](https://docs.cloud.google.com/run/docs/tips/general#background_activity) describes CPU availability outside requests; this compatibility fix does not change billing or provision resources. Restart recovery requires an existing durable backend. Status polling never schedules work.
 
 A run records the contract bundle, methodology, schemas, claim identity version, model/runtime configuration and dependency versions. Resume rejects incompatible bundles/configurations and changed inputs. Rollback affects new submissions; preserved checkpoints remain non-resumable where the recorded bundle is unsupported. Historical failures without checkpoints, including `mfi_3523f014`, cannot be reconstructed from diagnostic logs.
 
@@ -34,7 +36,7 @@ Existing generation/status/result/artifact/final-DOCX interfaces remain. New rou
 - `POST /mfi-drafter/export-draft-docx/{run_id}` with optional `snapshot_revision`: a `DRAFT-` DOCX with the incomplete label in its title and page headers. Export does not publish, change QA or unlock final export.
 - `GET /mfi-drafter/analysis/{run_id}`: validated analytical data as soon as analysis is saved.
 
-Status adds workflow/run revisions, execution state, resumability/reason, draft revision, analytical availability and evaluated QA counts. The original pending/running/completed/failed status vocabulary is preserved. Both API and in-process Streamlit use the same execution journal, recovery and export service.
+Status adds workflow/run revisions, execution state, resumability/reason, recovery storage and its limitations, draft revision, analytical availability and evaluated QA counts. The original pending/running/completed/failed status vocabulary is preserved. Both API and in-process Streamlit use the same execution journal, recovery and export service.
 
 ## Verification and release gate
 
@@ -46,10 +48,12 @@ Windows verification on 8 September 2026: the full MFI/shared sweep returned 840
 
 Before promotion, run the same tests inside the Python 3.11 Linux container, installing the project's test runner if necessary. The implementation host's Docker Linux engine was unavailable, so Linux execution has not been certified locally.
 
+Storage compatibility verification on 9 September 2026: 87 targeted API, Streamlit-dispatch, recovery, delivery and shared-service tests passed, including Benin CSV submission under the previous Cloud Run memory configuration. Both Benin/Haiti analytical baseline checks also passed. The cloud-only 503 was reproduced before the fix. These checks use local execution and mocked model/cloud boundaries; no live generation or infrastructure change was performed.
+
 The owner will run live validation after the commit/push:
 
 1. Submit Benin and Haiti in a test deployment. Confirm 53 and 68 Full-MFI markets respectively, with six Haiti exclusions. Check unchanged priority ordering and scores against the baseline.
 2. Inspect every dimension's main-body/annex coverage. Verify Service at/below median = 37/53, Infrastructure below 3 = 7, and Oueme Food Quality mean = 4.79. Inspect the DOCX and all chart labels.
-3. Stop a worker after completed narrative batches. Wait for lease expiry; reopen the run URL; download the marked draft; Resume once. Verify that saved batches/figures are reused and call IDs are preserved.
+3. Inject a generation failure after completed narrative batches; download the marked draft and Resume once in the same server process. Verify saved batches/figures and call IDs are reused. Where a durable backend is already configured, additionally stop the server, wait for lease expiry and verify recovery on a new process; that restart check does not apply to memory deployments.
 4. Repeat an identical Resume idempotency key and send a stale revision. Confirm no duplicate execution and the documented conflict response. Confirm final endpoints remain locked for incomplete snapshots.
-5. Confirm durable writes, outgoing package sizes, retries, model latency, QA findings and rendering memory. Keep this as a test deployment until these live and Linux checks pass.
+5. Confirm the reported storage capability, outgoing package sizes, retries, model latency, QA findings and rendering memory; verify durable writes only where durable storage is already configured. Keep this as a test deployment until these live and Linux checks pass.
