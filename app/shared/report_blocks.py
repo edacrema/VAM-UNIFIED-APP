@@ -1065,6 +1065,10 @@ def _mfi_context_statement_is_accepted(
 
 def _mfi_context_limitation_text(code: str) -> str:
     return {
+        "context_partial_classification_unavailable": (
+            "Context limitation: some retrieved statements could not be validated. "
+            "Only accepted, source-supported statements are retained."
+        ),
         "context_retrieval_unavailable": (
             "Context limitation: contextual-document retrieval was unavailable for all "
             "configured sources."

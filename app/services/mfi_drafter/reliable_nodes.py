@@ -66,7 +66,20 @@ than three recommendations. Residual quantitative prose remains subject to QA.
             evidence = {**shared, "components": [compact_metric(m) for m in rows]}
             ids = _catalog_ids_in_value(evidence, catalog)
             return {"dimension": evidence, "claim_catalog": compact_catalog(catalog, ids)}
-        groups = bounded_groups(metrics, package, maximum_items=80, maximum_characters=125_000) or [[]]
+        from .response_contracts import request_package
+        groups = bounded_groups(metrics, lambda rows: request_package("dimension", [graph.HumanMessage(
+            content=instructions + "\n" + serialized(package(rows)))]), maximum_items=80, maximum_characters=160_000) or [[]]
+        from .execution import current_execution
+        execution = current_execution()
+        if execution:
+            def plan(value):
+                rows = value.setdefault("response_work", {})
+                for index in range(len(groups)):
+                    key = f"dimension:{name}:{index + 1}"
+                    rows.setdefault(key, {"work_id":key, "kind":"dimension", "artifact_type":"dimension",
+                        "artifact_id":name, "artifact_ids":[name], "operation":"mfi.complete_dimension.v1",
+                        "status":"planned", "issues":[], "attempts":[]})
+            execution.change(plan)
         merged = None
         for index, group in enumerate(groups):
             task_id = f"dimension:{name}:{index + 1}"
@@ -76,7 +89,8 @@ than three recommendations. Residual quantitative prose remains subject to QA.
                 return parse_dimension_narrative(payload, dimension_profile=dimension, assessment_profile=profile, strict=True)
             traced, calls = graph._invoke_json_with_one_normalization(trace=trace, model=graph.get_model(),
                 messages=[graph.HumanMessage(content=prompt)], node="dimension_drafter", operation="mfi.complete_dimension.v1",
-                artifact_type="dimension", artifact_id=name, correction_attempt=0, validator=validate, batch_id=task_id)
+                artifact_type="dimension", artifact_id=name, correction_attempt=0, validator=validate, batch_id=task_id,
+                response_contract="dimension")
             value = traced.value
             graph._record_ignored_model_identifiers(diagnostics, traced.payload)
             if merged is None:
@@ -89,6 +103,8 @@ than three recommendations. Residual quantitative prose remains subject to QA.
                 "artifact_ids": [name], "status": "completed", "call_id": traced.call_id,
                 "operation": "mfi.complete_dimension.v1", "prompt_character_count": len(prompt)}, status="completed", call_id=traced.call_id)
             narratives[name] = merged
+            if index == len(groups) - 1:
+                graph._record_artifact_mode(diagnostics, "dimensions", name, "llm")
             save_partial(state, dimension_narratives=narratives, generation_diagnostics=diagnostics, llm_diagnostics=trace.snapshot())
         graph._record_artifact_mode(diagnostics, "dimensions", name, "llm")
     from .claim_identity import canonicalize_narrative_identities

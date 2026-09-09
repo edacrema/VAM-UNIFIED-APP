@@ -95,6 +95,7 @@ class LLMRunDiagnostics(BaseModel):
     recovered_calls: int = Field(default=0, ge=0)
     failed_calls: int = Field(default=0, ge=0)
     contract_failed_calls: int = Field(default=0, ge=0)
+    response_persistence_failed_calls: int = Field(default=0, ge=0)
     payload_capture_enabled: bool = False
     payload_storage_configured: bool = False
     payload_persistence_failures: int = Field(default=0, ge=0)
@@ -534,9 +535,10 @@ class LLMTraceSession:
             recovered_calls=len(recovered),
             failed_calls=len(failed),
             contract_failed_calls=sum(
-                item.status == "failed" and item.failure_stage != "transport"
+                item.status == "failed" and item.failure_stage not in {"transport", "response_persistence"}
                 for item in calls
             ),
+            response_persistence_failed_calls=sum(item.failure_stage == "response_persistence" for item in calls),
             payload_capture_enabled=config.payload_capture_enabled,
             payload_storage_configured=config.payload_storage_configured,
             payload_persistence_failures=sum(
@@ -770,6 +772,8 @@ class LLMTraceSession:
         max_retries: Optional[int] = None,
         task_id: Optional[str] = None,
         batch_id: Optional[str] = None,
+        response_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+        response_parser: Optional[Callable[[str], Any]] = None,
     ) -> TracedLLMResult[T]:
         diagnostic, started, serialized_messages = self._start_call(
             messages=messages,
@@ -858,8 +862,19 @@ class LLMTraceSession:
                 task_id=task_id,
                 batch_id=batch_id,
             ) from exc
+        # MFI can checkpoint an extracted response before parsing/validation.
+        # Persistence failures deliberately propagate in their original class;
+        # they are not model failures and must not spend a model repair budget.
+        if response_sink is not None:
+            try:
+                response_sink({"call_id": diagnostic.call_id, "raw_text": raw_text,
+                               "response_sha256": diagnostic.response_sha256})
+            except Exception as exc:
+                self._fail(diagnostic, started=started, failure_code="llm_response_persistence_error",
+                           stage="response_persistence", exc=exc, payload=private_payload)
+                raise
         try:
-            payload = parse_json_object(raw_text)
+            payload = (response_parser or parse_json_object)(raw_text)
             diagnostic.json_parse_status = "passed"
             private_payload["processing"]["json"] = payload
         except Exception as exc:

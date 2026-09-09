@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from typing import Any
+from pydantic import ValidationError
 
 from . import schemas
 from .execution import current_execution
@@ -10,15 +11,10 @@ from .packages import bounded_groups, ensure_message_budget, serialized
 from .qa_pipeline import validate_field_patch_payload
 from .reliable_contracts import fingerprint
 
-PATCH_CONTRACTS = {
-    "context_text": schemas.MFIContextTextFieldPatch,
-    "context_classification": schemas.MFIContextClassificationFieldPatch,
-    "document_references": schemas.MFIContextDocumentsFieldPatch,
-    "claim": schemas.MFIClaimFieldPatch,
-    "claim_list": schemas.MFIClaimListFieldPatch,
-    "subsections": schemas.MFISubdimensionFieldPatch,
-    "context_withdrawal": schemas.MFIContextWithdrawalPatch,
-}
+from .response_contracts import CONTRACTS, provider_schema
+
+PATCH_CONTRACTS = {kind.removeprefix("patch_"): contract.model
+                   for kind, contract in CONTRACTS.items() if kind.startswith("patch_")}
 
 
 def patch_kind(target):
@@ -33,22 +29,7 @@ def patch_kind(target):
 
 def response_schema(kind, target_ids):
     """Provider-compatible schema derived from the same models used to validate."""
-    schema = PATCH_CONTRACTS[kind].model_json_schema()
-    definitions = schema.get("$defs", {})
-    def expand(value):
-        if isinstance(value, list):
-            return [expand(item) for item in value]
-        if not isinstance(value, dict):
-            return value
-        if "$ref" in value:
-            return expand(definitions[value["$ref"].rsplit("/", 1)[-1]])
-        if "anyOf" in value:
-            choices = [item for item in value["anyOf"] if item.get("type") != "null"]
-            if len(choices) == 1:
-                return {**expand(choices[0]), "nullable": len(choices) != len(value["anyOf"])}
-        return {key: expand(item) for key, item in value.items()
-                if key not in {"$defs", "title", "default", "additionalProperties", "minLength", "const"}}
-    replacement = expand(schema["properties"]["replacement"])
+    replacement = copy.deepcopy(provider_schema(PATCH_CONTRACTS[kind])["properties"]["replacement"])
     return {"type": "object", "required": ["patches"], "properties": {"patches": {
         "type": "array", "items": {"type": "object", "required": ["target_id", "replacement"],
         "properties": {"target_id": {"type": "string", "enum": target_ids}, "replacement": replacement}}}}}
@@ -80,7 +61,7 @@ def validate_independent_patches(payload, targets):
             PATCH_CONTRACTS[patch_kind(target)].model_validate({"replacement": replacement})
             valid[target_id] = validate_field_patch_payload({"replacement": replacement}, task=target)
         except (ValueError, TypeError) as exc:
-            errors[target_id] = str(exc)
+            errors[target_id] = serialized(exc.errors(include_url=False, include_input=False)) if isinstance(exc, ValidationError) else str(exc)
     return valid, errors, normalized
 
 
@@ -167,13 +148,16 @@ def correct_targets(*, targets, build_payload, model, trace, timeout_seconds, ma
                 ensure_message_budget(messages, schema)
                 bound = model.bind(response_mime_type="application/json", response_schema=schema)
                 def invoke():
+                    from .response_runtime import capture_correction_attempt
                     try:
-                        result = trace.invoke_json(model=bound, messages=messages, node="consolidated_correction",
+                        result = capture_correction_attempt(trace=trace, target_ids=[t["task_id"] for t in remaining],
+                            dependencies={"patch_kind":kind, "payload":payload}, attempt_index=attempt,
+                            model=bound, messages=messages, node="consolidated_correction",
                             operation=f"mfi.typed_correction.{kind}.v1", artifact_type="narrative_fields",
                             artifact_id=fingerprint([item["task_id"] for item in remaining])[:16],
                             correction_attempt=1, validator=lambda value: value,
                             timeout_seconds=timeout_seconds, max_retries=max_retries)
-                        return {"payload": result.payload, "call_id": result.call_id, "targets": remaining,
+                        return {**result, "targets": remaining,
                                 "target_fingerprints": {target["task_id"]: fingerprints[target["task_id"]] for target in remaining}}
                     except LLMCallError as exc:
                         if exc.failure_code not in {"llm_invalid_json", "llm_response_contract_error"}:
@@ -203,5 +187,7 @@ def correct_targets(*, targets, build_payload, model, trace, timeout_seconds, ma
                             kind="staged_patch", epoch_scoped=execution.force_new_corrections)
                     failures.pop(key, None)
                 failures.update(errors)
+                from .response_runtime import correction_validation
+                correction_validation(response.get("journal_work_id"), errors, normalized, list(valid))
                 remaining = [target for target in remaining if target["task_id"] in errors]
     return {"replacements": staged, "failures": failures, "normalizations": normalizations, "call_ids": call_ids}

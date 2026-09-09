@@ -928,6 +928,11 @@ def _record_ignored_model_identifiers(
 
 
 def _invoke_json_with_one_normalization(**kwargs):
+    contract = kwargs.pop("response_contract", None)
+    context = kwargs.pop("contract_context", None)
+    if contract:
+        from .response_runtime import invoke_response
+        return invoke_response(response_contract=contract, contract_context=context, **kwargs)
     from .execution import current_execution
     from .packages import ensure_message_budget
     from app.shared.llm_observability import TracedLLMResult
@@ -1858,6 +1863,8 @@ Output JSON:
             artifact_id="context_evidence",
             correction_attempt=0,
             validator=_validate_context_response,
+            response_contract="context" if (state.get("assessment_profile") or {}).get("workflow_revision") else None,
+            contract_context={"documents": {d["document_id"]: d.get("content", "") for d in source_payload}},
         )
     except LLMCallError as exc:
         diagnostics = _generation_diagnostics(state)
@@ -1901,22 +1908,26 @@ Output JSON:
     if (state.get("assessment_profile") or {}).get("workflow_revision"):
         for statement in result.get("statements", []):
             statement["passage_binding_required"] = True
+    structural_issues = traced.value.get("_structural_issues", [])
+    source_indices = traced.value.get("_source_indices")
     context_evidence, parse_flags = parse_context_evidence(
         result,
         documents=docs,
+        expected_statement_ids=[f"context.statement.{i + 1}" for i in source_indices] if source_indices is not None else None,
     )
     diagnostics = _generation_diagnostics(state)
     diagnostics["ignored_model_identifier_count"] = int(
         diagnostics.get("ignored_model_identifier_count", 0) or 0
     ) + ignored_model_identifiers
     diagnostics["context_extraction_mode"] = "llm"
-    diagnostics["context_classification_status"] = "completed"
+    diagnostics["context_classification_status"] = "degraded" if structural_issues else "completed"
     context_status = resolve_context_status(
         retriever_statuses=diagnostics.get("retrievers", {}),
         documents=docs,
         statements=context_evidence,
         extraction_mode=diagnostics["context_extraction_mode"],
-        classification_failed=False,
+        classification_failed=bool(structural_issues) and not context_evidence,
+        unresolved_statement_count=len({tuple(i["path"][:2]) for i in structural_issues}),
     )
     updates = {
         "context_evidence": context_evidence,
@@ -2502,6 +2513,8 @@ def node_market_recommendations_drafter(state: MFIReportState) -> dict:
             node="market_recommendations_drafter",
             operation=MARKET_DRAFT_OPERATION,
             artifact_type="market_batch",
+            response_contract="market" if profile.get("workflow_revision") else None,
+            contract_context={"market_names":batch["artifact_ids"]},
             artifact_id=str(batch["batch_id"]),
             correction_attempt=0,
             validator=lambda result, batch=batch: validate_market_draft_batch(
@@ -2593,6 +2606,9 @@ PRIORITY_DIMENSION_NARRATIVES:
 CLASSIFIED_CONTEXT:
 {json.dumps(context)}
 
+CONTEXT_AVAILABILITY_AND_LIMITATIONS:
+{json.dumps(state.get('context_status', {}))}
+
 CLAIM_CATALOG:
 {json.dumps(prompt_catalog)}
 
@@ -2628,6 +2644,7 @@ where CLAIM contains `text`, `claim_kind`, `metric_ids`, `document_ids`,
         artifact_type="executive_summary",
         artifact_id="executive_summary",
         correction_attempt=0,
+        response_contract="executive" if profile.get("workflow_revision") else None,
         validator=lambda result: parse_executive_narrative(
             result,
             assessment_profile=profile,
@@ -4790,6 +4807,14 @@ def node_finalize_qa(state: MFIReportState) -> dict:
 def node_finalize_delivery(state: MFIReportState) -> dict:
     """Build and validate the canonical reader payload before run completion."""
     from app.shared.report_blocks import build_mfi_report_blocks
+    from .execution import current_execution
+    from .response_runtime import public_journal
+    execution = current_execution()
+    validation = public_journal(execution.store.read(execution.run_id)) if execution else state.get("response_validation", {})
+    if any(issue.get("required") for issue in validation.get("structural_validation_issues", [])):
+        raise MFIGenerationBlockedError("mfi_structural_validation_failed",
+            "Required narrative fields remain structurally invalid; an incomplete draft may be available.",
+            stage="finalize_delivery", status_code=500)
 
     diagnostics = _generation_diagnostics(state)
     try:

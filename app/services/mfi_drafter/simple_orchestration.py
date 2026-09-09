@@ -561,7 +561,7 @@ def _market_prompt_batch(
         for key in ("subsections", "drivers", "relevant_items")
     }
     batch: Dict[str, Any] = {
-        "batch_id": f"market-draft-{_short_hash('|'.join(names))}",
+        "batch_id": f"market-draft-{_short_hash('|'.join(str(p.get('market_key') or p['market_name']) for p in projections))}",
         "batch_kind": "selected_markets",
         "sequence": sequence,
         "artifact_ids": names,
@@ -591,6 +591,16 @@ def build_budgeted_market_draft_batches(
         raise ValueError("maximum_prompt_characters must be positive")
     if assessment_profile.get("workflow_revision"):
         maximum_prompt_characters = min(maximum_prompt_characters, 140_000)
+    def within_budget(batch):
+        if int(batch["prompt_character_count"]) > maximum_prompt_characters:
+            return False
+        if assessment_profile.get("workflow_revision"):
+            from langchain_core.messages import HumanMessage
+            from .response_contracts import request_package
+            from .packages import serialized
+            batch["outgoing_character_count"] = len(serialized(request_package("market", [HumanMessage(content=batch["prompt"])])))
+            return batch["outgoing_character_count"] <= 160_000
+        return True
     projections = [
         build_market_prompt_projection(assessment_profile, profile)
         for profile in ordered_priority_market_profiles(assessment_profile)
@@ -605,7 +615,7 @@ def build_budgeted_market_draft_batches(
         )
         if (
             len(pending) < maximum_batch_size
-            and int(candidate["prompt_character_count"]) <= maximum_prompt_characters
+            and within_budget(candidate)
         ):
             pending.append(projection)
             continue
@@ -623,7 +633,7 @@ def build_budgeted_market_draft_batches(
             catalog=catalog,
             sequence=len(batches) + 1,
         )
-        if int(single["prompt_character_count"]) > maximum_prompt_characters:
+        if not within_budget(single):
             raise MarketDraftPromptContractError(
                 market_name=str(projection["market_name"]),
                 character_count=int(single["prompt_character_count"]),

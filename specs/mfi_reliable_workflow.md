@@ -2,6 +2,20 @@
 
 This revision implements the coordinated `mfi-reliable-v1` workflow for newly loaded processed CSVs. Keep `MFI_DRAFTER_ANALYSIS_VERSION=2`. Methodology remains `databridge-current`; analytical and narrative schema versions are 2.1. Existing 2.0 reports remain readable through the existing compatibility path. No SDK or model migration is included.
 
+## Response contract bundle v2
+
+New runs use `mfi-reliable-contracts-v2`. The 15-node LangGraph coordinator and its conditional correction stages remain. Context, dimension, market, executive, review and typed-patch transport schemas now share one registry. Schemas, their hashes and validated examples supply the prompt instructions and each invocation's JSON binding. The installed Vertex SDK conversion is checked explicitly; each invocation gets a detached schema because the SDK can mutate its input dictionary. No cached model client is reconfigured.
+
+The MFI invocation boundary checkpoints extracted responses before parsing and structural validation. Raw responses and staged candidates use the existing run-access/storage model and are excluded from public metadata. This does not enable global prompt capture. Invalid fields have identified paths and issues; valid claims remain staged, rather than disappearing from lists.
+
+Initial drafting and review permit one structural repair per failed target per execution epoch, in compatible groups of at most four. An unparseable response gets one syntax repair, which consumes the same allowance and must preserve its content tokens. Fields outside authorized paths cannot change; target IDs and expected field hashes are checked. Saved replies can be processed after interruption without another model call. Typed correction retains its own existing allowance without an additional nested repair loop. Transport retries, model and timeout settings are unchanged. Storage, ownership and configuration errors do not invoke format repair.
+
+Context statements are validated independently, including citation arrays and exact supplied source passages. An unresolved optional classification is disclosed as degraded, retains accepted statements and can allow generation to continue. A valid empty classification or retrieval with no results is complete. Manual Resume on an eligible failed run retries unresolved classification and keeps accepted statement identities. Changed accepted context or disclosure invalidates dependent executive/review inputs; independent analytical outputs, charts and dimension/market drafts are reused. Previously corrected context is kept distinct from the classification dependency fingerprint.
+
+Progress derives from current journal work items; model attempts remain separate from logical work. Superseded candidate reviews remain inspectable without becoming pending current work. Status adds `response_contract_bundle`, `structural_validation_issues`, `structural_repair_summary`, `degraded_work_count`, `context_classification_outcome` and `unresolved_context_statement_count`. Incomplete drafts identify partial dimensions and include accepted fragments plus unresolved-field findings. Required structural failures block final publication, including when the numerical-disclosure exception would otherwise apply.
+
+Version-1 checkpoints remain inspectable but cannot resume under bundle v2. Completed historical reports remain readable and exportable. This bundle requires no backend migration, new cloud resources or additional environment variables.
+
 ## Changes
 
 - Stable source identities, aliases, duplicate detection, source-row/value lineage, explicit date parsing, count/coordinate validation, and separate parsing/applicability states.
@@ -52,8 +66,11 @@ Storage compatibility verification on 9 September 2026: 87 targeted API, Streaml
 
 The owner will run live validation after the commit/push:
 
+Response-bundle verification on 9 September 2026: the expanded Windows MFI/shared-service sweep passed 914 tests with four existing expected failures. Subsequent focused runs passed 92 recovery/storage/observability tests and 80 contract/context/orchestration tests after the final changes. These include real response validators with malformed model stubs, the exact Availability polarity and context citation-array failures, preservation of valid fragments, capture-before-validation interruption recovery, partial-draft disclosures, context-dependent regeneration, immutable provider schemas, missing/extra market rows, and renamed-country numerical invariance. Both complete supplied CSV baselines passed. Docker's engine was unavailable; live Vertex calls and Linux container execution remain deployment validation gates.
+
 1. Submit Benin and Haiti in a test deployment. Confirm 53 and 68 Full-MFI markets respectively, with six Haiti exclusions. Check unchanged priority ordering and scores against the baseline.
 2. Inspect every dimension's main-body/annex coverage. Verify Service at/below median = 37/53, Infrastructure below 3 = 7, and Oueme Food Quality mean = 4.79. Inspect the DOCX and all chart labels.
 3. Inject a generation failure after completed narrative batches; download the marked draft and Resume once in the same server process. Verify saved batches/figures and call IDs are reused. Where a durable backend is already configured, additionally stop the server, wait for lease expiry and verify recovery on a new process; that restart check does not apply to memory deployments.
 4. Repeat an identical Resume idempotency key and send a stale revision. Confirm no duplicate execution and the documented conflict response. Confirm final endpoints remain locked for incomplete snapshots.
 5. Confirm the reported storage capability, outgoing package sizes, retries, model latency, QA findings and rendering memory; verify durable writes only where durable storage is already configured. Keep this as a test deployment until these live and Linux checks pass.
+6. Exercise a failed context classification followed by a later required-stage failure. On Resume, confirm only unresolved context fields retry, accepted statement IDs remain stable, independent drafts/charts are reused, and changed context refreshes the executive summary and review packages. A valid empty classification must not be retried.

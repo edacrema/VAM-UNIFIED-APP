@@ -442,6 +442,12 @@ def _validate_claim_payload(payload: Any, *, field: str) -> None:
     for key in ("scope", "polarity"):
         if not str(payload.get(key) or "").strip():
             raise ValueError(f"{field}.{key} is required")
+    # Validate the entire claim before list normalization, which is tolerant
+    # only for historical/non-strict callers. Preserve the exact field path.
+    try:
+        _claim_from_payload(payload, claim_id="validation", claim_kind="finding", scope="assessment")
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ValueError(f"{field}: {exc}") from exc
 
 
 def _validate_claim_list_payload(payload: Any, *, field: str) -> None:

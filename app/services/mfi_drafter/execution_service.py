@@ -12,13 +12,14 @@ from .reliable_contracts import CONTRACT_BUNDLE, WORKFLOW_REVISION
 
 
 def effective_contract():
+    from .response_contracts import contract_manifest
     from app.shared.llm import llm_runtime_config
     runtime = llm_runtime_config()
     config = runtime.model_dump() if hasattr(runtime, "model_dump") else vars(runtime)
     # Runtime config is a typed configuration object, not the environment or credentials.
     return {"bundle": CONTRACT_BUNDLE, "workflow": WORKFLOW_REVISION,
             "methodology": "databridge-current", "analysis_schema": "2.1", "narrative_schema": "2.1",
-            "claim_identity": "mfi-claim-id-v2", "runtime": config,
+            "claim_identity": "mfi-claim-id-v2", "runtime": config, "response_contracts":contract_manifest(),
             "dependencies": {name: version(name) for name in (
                 "pydantic", "langgraph", "langchain-core", "langchain-google-vertexai", "matplotlib")}}
 
@@ -71,9 +72,32 @@ def reliable_generation(function):
                 execution.finish()
                 return result
             except Exception as exc:
+                manifest = store.read(inputs["run_id"])
+                if manifest and manifest.get("snapshot_ref") and not execution.lost.is_set():
+                    execution.snapshot(load_snapshot(store, manifest["snapshot_ref"]))
                 execution.finish(exc)
                 raise
     return run
+
+
+def node_dependencies(name, state):
+    """Explicit evidence projections; diagnostics never determine analytical reuse."""
+    common = ("country", "data_collection_start", "data_collection_end")
+    analysis = ("markets_data", "metric_summaries", "survey_metadata", "methodology_version", "score_authority", "excluded_market_records", "csv_data")
+    narratives = ("dimension_narratives", "market_narratives", "executive_summary_narrative", "context_evidence", "context_status")
+    projections = {
+        "mfi_data_agent": (*common, "use_csv_data", "csv_data", "markets"),
+        "mfi_analysis": analysis,
+        "context_retrieval": common,
+        "context_extractor": (*common, "contextual_documents", "retriever_traces"),
+        "mfi_graph_designer": (*common, "assessment_profile", "markets_data", "metric_summaries", "survey_metadata"),
+        "dimension_drafter": ("assessment_profile", "claim_catalog"),
+        "market_recommendations_drafter": ("assessment_profile", "claim_catalog"),
+        "executive_summary_drafter": (*common, "assessment_profile", "claim_catalog", *narratives),
+    }
+    keys = projections.get(name, (*common, "assessment_profile", "claim_catalog", *narratives,
+        "contextual_documents", "deterministic_flags", "red_team_flags", "correction_history", "correction_attempts", "qa_review"))
+    return {key:state.get(key) for key in keys}
 
 
 def execute_node(name, state, function):
@@ -82,11 +106,56 @@ def execute_node(name, state, function):
         return function(state)
     if name == "deterministic_claim_validator" and execution.resume_candidate:
         state = {**state, **execution.resume_candidate}
-    volatile = {"llm_diagnostics", "generation_diagnostics", "current_node", "warnings", "llm_calls"}
-    dependencies = {key: value for key, value in state.items() if key not in volatile}
-    epoch_scoped = name in {"consolidated_correction", "finalize_qa", "finalize_delivery"}
-    updates = execution.execute_once(f"node:{name}", dependencies, lambda: function(state),
-                                     kind="node", epoch_scoped=epoch_scoped)
+    # Model nodes replay their own response journals, not entire graph-state caches.
+    # This also retries degraded context in a new epoch and recomputes disclosure.
+    cached_nodes = {"mfi_data_agent", "mfi_analysis", "context_retrieval", "mfi_graph_designer"}
+    if name in cached_nodes:
+        def owned():
+            result = function(state)
+            diagnostics = result.pop("generation_diagnostics", {})
+            before = state.get("generation_diagnostics", {})
+            result["_diagnostic_delta"] = {k:v for k,v in diagnostics.items() if before.get(k) != v}
+            for key in ("llm_diagnostics", "llm_calls", "current_node"):
+                result.pop(key, None)
+            return result
+        updates = execution.execute_once(f"node:{name}", node_dependencies(name,state), owned, kind="node")
+        delta = updates.pop("_diagnostic_delta", {})
+        updates["generation_diagnostics"] = {**state.get("generation_diagnostics", {}), **delta}
+    else:
+        updates = function(state)
+    if name == "context_extractor":
+        from .reliable_contracts import fingerprint
+        new_context = fingerprint([updates.get("context_evidence", []), updates.get("context_status", {})])
+        if execution.previous_context_fingerprint and execution.previous_context_fingerprint != new_context:
+            # Previously corrected candidates may contain claims about old context.
+            # Rebuild from independently cached drafts and freshly drafted context.
+            execution.resume_candidate = None
+            def invalidate(value):
+                for row in value.get("response_work", {}).values():
+                    if row["kind"] in {"review", "correction"}:
+                        row["status"] = "superseded"
+            execution.change(invalidate)
+        def context_outcome(value):
+            value["context_dependency_fingerprint"] = new_context
+            rows = value.setdefault("response_work", {})
+            if not any(r["kind"] == "context" for r in rows.values()):
+                rows["context:context_evidence"] = {"work_id":"context:context_evidence", "kind":"context",
+                    "operation":"mfi.context_classification.v1", "status":"succeeded", "issues":[], "attempts":[],
+                    "artifact_id":"context_evidence", "skip_reason":"no_documents"}
+            if (updates.get("generation_diagnostics") or {}).get("context_classification_status") == "failed":
+                for row in rows.values():
+                    if row["kind"] == "context" and row["status"] == "failed":
+                        row["status"] = "degraded"
+        execution.change(context_outcome)
+    from .response_runtime import public_journal, plan_drafts
+    profile = updates.get("assessment_profile") or state.get("assessment_profile")
+    if name == "mfi_analysis":
+        plan_drafts(execution, profile, updates.get("claim_catalog", state.get("claim_catalog", {})))
+    manifest = execution.store.read(execution.run_id)
+    if manifest.get("response_work"):
+        updates["generation_diagnostics"] = {**state.get("generation_diagnostics", {}), **updates.get("generation_diagnostics", {}), **public_journal(manifest)}
+        updates["llm_calls"] = manifest.get("model_attempt_total", state.get("llm_calls", 0))
+    updates["current_node"] = name
     snapshot = dict(state)
     snapshot.update(updates)
     execution.snapshot(snapshot)
@@ -96,7 +165,9 @@ def execute_node(name, state, function):
 def save_partial(state, **updates):
     execution = current_execution()
     if execution:
-        execution.snapshot({**state, **updates})
+        from .response_runtime import public_journal
+        diagnostics = {**state.get("generation_diagnostics", {}), **updates.get("generation_diagnostics", {}), **public_journal(execution.store.read(execution.run_id))}
+        execution.snapshot({**state, **updates, "generation_diagnostics":diagnostics})
 
 
 def get_mfi_run(run_id):
@@ -114,6 +185,11 @@ def get_mfi_run(run_id):
     run = deepcopy(run) if run is not None else RunRecord(metadata={"workflow_revision": WORKFLOW_REVISION})
     run.metadata = dict(run.metadata or {})
     diagnostics = dict(run.metadata.get("generation_diagnostics") or {})
+    if manifest.get("response_work"):
+        from .response_runtime import public_journal
+        diagnostics.update(public_journal(manifest))
+    if manifest.get("trace_ref"):
+        run.metadata["llm_diagnostics"] = store.get(manifest["trace_ref"])
     diagnostics["qa_evaluation_status"] = manifest.get("qa_evaluation_status", "not_evaluated")
     if manifest.get("qa_evaluation_status") != "evaluated":
         for field in ("unresolved_high_count", "unresolved_medium_count", "unresolved_low_count", "blocking_high_count"):

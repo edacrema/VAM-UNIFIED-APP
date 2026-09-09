@@ -131,6 +131,7 @@ def resolve_context_status(
     extraction_mode: str = "not_started",
     classification_failed: bool = False,
     intentionally_not_attempted: bool = False,
+    unresolved_statement_count: int = 0,
 ) -> MFIContextStatus:
     """Resolve one public status from stable retrieval, classification, and QA data."""
     if intentionally_not_attempted:
@@ -182,6 +183,8 @@ def resolve_context_status(
         limitation_code = "context_partial_retrieval_unavailable"
 
     mode = extraction_mode if extraction_mode in _EXTRACTION_MODES else "fallback"
+    if unresolved_statement_count:
+        limitation_code = "context_partial_classification_unavailable"
     return MFIContextStatus(
         status=overall,
         retrievers=retrievers,
@@ -190,6 +193,8 @@ def resolve_context_status(
         final_accepted_statements=accepted,
         extraction_mode=mode,
         limitation_code=limitation_code,
+        classification_outcome="degraded" if unresolved_statement_count else "failed" if classification_failed else "completed" if total and mode == "llm" else "not_started",
+        unresolved_statement_count=unresolved_statement_count,
     )
 
 
@@ -213,4 +218,5 @@ def reconcile_context_status(
         statements=statements,
         extraction_mode=current.extraction_mode,
         classification_failed=current.status == "classification_failed",
+        unresolved_statement_count=current.unresolved_statement_count,
     )

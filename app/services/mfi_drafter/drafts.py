@@ -28,7 +28,7 @@ def draft_payload(run_id, revision=None, *, store=None):
     generated = datetime.now(timezone.utc).isoformat()
     flags = {str(flag.get("flag_id")): flag for flag in [*state.get("deterministic_flags", []),
         *state.get("red_team_flags", []), *(state.get("qa_review") or {}).get("flags", [])]}
-    findings = list(flags.values())
+    findings = [*flags.values(), *(state.get("response_validation") or {}).get("structural_validation_issues", [])]
     affected = {flag.get("claim_id") for flag in findings}
     reviewed = (state.get("generation_diagnostics") or {}).get("red_team_status") == "completed"
     blocks = [ReportBlock(type="heading", text=DRAFT_LABEL, level=1),
@@ -39,7 +39,9 @@ def draft_payload(run_id, revision=None, *, store=None):
     for dim in dimensions:
         name = dim["dimension"]
         complete = bool(state.get("dimension_narratives", {}).get(name))
-        blocks.append(ReportBlock(type="paragraph", text=f"{name}: {'generated' if complete else 'not yet generated'}; {'review attempted — see findings' if reviewed else 'not yet reviewed'}."))
+        work = [r for r in (state.get("response_validation") or {}).get("draft_batches", []) if name in r["artifact_ids"]]
+        partial = bool(work) and not all(r["status"] == "completed" for r in work) and (complete or any(r.get("artifact_id") == name and r["fragments"] for r in state.get("staged_response_fragments", [])))
+        blocks.append(ReportBlock(type="paragraph", text=f"{name}: {'partially generated — unresolved components' if partial else 'generated' if complete else 'not yet generated'}; {'review attempted — see findings' if reviewed else 'not yet reviewed'}."))
     def claims(value):
         if isinstance(value, dict):
             if "text" in value and ("claim_id" in value or "statement_id" in value):
@@ -59,6 +61,10 @@ def draft_payload(run_id, revision=None, *, store=None):
             claim_id = claim.get("claim_id") or claim.get("statement_id")
             marker = "[UNRESOLVED FINDING] " if claim_id in affected else "[NOT YET REVIEWED] " if not reviewed else ""
             blocks.append(ReportBlock(type="paragraph", text=marker + str(claim.get("text", "")), meta={"claim_id": claim_id}))
+    for artifact in state.get("staged_response_fragments", []):
+        blocks.append(ReportBlock(type="heading", text=f"Partial response: {artifact['artifact_id']}", level=2))
+        for fragment in artifact["fragments"]:
+            blocks.append(ReportBlock(type="paragraph", text="[PARTIAL / NOT YET REVIEWED] " + fragment["value"]["text"]))
     if state.get("assessment_profile"):
         blocks.extend(annex_blocks(state))
     charts = {}
@@ -77,7 +83,7 @@ def draft_payload(run_id, revision=None, *, store=None):
     if not findings:
         blocks.append(ReportBlock(type="paragraph", text="No findings have been recorded at this snapshot. This does not establish that review or final validation is complete."))
     for finding in findings:
-        blocks.append(ReportBlock(type="qa_warning", text=f"{finding.get('severity', 'unknown').upper()} — {finding.get('claim_id') or finding.get('artifact_id')}: {finding.get('message')}", meta={"finding": finding}))
+        blocks.append(ReportBlock(type="qa_warning", text=f"{finding.get('severity', 'unknown').upper()} — {finding.get('claim_id') or finding.get('artifact_id')} {finding.get('path', '')}: {finding.get('message')}", meta={"finding": finding}))
     blocks = _apply_mfi_layout_contract(blocks, country=state.get("country", ""), methodology_version="databridge-current")
     coverage = evaluate_coverage(state.get("assessment_profile", {}), blocks, state.get("dimension_narratives", {}))
     return {"run_id": run_id, "snapshot_revision": revision, "generated_at": generated, "label": DRAFT_LABEL,

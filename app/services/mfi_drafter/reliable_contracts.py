@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 WORKFLOW_REVISION = "mfi-reliable-v1"
-CONTRACT_BUNDLE = "mfi-reliable-contracts-v1"
+CONTRACT_BUNDLE = "mfi-reliable-contracts-v2"
 MAX_PACKAGE_CHARACTERS = 160_000
 
 

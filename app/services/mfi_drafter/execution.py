@@ -227,10 +227,12 @@ class Execution:
         self.lost = threading.Event()
         previous = store.read(run_id) or {}
         self.resume_candidate = None
+        self.previous_context_fingerprint = None
         self.object_references = {}
         self.force_new_corrections = "finalize" in str(previous.get("active_task", ""))
         if reservation.get("epoch", 1) > 1 and previous.get("snapshot_ref"):
             saved = load_snapshot(store, previous["snapshot_ref"])
+            self.previous_context_fingerprint = previous.get("context_dependency_fingerprint") or fingerprint([saved.get("context_evidence", []), saved.get("context_status", {})])
             if saved.get("correction_attempts"):
                 self.resume_candidate = {key: saved[key] for key in (
                     "dimension_narratives", "market_narratives", "executive_summary_narrative", "context_evidence") if key in saved}
@@ -257,6 +259,12 @@ class Execution:
         def commit(value):
             value["trace_ref"] = ref
             active = value.get("active_task")
+            response = value.get("response_work", {}).get(active)
+            if response and response.get("attempts") and response["status"] in {"running", "repairing"} and not response["attempts"][-1].get("call_id"):
+                current = next((call for call in reversed(trace.get("calls", [])) if call.get("status") == "started"), None)
+                if current:
+                    response["call_id"] = current["call_id"]
+                    response["attempts"][-1]["call_id"] = current["call_id"]
             for record in value["tasks"].values():
                 if record["task_id"] == active and record["status"] == "running":
                     call_ids = [call["call_id"] for call in trace.get("calls", []) if call.get("status") == "started"]
@@ -304,6 +312,15 @@ class Execution:
             raise
 
     def snapshot(self, state):
+        from .response_runtime import public_journal
+        state = dict(state)
+        manifest = self.store.read(self.run_id)
+        if manifest.get("response_work"):
+            state["response_validation"] = public_journal(manifest)
+            state["llm_calls"] = manifest.get("model_attempt_total", state.get("llm_calls", 0))
+            state["staged_response_fragments"] = [{"work_id":r["work_id"], "artifact_id":r.get("artifact_id"), "kind":r["kind"],
+                "fragments":self.store.get(r["fragments_ref"])} for r in manifest["response_work"].values()
+                if r.get("fragments_ref") and r["status"] != "succeeded" and r["kind"] in {"dimension","market","executive"}]
         def reference(value):
             key = fingerprint(value)
             if key not in self.object_references:
@@ -320,7 +337,7 @@ class Execution:
             value["qa_evaluation_status"] = "evaluated" if reviewed else "not_evaluated"
             flags = {flag["flag_id"]: flag for flag in [*state.get("deterministic_flags", []), *state.get("red_team_flags", [])]}
             value["unresolved_counts"] = dict(Counter(flag["severity"] for flag in flags.values())) if reviewed else None
-            if state.get("dimension_narratives") or state.get("market_narratives") or state.get("executive_summary_narrative"):
+            if state.get("dimension_narratives") or state.get("market_narratives") or state.get("executive_summary_narrative") or any(r["fragments"] for r in state.get("staged_response_fragments", [])):
                 value["draft_revision"] = value["run_revision"] + 1
                 value.setdefault("snapshots", {})[str(value["draft_revision"])] = ref
         self.change(commit)
@@ -355,6 +372,8 @@ def execution_status(run_id, store=None, *, runtime=None):
     totals = Counter(row["status"] for row in latest.values())
     reviewed = value.get("qa_evaluation_status") == "evaluated"
     qa_counts = value.get("unresolved_counts")
+    from .response_runtime import public_journal
+    response = public_journal(value) if value.get("response_work") else {}
     return {**{key: value.get(key) for key in ("workflow_revision", "run_revision", "execution_state",
             "resumable", "resume_block_reason", "draft_revision", "analysis_available", "active_task", "last_error")},
             "draft_available": value.get("draft_revision") is not None,
@@ -363,4 +382,6 @@ def execution_status(run_id, store=None, *, runtime=None):
                 "Saved progress and Resume are available only in the same server process. "
                 "A server restart or a request routed to another instance cannot recover this run."),
             "qa_evaluation_status": "evaluated" if reviewed else "not_evaluated", "unresolved_counts": qa_counts,
-            "work_totals": {"planned": len(latest), "pending": totals["planned"], **{key: totals[key] for key in ("running", "succeeded", "failed")}}}
+            **{key:response.get(key) for key in ("structural_validation_issues", "structural_repair_summary", "degraded_work_count", "context_classification_outcome", "unresolved_context_statement_count")},
+            "response_contract_bundle":value["contract_bundle"],
+            "work_totals": response.get("response_work_totals") or {"planned": len(latest), "pending": totals["planned"], **{key: totals[key] for key in ("running", "succeeded", "failed")}}}

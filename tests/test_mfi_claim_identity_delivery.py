@@ -447,10 +447,20 @@ class _RepeatedIdModel:
             }
             if "Analyse this MFI dimension" in prompt:
                 payload = narrative
+        if "RESPONSE_CONTRACT" in prompt:
+            # New transport forbids application metadata; historical parser tests
+            # above still exercise repeated model IDs through the legacy adapter.
+            def transport(value):
+                if isinstance(value, dict):
+                    return {k:transport(v) for k,v in value.items() if k != "claim_id"}
+                if isinstance(value, list):
+                    return [transport(v) for v in value]
+                return value
+            payload = transport(payload)
         return type("Response", (), {"content": json.dumps(payload)})()
 
 
-def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
+def test_full_graph_application_owned_ids_complete_retrieve_and_export(
     monkeypatch,
 ) -> None:
     loaded = build_loaded(SyntheticSpec(market_count=1, region_count=1))
@@ -525,7 +535,7 @@ def test_full_graph_duplicate_model_ids_complete_retrieve_and_export(
     )
     assert index
     assert "stable id" not in index
-    assert result["generation_diagnostics"]["ignored_model_identifier_count"] > 0
+    assert result["generation_diagnostics"]["ignored_model_identifier_count"] == 0
     assert result["generation_diagnostics"]["identity_fallback_artifacts"] == []
     assert result["generation_diagnostics"]["red_team_status"] == "completed"
     assert any(

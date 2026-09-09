@@ -651,6 +651,7 @@ MFIContextLimitationCode = Literal[
     "context_retrieval_unavailable",
     "context_partial_retrieval_unavailable",
     "context_classification_unavailable",
+    "context_partial_classification_unavailable",
 ]
 
 
@@ -682,6 +683,8 @@ class MFIContextStatus(BaseModel):
         "offline",
     ] = "not_started"
     limitation_code: Optional[MFIContextLimitationCode] = None
+    classification_outcome: Literal["not_started", "completed", "degraded", "failed"] = "not_started"
+    unresolved_statement_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_context_status(self) -> "MFIContextStatus":
@@ -756,6 +759,10 @@ class MFIContextStatus(BaseModel):
             and self.total_deduplicated_documents_retrieved
         ):
             expected_limitation = "context_partial_retrieval_unavailable"
+        if self.unresolved_statement_count:
+            if self.classification_outcome != "degraded" or not self.total_deduplicated_documents_retrieved:
+                raise ValueError("Unresolved classification requires a degraded result and retrieved documents")
+            expected_limitation = "context_partial_classification_unavailable"
         if self.limitation_code != expected_limitation:
             raise ValueError(
                 "limitation_code is inconsistent with the context outcome"
@@ -1489,6 +1496,12 @@ class MFIReportStatusOutput(BaseModel):
     qa_evaluation_status: str = "not_evaluated"
     unresolved_counts: Optional[Dict[str, int]] = None
     work_totals: Dict[str, int] = Field(default_factory=dict)
+    response_contract_bundle: Optional[str] = None
+    structural_validation_issues: Optional[List[Dict[str, Any]]] = None
+    structural_repair_summary: Optional[Dict[str, Any]] = None
+    degraded_work_count: Optional[int] = None
+    context_classification_outcome: Optional[str] = None
+    unresolved_context_statement_count: Optional[int] = None
     status: Literal["pending", "running", "completed", "failed"]
     current_node: Optional[str] = None
     progress_pct: int = 0
