@@ -30,6 +30,15 @@ def answer(*ids, text="Supported prose."):
     return {"sections": [{"section_id": sid, "text_markdown": text} for sid in ids], "notes": []}
 
 
+def test_active_prompts_are_isolated_from_legacy_recommendation_policy(monkeypatch):
+    from app.services.mfi_drafter import light_contracts, methodology
+    nodes = [n for n in light_contracts.NODES
+             if n.startswith(("draft_", "review_", "correct_")) or n == "executive_summary"]
+    before = {node: instructions(node) for node in nodes}
+    monkeypatch.setattr(methodology, "NARRATIVE_PROHIBITIONS", ("Legacy-only policy change.",))
+    assert {node: instructions(node) for node in nodes} == before
+
+
 @pytest.fixture
 def runtime(monkeypatch):
     store = execution.MemoryRecoveryStore()
@@ -38,6 +47,27 @@ def runtime(monkeypatch):
     worker = execution.Execution(store, "response", execution.reserve_execution(store, "response", runtime=contract))
     monkeypatch.setattr(light_runtime.time, "sleep", lambda _: None)
     return store, worker
+
+
+@pytest.mark.parametrize("policy_name", ["RECOMMENDATION_POLICY", "ANALYSIS_POLICY", "STYLE_POLICY"])
+def test_shared_policy_change_blocks_resume_without_changing_checkpoint(runtime, monkeypatch, policy_name):
+    from app.services.mfi_drafter import light_contracts
+    store, worker = runtime
+    worker.finish(ValueError("Interrupted before completion"))
+    before = store.read("response")
+    old_contract = light_service.effective_contract()
+    monkeypatch.setattr(light_contracts, policy_name,
+                        getattr(light_contracts, policy_name) + "\nRevised shared guidance.")
+    new_contract = light_service.effective_contract()
+    assert new_contract["schema_hashes"] == old_contract["schema_hashes"]
+    assert len(new_contract["prompt_hashes"]) == 7
+    assert all(value != old_contract["prompt_hashes"][node]
+               for node, value in new_contract["prompt_hashes"].items())
+    status = execution.execution_status("response", store, runtime=new_contract)
+    assert not status["resumable"] and "incompatible" in status["resume_block_reason"]
+    with pytest.raises(execution.RecoveryError, match="incompatible"):
+        execution.reserve_execution(store, "response", runtime=new_contract)
+    assert store.read("response") == before
 
 
 def invoke(worker, client):
